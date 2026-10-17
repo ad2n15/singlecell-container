@@ -66,6 +66,7 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
     let gain = |w: f64, kv: f64, sl: f64, k_c: f64| (w + sl) - resolution * kv * (2.0 * k_c + kv) / four_m;
     let mut batch = Vec::with_capacity(batch_len);
     let mut proposals = Vec::with_capacity(batch_len);
+    let mut wake = Vec::new();
     while !queue.is_empty() && moves < budget {
         batch.clear();
         batch.extend(queue.drain(..batch_len.min(queue.len())));
@@ -109,6 +110,7 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             let old = membership[v];
             let (kv, sl) = (strength[v], self_loop[v]);
             let (mut w_old, mut w_target) = (0.0, 0.0);
+            wake.clear();
             for (u, w) in graph.neighbors(v) {
                 if u != v {
                     let c = membership[u];
@@ -116,6 +118,10 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                         w_old += w;
                     } else if c == target {
                         w_target += w;
+                    }
+                    // only neighbours outside the new community can have gone unstable
+                    if c != target && !queued[u] {
+                        wake.push(u as u32);
                     }
                 }
             }
@@ -143,12 +149,10 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                 free.push(old);
             }
             moves += 1;
-            for (u, _) in graph.neighbors(v) {
-                if u != v && !queued[u] && membership[u] != target {
-                    queued[u] = true;
-                    queue.push_back(u as u32);
-                }
+            for &u in &wake {
+                queued[u as usize] = true;
             }
+            queue.extend(&wake);
         }
     }
     membership.iter().map(|&c| c as usize).collect()
