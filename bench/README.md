@@ -35,6 +35,24 @@ Synthetic data is fine for timing and for testing the harness; use real data for
 
 The report ends up in `bench/results/<name>/report.md`.
 
+## Running in a container (100k and larger)
+
+`bench/docker/` builds an image with a current Seurat (5.1 or later, so Leiden runs through
+`leidenbase` and does not build a dense cells x cells matrix), Scanpy and the scfast wheel,
+then generates a synthetic dataset and runs the harness. It has not been built in CI yet, so
+the first build may need small fixes.
+
+```bash
+CELLS=100000 THREADS=8 MEM=48g bash bench/docker/run.sh                # full pipeline
+CELLS=100000 THREADS=8 MEM=48g SKIP_UMAP=1 bash bench/docker/run.sh    # without UMAP
+```
+
+Variables: `CELLS`, `GENES`, `TYPES`, `THREADS`, `REPS`, `ENGINES`
+(default `seurat,scanpy,scfast-cpu`), `NAME`, `TIMEOUT`, `SKIP_UMAP`, and for the container
+`MEM` and `CPUS`. Results land in `bench/results/<name>/` on the host (`report.md`,
+`results.jsonl`, plots). Give the container real resources and nothing else to compete with:
+timings and peak memory are only comparable when `THREADS` matches the CPUs it can use.
+
 ## `run_bench.sh` options
 
 | Option | Default | Meaning |
