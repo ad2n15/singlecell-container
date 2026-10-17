@@ -1,5 +1,11 @@
 # Seurat v5 starter: PBMC 3k (10x Genomics) end-to-end
 suppressPackageStartupMessages({ library(Seurat); library(ggplot2); library(patchwork); library(dplyr) })
+
+
+if (!dir.exists("filtered_gene_bc_matrices")) {
+  dir.create("~/seurat-workspace")
+}
+
 setwd("~/seurat-workspace"); dir.create("plots", showWarnings = FALSE)
 
 # 1. Data
