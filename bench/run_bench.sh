@@ -64,8 +64,14 @@ for ds in "${DATASETS[@]}"; do
     set -e
     if [[ $rc -ne 0 ]]; then
       echo "!! $eng $ds exited with $rc; not running $eng at larger sizes"
-      [[ $rc -eq 124 ]] && printf '{"schema":"1.0","engine":"%s","dataset":"%s","cells":%s,"rep":-1,"warmup":false,"step":"all","kind":"compute","status":"error","error":"timeout after %ss","wall_s":null}\n' \
-        "$eng" "$ds" "${ds#n}" "$TIMEOUT" >> "$RUN/results.jsonl"
+      # Runners record their own step errors (exit 1); a timeout or a kill leaves no record, so write one.
+      why=""
+      if [[ $rc -eq 124 ]]; then why="timeout after ${TIMEOUT}s"
+      elif [[ $rc -eq 137 ]]; then why="killed (SIGKILL, exit 137; likely out of memory)"
+      elif [[ $rc -gt 128 ]]; then why="killed by signal $((rc - 128)) (exit $rc)"
+      fi
+      [[ -n "$why" ]] && printf '{"schema":"1.0","engine":"%s","dataset":"%s","cells":%s,"rep":-1,"warmup":false,"step":"all","kind":"compute","status":"error","error":"%s","wall_s":null}\n' \
+        "$eng" "$ds" "${ds#n}" "$why" >> "$RUN/results.jsonl"
       STOPPED[$eng]=1
     fi
   done

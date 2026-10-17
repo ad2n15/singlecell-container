@@ -86,6 +86,29 @@ def fmt(x, nd=2):
     return f"{x:.{nd}f}"
 
 
+def _cells_label(n: float) -> str:
+    n = int(round(n))
+    if n >= 1_000_000 and n % 100_000 == 0:
+        return f"{n / 1e6:g}M"
+    if n >= 1_000 and n % 100 == 0:
+        return f"{n / 1e3:g}k"
+    return f"{n:,}"
+
+
+def _log_axes(ax, sizes) -> None:
+    """Log-log axes with x ticks at the benchmarked sizes and plain numbers, so labels do not collide."""
+    from matplotlib.ticker import FixedLocator, FuncFormatter, LogLocator, NullFormatter
+
+    ax.set_xscale("log"); ax.set_yscale("log")
+    ax.xaxis.set_major_locator(FixedLocator(sizes))
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _: _cells_label(v)))
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    # y: labelled ticks at 1-2-5 per decade as plain numbers (0.2, 5, 50), never 2 x 10^-1
+    ax.yaxis.set_major_locator(LogLocator(base=10, subs=(1.0, 2.0, 5.0)))
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+
+
 def plots(summary: pd.DataFrame, tot: pd.DataFrame, run: Path) -> list[str]:
     import matplotlib
 
@@ -95,6 +118,7 @@ def plots(summary: pd.DataFrame, tot: pd.DataFrame, run: Path) -> list[str]:
     files = []
     if summary["cells"].nunique() < 2:
         return files  # a scaling curve needs at least two sizes
+    sizes = sorted(summary["cells"].unique())
     ink, muted, grid = "#2b2b29", "#6b6a64", "#e4e3dd"
     plt.rcParams.update({"font.size": 9, "axes.edgecolor": muted, "axes.labelcolor": ink,
                          "xtick.color": muted, "ytick.color": muted, "axes.titlecolor": ink})
@@ -112,7 +136,7 @@ def plots(summary: pd.DataFrame, tot: pd.DataFrame, run: Path) -> list[str]:
                 continue
             ax.plot(e["cells"], e["wall_s"], color=COLORS.get(eng, muted), lw=2,
                     marker=MARKERS.get(eng, "o"), ms=5, label=eng)
-        ax.set_xscale("log"); ax.set_yscale("log")
+        _log_axes(ax, sizes)
         ax.set_title(step, fontsize=10, loc="left")
         ax.grid(True, which="major", color=grid, lw=0.6)
         for side in ("top", "right"):
@@ -137,7 +161,8 @@ def plots(summary: pd.DataFrame, tot: pd.DataFrame, run: Path) -> list[str]:
             last = e.iloc[-1]
             ax.annotate(eng, (last["cells"], last[col]), xytext=(4, 0), textcoords="offset points",
                         va="center", fontsize=8, color=ink)  # direct label: identity is not colour-only
-        ax.set_xscale("log"); ax.set_yscale("log"); ax.set_xlabel("cells"); ax.set_title(label, fontsize=10, loc="left")
+        _log_axes(ax, sizes)
+        ax.set_xlabel("cells"); ax.set_title(label, fontsize=10, loc="left")
         ax.grid(True, color=grid, lw=0.6)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
