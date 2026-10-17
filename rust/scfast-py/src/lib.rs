@@ -669,6 +669,87 @@ fn umap_knn<'py>(
     vec2_to_py(py, n, 2, emb)
 }
 
+// ------------------------------------------------------------------ 10x h5 chunks
+
+/// Inflates the zlib-compressed chunks of a 1-D HDF5 dataset (read at `offsets`, `sizes`
+/// bytes each, in element order, `chunk_len` elements per chunk) into `n` values. `src` is
+/// the stored little-endian type ("i4", "i8", "f4", "f8"); the result is float32 if
+/// `to_f32`, else int32 (values outside int32 raise ValueError).
+#[pyfunction]
+#[pyo3(signature = (path, offsets, sizes, chunk_len, n, src, to_f32))]
+#[allow(clippy::too_many_arguments)]
+fn inflate_chunks<'py>(
+    py: Python<'py>,
+    path: std::path::PathBuf,
+    offsets: PyReadonlyArray1<'py, u64>,
+    sizes: PyReadonlyArray1<'py, u64>,
+    chunk_len: usize,
+    n: usize,
+    src: &str,
+    to_f32: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let offsets = contiguous(&offsets, "offsets")?;
+    let sizes = contiguous(&sizes, "sizes")?;
+    let width = match src {
+        "i4" | "f4" => 4,
+        "i8" | "f8" => 8,
+        _ => return Err(PyValueError::new_err(format!("unsupported stored type {src}"))),
+    };
+    if chunk_len == 0 || offsets.len() != sizes.len() || offsets.len() != n.div_ceil(chunk_len) {
+        return Err(PyValueError::new_err(format!("{} chunks of {chunk_len} do not cover {n} values", offsets.len())));
+    }
+    let file = std::fs::File::open(&path).map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+    if to_f32 {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<f32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    } else {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<i32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    }
+}
+
+trait FromStored: Copy + Default + Send + Sync {
+    fn from_f64(v: f64) -> Option<Self>;
+}
+impl FromStored for f32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        Some(v as f32)
+    }
+}
+impl FromStored for i32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (v >= i32::MIN as f64 && v <= i32::MAX as f64).then_some(v as i32)
+    }
+}
+
+fn inflate_into<O: FromStored>(file: &std::fs::File, offsets: &[u64], sizes: &[u64], chunk_len: usize, n: usize, width: usize, src: &str) -> scfast_core::Result<Vec<O>> {
+    use std::os::unix::fs::FileExt;
+    let decode: fn(&[u8]) -> f64 = match src {
+        "i4" => |b| i32::from_le_bytes(b.try_into().unwrap()) as f64,
+        "i8" => |b| i64::from_le_bytes(b.try_into().unwrap()) as f64,
+        "f4" => |b| f32::from_le_bytes(b.try_into().unwrap()) as f64,
+        _ => |b| f64::from_le_bytes(b.try_into().unwrap()),
+    };
+    let mut out = vec![O::default(); n];
+    out.par_chunks_mut(chunk_len).zip(offsets.par_iter().zip(sizes)).try_for_each_init(
+        || (libdeflater::Decompressor::new(), Vec::new(), vec![0u8; chunk_len * width]),
+        |(dec, comp, raw), (out, (&off, &size))| {
+            comp.resize(size as usize, 0);
+            file.read_exact_at(comp, off).map_err(|e| backend("read_10x_h5", format!("read at byte {off}: {e}")))?;
+            let got = dec.zlib_decompress(comp, raw).map_err(|e| Error::InvalidInput(format!("chunk at byte {off}: {e}")))?;
+            if got != raw.len() {
+                return Err(Error::InvalidInput(format!("chunk at byte {off} inflated to {got} bytes, expected {}", raw.len())));
+            }
+            for (o, b) in out.iter_mut().zip(raw.chunks_exact(width)) {
+                let v = decode(b);
+                *o = O::from_f64(v).ok_or_else(|| Error::InvalidInput(format!("value {v} does not fit int32")))?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
 // ------------------------------------------------------------------ module
 
 /// Native core of scfast (Rust). Use the `scfast` package, not this module, directly.
@@ -677,7 +758,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
+    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -120,6 +120,18 @@ def leiden_device(device: str, /) -> dict[str, Any]:
     loads and a CUDA device is usable; an unusable explicit "cuda" raises RuntimeError.
     """
 
+def inflate_chunks(
+    path: str,
+    offsets: npt.NDArray[np.uint64],
+    sizes: npt.NDArray[np.uint64],
+    chunk_len: int,
+    n: int,
+    src: str,
+    to_f32: bool,
+    /,
+) -> npt.NDArray[np.float32] | npt.NDArray[np.int32]:
+    """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32 or int32."""
+
 def preprocess_csr(
     n_rows: int,
     n_cols: int,

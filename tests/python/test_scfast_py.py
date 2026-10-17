@@ -162,7 +162,8 @@ def test_version_matches_cargo_workspace():
 
 
 def test_public_api():
-    assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess"}
+    assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess",
+                                 "read_10x_h5", "umap"}
     for name in ("pca", "knn", "snn", "leiden"):
         assert getattr(scfast, name).__doc__
 
@@ -719,6 +720,31 @@ def test_leiden_is_deterministic_and_accepts_other_graph_types():
     np.testing.assert_array_equal(a, c)
     np.testing.assert_array_equal(a, d)
     assert ari(e, truth) > 0.99  # a diagonal (as in Seurat's RNA_snn) is accepted
+
+
+# ---------------------------------------------------------------- 10x h5
+
+@pytest.mark.parametrize("shuffle, int_dtype", [(False, np.int64), (False, np.int32), (True, np.int64)])
+def test_read_10x_h5_matches_counts(tmp_path, shuffle, int_dtype):
+    h5py = pytest.importorskip("h5py")
+    rng = np.random.default_rng(0)
+    counts = sp.random(50, 30, density=0.3, format="csr", random_state=rng, dtype=np.float64)
+    counts.data = np.ceil(counts.data * 20)
+    path = tmp_path / "m.h5"
+    with h5py.File(path, "w") as f:  # genes x cells CSC: the arrays of the cells x genes CSR
+        g = f.create_group("matrix")
+        kw = {"compression": "gzip", "shuffle": shuffle, "chunks": (7,)}
+        g.create_dataset("data", data=counts.data.astype(np.int32), **kw)
+        g.create_dataset("indices", data=counts.indices.astype(int_dtype), **kw)
+        g.create_dataset("indptr", data=counts.indptr.astype(np.int64))
+        g.create_dataset("shape", data=np.array([30, 50], dtype=np.int32))
+        g.create_dataset("barcodes", data=np.array([f"c{i}" for i in range(50)], dtype="S"))
+        g.create_dataset("features/name", data=np.array([f"g{j}" for j in range(30)], dtype="S"))
+        g.create_dataset("features/feature_type", data=np.array(["Gene Expression"] * 30, dtype="S"))
+    X, barcodes, names = scfast.read_10x_h5(path)
+    assert X.dtype == np.float32 and X.indices.dtype == np.int32 and X.shape == (50, 30)
+    assert (X != counts).nnz == 0
+    assert barcodes[3] == "c3" and names[4] == "g4"
 
 
 # ---------------------------------------------------------------- end to end
