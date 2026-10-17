@@ -151,10 +151,10 @@ def prepare(dataset: str):
 
 
 @app.local_entrypoint()
-def baselines(dataset: str, sizes: str, engines: str = "seurat,scanpy", reps: int = 3):
-    """sizes: comma-separated prepared folder names without the 'n', e.g. 100000 or 68579."""
+def baselines(dataset: str, sizes: str, engines: str = "seurat,scanpy", reps: int = 3, mem_gb: int = MEM_GB):
+    """sizes: comma-separated prepared folder names without the 'n', e.g. 100000 or 68260."""
     jobs = [(e, dataset, f"n{s}", reps) for s in sizes.split(",") for e in engines.split(",")]
-    for engine, size, rc in run.starmap(jobs, order_outputs=False):
+    for engine, size, rc in run.with_options(memory=mem_gb * 1024).starmap(jobs, order_outputs=False):
         print(f"{engine} {size}: exit {rc}")
 
 
