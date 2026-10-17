@@ -10,7 +10,7 @@
 //! | Kernel          | Device memory                                        | Products |
 //! |-----------------|------------------------------------------------------|----------|
 //! | PCA (`pca/cuda.rs`) | CSR of the HVG matrix (f32 values, u32 columns, i64 row offsets), gene mean / 1/sd, one cells x l and a few genes x l f32 buffers | NVRTC CSR SpMM kernels `zv` (Z V) and `ztu` (Z^T U, scatter with atomics), mean / 1/sd correction fused in |
-//! | kNN (`knn/cuda.rs`) | centred cells x dims (f32), block x cap candidate buffer | NVRTC `knn`: fused distances and top-k, one query per thread, compiled per (dims, cap) |
+//! | kNN (`knn/cuda.rs`) | centred cells x dims (f32), squared norms, block x cap candidate buffer | NVRTC `knn`: fused scores and top-k, 4 queries per thread, compiled per (dims, cap) |
 //!
 //! Dense steps of the randomised SVD (TSQR, the small SVD) and the exact re-ranking of kNN
 //! candidates stay on the CPU (faer / f64), exactly as in the CPU paths.
@@ -39,63 +39,117 @@ pub(crate) const KNN_CAP_MAX: usize = 128;
 /// Shared memory for one tile of reference points in `knn` (bytes).
 const KNN_TILE_BYTES: usize = 32 << 10;
 
-/// Brute-force kNN, one query per thread. The block stages a tile of `TP` reference points
-/// in shared memory; every thread computes exact f32 squared distances from its query (held
-/// in registers: `D` is fixed at compile time) to the tile and keeps its `CAP` best, sorted
-/// by (distance, index), with the current worst in registers so that the common case, a
-/// rejected point, touches no local memory. Nothing goes through DRAM per pair. Compiled
-/// per (`D`, `CAP`) by NVRTC with those `#define`s prepended. Rows of x are
-/// `D` contiguous floats; output slot `q` covers query `q0 + q`.
+/// Threads per block of the `knn` kernel, and queries per thread.
+pub(crate) const KNN_BLOCK: u32 = 128;
+pub(crate) const KNN_QPT: usize = 4;
+
+/// Brute-force kNN candidate selection, `QPT` queries per thread. The block stages a tile
+/// of `TP` reference points and their squared norms in shared memory; each thread scores
+/// every tile point against its queries as `|r|^2 - 2 q.r` (the per-query `|q|^2` is a
+/// constant; `D` FMAs per pair, queries held in registers because `D` is fixed at compile
+/// time) and keeps each query's `CAP` best, sorted by (score, index), with the current
+/// worst in registers so that the common case, a rejected point, touches no local memory.
+/// Nothing goes through DRAM per pair. Each block scans from its own tile onwards and
+/// skips tiles that cannot hold a candidate (see the comments in the loop). Compiled per (`D`, `CAP`) by NVRTC with those
+/// `#define`s prepended. Rows of x are `D` contiguous floats; qbox / tbox hold the (lo, hi)
+/// boxes of each run of `QPT * blockDim.x` queries and of each tile; query `q0 + i` writes
+/// its candidates (ascending; 0xffffffff past the end) to out_idx[i * CAP ..].
 const KNN_KERNEL: &str = r#"
 #define POS_INF __int_as_float(0x7f800000)
-extern "C" __global__ void knn(const float* __restrict__ x, int n, int q0, int nq,
-                               unsigned int* __restrict__ out_idx, float* __restrict__ out_d2) {
+#define NEG_INF __int_as_float(0xff800000)
+__device__ __forceinline__ void insert(float* bv, unsigned int* bi, int& cnt, float& wv, unsigned int& wi,
+                                       float s, unsigned int r) {
+  int pos = (cnt < CAP) ? cnt : CAP - 1;
+  while (pos > 0 && (s < bv[pos - 1] || (s == bv[pos - 1] && r < bi[pos - 1]))) {
+    bv[pos] = bv[pos - 1];
+    bi[pos] = bi[pos - 1];
+    --pos;
+  }
+  bv[pos] = s;
+  bi[pos] = r;
+  if (cnt < CAP) ++cnt;
+  if (cnt == CAP) {
+    wv = bv[CAP - 1];
+    wi = bi[CAP - 1];
+  }
+}
+
+extern "C" __global__ void knn(const float* __restrict__ x, const float* __restrict__ norms,
+                               const float* __restrict__ qbox, const float* __restrict__ tbox, int n, int q0, int nq,
+                               unsigned int* __restrict__ out_idx) {
   extern __shared__ float tile[];
-  const int qi = blockIdx.x * blockDim.x + threadIdx.x;
-  const bool active = qi < nq;
-  const unsigned int self = (unsigned int)(q0 + qi);
-  float q[D];
+  float* tile_n = tile + TP * D;
+  __shared__ float red[2][32];
+  const int first = (blockIdx.x * blockDim.x + threadIdx.x) * QPT;
+  float q[QPT][D];
+  float bv[QPT][CAP];
+  unsigned int bi[QPT][CAP];
+  float wv[QPT], qn[QPT];
+  unsigned int wi[QPT], self[QPT];
+  int cnt[QPT];
 #pragma unroll
-  for (int t = 0; t < D; ++t) q[t] = active ? x[(size_t)self * D + t] : 0.0f;
-  float bv[CAP];
-  unsigned int bi[CAP];
-  int cnt = 0;
-  float wv = POS_INF;
-  unsigned int wi = 0xffffffffu;
-  for (int base = 0; base < n; base += TP) {
+  for (int j = 0; j < QPT; ++j) {
+    const bool active = first + j < nq;
+    self[j] = (unsigned int)(q0 + first + j);
+    qn[j] = active ? norms[self[j]] : 0.0f;
+#pragma unroll
+    for (int t = 0; t < D; ++t) q[j][t] = active ? -2.0f * x[(size_t)self[j] * D + t] : 0.0f;
+    wv[j] = active ? POS_INF : NEG_INF;  // an inactive slot accepts nothing
+    wi[j] = 0xffffffffu;
+    cnt[j] = 0;
+  }
+  // Bounding box of this block's queries (consecutive rows, so compact in locality order).
+  const float* qb = qbox + (size_t)((q0 + (int)(blockIdx.x * blockDim.x) * QPT) / (QPT * (int)blockDim.x)) * 2 * D;
+  // Start at the block's own tile and wrap around: with the points in locality order
+  // (knn/cuda.rs) the near neighbours come first and the thresholds tighten early, which
+  // makes the costly, warp-serialised inserts rare and lets far tiles be skipped.
+  const int tiles = (n + TP - 1) / TP;
+  const int start = min((q0 + (int)(blockIdx.x * blockDim.x) * QPT) / TP, tiles - 1);
+  const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, warps = (blockDim.x + 31) >> 5;
+  for (int tt = 0; tt < tiles; ++tt) {
+    const int ti = (start + tt) % tiles;
+    const int base = ti * TP;
     const int m = min(TP, n - base);
-    __syncthreads();
-    for (int e = threadIdx.x; e < m * D; e += blockDim.x) tile[e] = x[(size_t)base * D + e];
-    __syncthreads();
-    if (!active) continue;
-    for (int p = 0; p < m; ++p) {
-      float s = 0.0f;
+    // Skip the tile when its box is farther from the query box than every query's current
+    // worst candidate (squared distance = score + |q|^2). Uniform across the block.
+    float worst = NEG_INF;
 #pragma unroll
-      for (int t = 0; t < D; ++t) {
-        const float df = tile[p * D + t] - q[t];
-        s = fmaf(df, df, s);
-      }
-      const unsigned int r = (unsigned int)(base + p);
-      if (!(s < wv || (s == wv && r < wi)) || r == self) continue;
-      int pos = (cnt < CAP) ? cnt : CAP - 1;
-      while (pos > 0 && (s < bv[pos - 1] || (s == bv[pos - 1] && r < bi[pos - 1]))) {
-        bv[pos] = bv[pos - 1];
-        bi[pos] = bi[pos - 1];
-        --pos;
-      }
-      bv[pos] = s;
-      bi[pos] = r;
-      if (cnt < CAP) ++cnt;
-      if (cnt == CAP) {
-        wv = bv[CAP - 1];
-        wi = bi[CAP - 1];
+    for (int j = 0; j < QPT; ++j) worst = fmaxf(worst, wv[j] + qn[j]);
+    for (int o = 16; o > 0; o >>= 1) worst = fmaxf(worst, __shfl_xor_sync(0xffffffffu, worst, o));
+    if (lane == 0) red[tt & 1][warp] = worst;
+    __syncthreads();
+    worst = red[tt & 1][0];
+    for (int w = 1; w < warps; ++w) worst = fmaxf(worst, red[tt & 1][w]);
+    const float* tb = tbox + (size_t)ti * 2 * D;
+    float lb = 0.0f;
+#pragma unroll
+    for (int t = 0; t < D; ++t) {
+      const float gap = fmaxf(0.0f, fmaxf(qb[t] - tb[D + t], tb[t] - qb[D + t]));
+      lb = fmaf(gap, gap, lb);
+    }
+    if (lb > worst * 1.001f + 1e-6f) continue;
+    for (int e = threadIdx.x; e < m * D; e += blockDim.x) tile[e] = x[(size_t)base * D + e];
+    for (int e = threadIdx.x; e < m; e += blockDim.x) tile_n[e] = norms[base + e];
+    __syncthreads();
+    for (int p = 0; p < m; ++p) {
+      float r[D];
+#pragma unroll
+      for (int t = 0; t < D; ++t) r[t] = tile[p * D + t];
+      const float nr = tile_n[p];
+      const unsigned int ri = (unsigned int)(base + p);
+#pragma unroll
+      for (int j = 0; j < QPT; ++j) {
+        float s = nr;
+#pragma unroll
+        for (int t = 0; t < D; ++t) s = fmaf(q[j][t], r[t], s);
+        if ((s < wv[j] || (s == wv[j] && ri < wi[j])) && ri != self[j]) insert(bv[j], bi[j], cnt[j], wv[j], wi[j], s, ri);
       }
     }
   }
-  if (!active) return;
-  for (int t = 0; t < CAP; ++t) {
-    out_idx[(size_t)qi * CAP + t] = (t < cnt) ? bi[t] : 0xffffffffu;
-    out_d2[(size_t)qi * CAP + t] = (t < cnt) ? bv[t] : POS_INF;
+#pragma unroll
+  for (int j = 0; j < QPT; ++j) {
+    if (first + j >= nq) continue;
+    for (int t = 0; t < CAP; ++t) out_idx[(size_t)(first + j) * CAP + t] = (t < cnt[j]) ? bi[j][t] : 0xffffffffu;
   }
 }
 "#;
@@ -306,12 +360,12 @@ impl Gpu {
     /// The `knn` kernel for `d` dims and `cap` candidates, and the reference points per
     /// shared-memory tile; compiled on first use.
     pub fn knn_kernel(&self, d: usize, cap: usize) -> Result<(CudaFunction, usize)> {
-        let tp = (KNN_TILE_BYTES / (4 * d)).clamp(1, BLOCK as usize);
+        let tp = (KNN_TILE_BYTES / (4 * (d + 1))).clamp(1, 256);
         let mut map = self.knn.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(f) = map.get(&(d, cap)) {
             return Ok((f.clone(), tp));
         }
-        let src = format!("#define D {d}\n#define CAP {cap}\n#define TP {tp}\n{KNN_KERNEL}");
+        let src = format!("#define D {d}\n#define CAP {cap}\n#define TP {tp}\n#define QPT {KNN_QPT}\n{KNN_KERNEL}");
         let f = guard("NVRTC knn", || {
             compile(&self.ctx, &src)?.load_function("knn").map_err(|e| drv_err("cuModuleGetFunction(knn)", e))
         })?;

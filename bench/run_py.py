@@ -214,8 +214,8 @@ class ScfastEngine(ScanpyEngine):
         idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
                                     device=self.scfast_device)
         n = idx.shape[0]
-        rows = np.repeat(np.arange(n), cfg.k - 1)
-        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
+        indptr = np.arange(0, n * (cfg.k - 1) + 1, cfg.k - 1)
+        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), idx[:, 1:].ravel(), indptr), shape=(n, n))
         a.obsp["snn"] = self.scfast.snn(idx)  # Seurat's SNN (Jaccard), what Leiden clusters on
         self.knn = idx, dist
 
@@ -254,15 +254,11 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
 
     def neighbors(self, a, cfg):
         import numpy as np
-        import scipy.sparse as sp
         from cuml.manifold.umap import fuzzy_simplicial_set
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
-                                    device=self.scfast_device)
+        super().neighbors(a, cfg)
+        idx, dist = self.knn
         n = idx.shape[0]
-        rows = np.repeat(np.arange(n), cfg.k - 1)
-        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
-        a.obsp["snn"] = self.scfast.snn(idx)
         conn = fuzzy_simplicial_set(self.cp.zeros((n, 1), dtype=np.float32), cfg.k, cfg.seed,
                                     knn_indices=self.cp.asarray(idx), knn_dists=self.cp.asarray(dist),
                                     set_op_mix_ratio=1.0, local_connectivity=1.0)
