@@ -35,7 +35,7 @@ if [[ $# -gt 0 ]]; then STAGES=("$@"); else STAGES=("${ALL[@]}"); fi
 declare -A STATUS=() TIME=()
 LOGDIR="$WORK/logs"; mkdir -p "$LOGDIR"
 
-skipped() { for s in $SKIP; do [[ "$s" == "$1" ]] && return 0; done; return 1; }
+skipped() { for s in ${SKIP:-}; do [[ "$s" == "$1" ]] && return 0; done; return 1; }
 needs()   { [[ "${STATUS[$1]:-}" == PASS ]] || { echo "needs stage '$1' (${STATUS[$1]:-not run})"; return 1; }; }
 
 stage_fixtures()   { "$PYTHON" tests/fixtures/make_fixture.py --verify; }
