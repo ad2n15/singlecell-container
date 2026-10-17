@@ -73,6 +73,8 @@ protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents be
 | [`docs/agents-spec.md`](docs/agents-spec.md) | Gates, agents, LLM adapter and budget, S3–S5, portability |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Install, configure, run, review gates, sites and schedulers |
 | [`tests/README.md`](tests/README.md) | Fixtures, unit and integration tests, benchmarks |
+| [`bench/README.md`](bench/README.md) | Benchmark harness: times Seurat, Scanpy, rapids and scfast step by step and checks parity with Seurat |
+| [`docs/RUST_ENGINE.md`](docs/RUST_ENGINE.md) | `scfast`, an experimental Rust engine (PCA, kNN, SNN, Leiden) with Python and R bindings |
 
 ## Repository layout
 

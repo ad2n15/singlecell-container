@@ -1,0 +1,336 @@
+"""scfast: fast single-cell kernels in Rust for Seurat- and Scanpy-style workflows.
+
+The four steps between the HVG matrix and cluster labels (docs/RUST_ENGINE.md section 5)::
+
+    import scfast
+    pcs, loadings, sdev = scfast.pca(X_csr, n_comps=30, seed=0)       # no dense scaled matrix
+    knn_idx, knn_dist   = scfast.knn(pcs, k=20)                         # self first, Euclidean
+    snn                 = scfast.snn(knn_idx, prune=1/15)               # scipy CSR, Jaccard
+    labels              = scfast.leiden(snn, resolution=0.5, seed=0, n_iterations=2)
+
+Every call releases the GIL while the Rust kernel runs. Errors from the kernels arrive as
+``ValueError`` (bad input or parameter) or ``RuntimeError`` (internal failure); a kernel
+that is not implemented in this build raises ``NotImplementedError``.
+
+Threads: the kernels use rayon's global pool, sized by ``RAYON_NUM_THREADS`` (default: all
+cores). Inputs must not be modified from another thread while a call is running.
+"""
+
+from __future__ import annotations
+
+import math
+import operator
+from typing import Any, Literal
+
+import numpy as np
+
+from . import _scfast
+from ._scfast import __version__
+
+__all__ = ["__version__", "knn", "leiden", "pca", "snn"]
+
+_I32_MAX = int(np.iinfo(np.int32).max)
+_U64_MAX = int(np.iinfo(np.uint64).max)
+_INDEX_DTYPES = (np.dtype(np.int32), np.dtype(np.int64))
+_VALUE_DTYPES = (np.dtype(np.float32), np.dtype(np.float64))
+_KNN_INDEX_DTYPES = (np.dtype(np.int32), np.dtype(np.int64), np.dtype(np.uint32), np.dtype(np.uint64))
+
+
+# ---------------------------------------------------------------- argument checks
+
+def _int(name: str, value: Any, minimum: int = 0, maximum: int | None = None) -> int:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be an integer, got bool")
+    try:
+        v = operator.index(value)
+    except TypeError:
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}") from None
+    if v < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {v}")
+    if maximum is not None and v > maximum:
+        raise ValueError(f"{name} must be <= {maximum}, got {v}")
+    return v
+
+
+def _float(name: str, value: Any) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a number, got bool")
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise TypeError(f"{name} must be a number, got {type(value).__name__}") from None
+    if not math.isfinite(v):
+        raise ValueError(f"{name} must be finite, got {v}")
+    return v
+
+
+def _seed(seed: Any) -> int:
+    return _int("seed", seed, 0, _U64_MAX)
+
+
+def _check_device(device: Any) -> None:
+    if device in ("auto", "cpu"):
+        return
+    if device in ("cuda", "gpu"):
+        raise RuntimeError(
+            f"device={device!r}: this build of scfast has only the CPU backend "
+            "(the CUDA backend is Phase 6 in docs/RUST_ENGINE.md); use device='auto' or 'cpu'"
+        )
+    raise ValueError(f"device must be 'auto', 'cpu' or 'cuda', got {device!r}")
+
+
+def _describe(x: Any) -> str:
+    fmt = getattr(x, "format", None)
+    name = type(x).__name__
+    return f"{name} (format {fmt!r})" if isinstance(fmt, str) else name
+
+
+def _csr_parts(X: Any, what: str) -> tuple[int, int, np.ndarray, np.ndarray, np.ndarray]:
+    """Shape and (indptr, indices, data) of a scipy CSR matrix, ready for the Rust side.
+
+    float32/float64 data and int32/int64 indices are passed through untouched, so Rust
+    borrows scipy's own buffers. Anything else is converted (a copy) as documented in pca().
+    Structure and canonical order are checked in Rust (O(nnz), GIL released).
+    """
+    import scipy.sparse as sp
+
+    if not sp.issparse(X) or X.format != "csr":
+        hint = f" Convert it with {what}.tocsr() first (a copy)." if sp.issparse(X) else ""
+        raise TypeError(
+            f"{what} must be a scipy.sparse CSR matrix (csr_matrix or csr_array), got {_describe(X)}.{hint}"
+        )
+    if len(X.shape) != 2:
+        raise ValueError(f"{what} must be 2-D, got shape {X.shape}")
+    n_rows, n_cols = (int(s) for s in X.shape)
+
+    indptr, indices, data = X.indptr, X.indices, X.data
+    if indptr.dtype not in _INDEX_DTYPES or indices.dtype not in _INDEX_DTYPES or indptr.dtype != indices.dtype:
+        # scipy always gives both the same int32/int64 dtype; this only handles hand-made ones.
+        if indices.dtype == np.int32 and indptr.size and int(indptr[-1]) <= _I32_MAX:
+            indptr = indptr.astype(np.int32)  # n_rows + 1 values: cheap
+        else:
+            indptr, indices = indptr.astype(np.int64), indices.astype(np.int64)
+    if data.dtype not in _VALUE_DTYPES:
+        if data.dtype.kind not in "biuf":
+            raise TypeError(f"{what} must hold real numbers, got dtype {data.dtype}")
+        data = data.astype(np.float64 if data.dtype.kind == "f" and data.dtype.itemsize > 8 else np.float32)
+    # no-ops (same buffer) for scipy's own contiguous, native-endian arrays
+    indptr = np.ascontiguousarray(indptr, dtype=indptr.dtype.newbyteorder("="))
+    indices = np.ascontiguousarray(indices, dtype=indices.dtype.newbyteorder("="))
+    data = np.ascontiguousarray(data, dtype=data.dtype.newbyteorder("="))
+    return n_rows, n_cols, indptr, indices, data
+
+
+def _inspect_csr(X: Any) -> dict[str, Any]:
+    """Diagnostics: the Rust types and buffer addresses pca() would use for X (no kernel)."""
+    return _scfast.csr_view_info(*_csr_parts(X, "X"))
+
+
+# ---------------------------------------------------------------- public API
+
+def pca(
+    X: Any,
+    n_comps: int = 30,
+    seed: int = 0,
+    scale: bool = True,
+    oversample: int = 10,
+    power_iters: int = 4,
+    *,
+    device: Literal["auto", "cpu", "cuda"] = "auto",
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Implicitly scaled PCA, replacing Seurat's ``ScaleData`` + ``RunPCA``.
+
+    Centres (and with ``scale=True`` scales to unit variance) each gene implicitly and runs
+    a randomised SVD, so the dense cells x genes scaled matrix is never built.
+
+    Parameters
+    ----------
+    X
+        scipy.sparse CSR matrix (``csr_matrix`` or ``csr_array``), cells x genes, usually
+        the log-normalised HVG matrix. float32/float64 data with int32/int64 indices is
+        read in place (zero copy); other real dtypes are converted to float32 first (a copy).
+        Must be canonical (sorted, unique column indices per row); call ``X.sum_duplicates()``
+        if not. Other sparse formats and dense arrays raise ``TypeError``.
+    n_comps
+        Number of components (Seurat ``npcs``).
+    seed
+        RNG seed for the randomised SVD; the same seed gives the same result.
+    scale
+        Divide each gene by its standard deviation (n - 1 denominator), as ``ScaleData``.
+        Seurat's ``scale.max`` clipping is not applied.
+    oversample, power_iters
+        Randomised-SVD accuracy settings (extra directions and subspace iterations).
+    device
+        ``"auto"`` or ``"cpu"``. ``"cuda"`` raises ``RuntimeError`` until the CUDA backend
+        exists.
+
+    Returns
+    -------
+    embeddings : float32 array (cells, n_comps)
+        Cell embeddings U * d (Seurat ``Embeddings``, Scanpy ``obsm["X_pca"]``).
+    loadings : float32 array (genes, n_comps)
+        Gene loadings V (Seurat ``Loadings``, Scanpy ``varm["PCs"]``).
+    stdev : float32 array (n_comps,)
+        Component standard deviations d / sqrt(cells - 1) (Seurat ``Stdev``).
+    """
+    _check_device(device)
+    n_rows, n_cols, indptr, indices, data = _csr_parts(X, "X")
+    n_comps = _int("n_comps", n_comps, 1)
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X is empty (shape {(n_rows, n_cols)})")
+    if n_comps > min(n_rows, n_cols):
+        raise ValueError(f"n_comps ({n_comps}) must not exceed min(cells, genes) = {min(n_rows, n_cols)}")
+    return _scfast.pca_csr(
+        n_rows, n_cols, indptr, indices, data,
+        n_comps, _seed(seed), bool(scale), _int("oversample", oversample), _int("power_iters", power_iters),
+    )
+
+
+def knn(
+    X: Any,
+    k: int = 20,
+    method: Literal["auto", "exact", "hnsw"] = "auto",
+    seed: int = 0,
+    auto_threshold: int = 50_000,
+    m: int = 16,
+    ef_construction: int = 200,
+    ef_search: int = 64,
+    *,
+    device: Literal["auto", "cpu", "cuda"] = "auto",
+) -> tuple[np.ndarray, np.ndarray]:
+    """k nearest neighbours (Euclidean), replacing the kNN part of Seurat's ``FindNeighbors``.
+
+    Parameters
+    ----------
+    X
+        Dense 2-D array, cells x dims (e.g. the first 30 PCs). Used as float32 C-order; any
+        other real dtype or memory layout is converted first. The kernel takes its own
+        copy of the (small) embedding matrix in any case.
+    k
+        Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``), at least 2.
+    method
+        ``"exact"`` (blocked brute force, exact), ``"hnsw"`` (approximate, hnsw_rs) or
+        ``"auto"``: exact when there are fewer than ``auto_threshold`` cells, else HNSW
+        with ``m``, ``ef_construction`` and ``ef_search``.
+    seed
+        Seeds the HNSW insertion order. Exact results are deterministic; HNSW results are
+        not bit-reproducible across runs (hnsw_rs inserts in parallel).
+    device
+        ``"auto"`` or ``"cpu"``; see :func:`pca`.
+
+    Returns
+    -------
+    indices : int32 array (cells, k)
+        Row i starts with i itself, then the k - 1 nearest other cells by increasing
+        distance (ties by lower index).
+    distances : float32 array (cells, k)
+        Euclidean distances, 0 in the first column.
+    """
+    import scipy.sparse as sp
+
+    _check_device(device)
+    if sp.issparse(X):
+        raise TypeError("X must be a dense array (e.g. PCA embeddings), got a scipy sparse matrix")
+    a = np.asarray(X)
+    if a.ndim != 2:
+        raise ValueError(f"X must be 2-D (cells x dims), got {a.ndim}-D with shape {a.shape}")
+    if a.dtype.kind not in "biuf":
+        raise TypeError(f"X must hold real numbers, got dtype {a.dtype}")
+    n, d = a.shape
+    if n == 0 or d == 0:
+        raise ValueError(f"X is empty (shape {a.shape})")
+    k = _int("k", k, 2)  # the cell itself plus at least one neighbour
+    if k > n:
+        raise ValueError(f"k ({k}) must not exceed the number of cells ({n}); k counts the cell itself")
+    if method not in ("auto", "exact", "hnsw"):
+        raise ValueError(f"method must be 'auto', 'exact' or 'hnsw', got {method!r}")
+    a = np.ascontiguousarray(a, dtype=np.float32)  # no copy when already float32 C-order
+    return _scfast.knn(
+        a, k, method, _seed(seed), _int("auto_threshold", auto_threshold),
+        _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1),
+    )
+
+
+def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
+    """Shared-nearest-neighbour graph, replacing the SNN part of Seurat's ``FindNeighbors``.
+
+    The weight between cells i and j is the Jaccard index of their neighbour sets,
+    s / (2k - s) with s = |N(i) & N(j)|, and weights below ``prune`` are dropped
+    (Seurat ``prune.SNN``). Any two cells sharing a neighbour are connected, not only kNN
+    pairs.
+
+    Parameters
+    ----------
+    indices
+        Integer array (cells, k) of neighbour indices with the cell itself included, as
+        returned by :func:`knn` (Seurat's ``Indices()`` also works). Each row is used as the
+        neighbour set exactly as given; a cell listed twice in a row is an error.
+    prune
+        Jaccard cut-off in [0, 1].
+    keep_diagonal
+        Keep the diagonal (weight 1), as Seurat's ``RNA_snn`` does.
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix, float32, (cells, cells)
+        Symmetric, both directions of every edge stored, sorted column indices.
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(indices):
+        raise TypeError("indices must be a dense integer array (cells, k), got a scipy sparse matrix")
+    idx = np.asarray(indices)
+    if idx.ndim != 2:
+        raise ValueError(f"indices must be 2-D (cells, k), got {idx.ndim}-D with shape {idx.shape}")
+    if idx.dtype.kind not in "iu":
+        raise TypeError(f"indices must be an integer array, got dtype {idx.dtype}")
+    n, k = idx.shape
+    if n == 0 or k == 0:
+        raise ValueError(f"indices is empty (shape {idx.shape})")
+    if n > _I32_MAX:
+        raise ValueError(f"{n} cells exceed the int32 index range")
+    prune = _float("prune", prune)
+    if not 0.0 <= prune <= 1.0:
+        raise ValueError(f"prune must be in [0, 1], got {prune}")
+    if idx.dtype not in _KNN_INDEX_DTYPES:
+        idx = idx.astype(np.int64)
+    idx = np.ascontiguousarray(idx, dtype=idx.dtype.newbyteorder("="))
+    indptr, col, weights = _scfast.snn(idx, prune, bool(keep_diagonal))
+    return sp.csr_matrix((weights, col, indptr), shape=(n, n))
+
+
+def leiden(graph: Any, resolution: float = 0.5, seed: int = 0, n_iterations: int = 2) -> np.ndarray:
+    """Leiden clustering (RB / configuration objective), replacing ``FindClusters(algorithm = 4)``.
+
+    Parameters
+    ----------
+    graph
+        Square scipy.sparse CSR matrix (``csr_matrix`` or ``csr_array``): a symmetric
+        weighted adjacency with both directions of every edge stored, such as the output
+        of :func:`snn`, Seurat's ``RNA_snn`` or Scanpy's ``obsp["connectivities"]``.
+        Weights must be finite and non-negative; they are used as float32. A diagonal is
+        allowed and treated as Seurat does. Must be canonical (``graph.sum_duplicates()``).
+    resolution
+        RB resolution (Seurat ``resolution``); larger gives more clusters.
+    seed
+        Random seed; the same seed and graph give identical labels.
+    n_iterations
+        Leiden iterations (Seurat ``n.iter``), at least 1.
+
+    Returns
+    -------
+    int32 array (cells,)
+        Cluster labels 0..c-1, numbered by decreasing cluster size (ties by lowest cell
+        index), like Seurat's ``seurat_clusters`` levels.
+    """
+    n_rows, n_cols, indptr, indices, data = _csr_parts(graph, "graph")
+    if n_rows != n_cols:
+        raise ValueError(f"graph must be square (cells x cells), got shape {(n_rows, n_cols)}")
+    if n_rows > _I32_MAX:
+        raise ValueError(f"{n_rows} cells exceed the int32 index range")
+    resolution = _float("resolution", resolution)
+    if resolution < 0:
+        raise ValueError(f"resolution must be non-negative, got {resolution}")
+    return _scfast.leiden_csr(
+        n_rows, indptr, indices, data, resolution, _seed(seed), _int("n_iterations", n_iterations, 1)
+    )
