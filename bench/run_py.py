@@ -37,7 +37,9 @@ def parse(argv=None):
     p.add_argument("--reps", type=int, default=3, help="measured repeats (plus one warm-up)")
     p.add_argument("--threads", type=int, default=None)
     p.add_argument("--n-hvg", type=int, default=2000)
-    p.add_argument("--n-pcs", type=int, default=30)
+    p.add_argument("--n-pcs", type=int, default=30, help="components to compute (Seurat npcs)")
+    p.add_argument("--dims", type=int, default=10,
+                   help="leading PCs used for neighbours and UMAP (seurat_pbmc3k.R uses dims = 1:10)")
     p.add_argument("--k", type=int, default=20, help="neighbours including the cell itself (Seurat k.param)")
     p.add_argument("--resolution", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)
@@ -81,7 +83,7 @@ class ScanpyEngine:
         self.sc.pp.pca(a, n_comps=cfg.n_pcs, random_state=cfg.seed)
 
     def neighbors(self, a, cfg):
-        self.sc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.n_pcs, random_state=cfg.seed)
+        self.sc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.dims, random_state=cfg.seed)
 
     def cluster(self, a, cfg):
         self.sc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, flavor="igraph",
@@ -137,7 +139,7 @@ class RapidsEngine(ScanpyEngine):
         self.rsc.pp.pca(a, n_comps=cfg.n_pcs, random_state=cfg.seed)
 
     def neighbors(self, a, cfg):
-        self.rsc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.n_pcs, random_state=cfg.seed)
+        self.rsc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.dims, random_state=cfg.seed)
 
     def cluster(self, a, cfg):
         self.rsc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, n_iterations=2,
@@ -200,19 +202,22 @@ class ScfastEngine(ScanpyEngine):
         import numpy as np
         import scipy.sparse as sp
 
-        idx, dist = self.scfast.knn(a.obsm["X_pca"][:, : cfg.n_pcs], k=cfg.k, method="exact")
+        from scanpy.neighbors import _connectivity
+
+        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact")
         n = idx.shape[0]
         rows = np.repeat(np.arange(n), cfg.k - 1)
-        d = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
-        a.obsp["distances"] = d
-        a.obsp["connectivities"] = self.scfast.snn(idx)  # Seurat's SNN, Jaccard-weighted
+        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
+        a.obsp["snn"] = self.scfast.snn(idx)  # Seurat's SNN (Jaccard), what Leiden clusters on
+        # UMAP expects scanpy's fuzzy-simplicial connectivities, not an SNN graph
+        a.obsp["connectivities"] = _connectivity.umap(idx, dist, n_obs=n, n_neighbors=cfg.k)
         a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
-                              "params": {"n_neighbors": cfg.k, "method": "scfast-exact+snn"}}
+                              "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
 
     def cluster(self, a, cfg):
         import pandas as pd
 
-        labels = self.scfast.leiden(a.obsp["connectivities"], resolution=cfg.resolution, seed=cfg.seed,
+        labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
                                     n_iterations=2)
         a.obs["cluster"] = pd.Categorical(labels.astype(str))
 

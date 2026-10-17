@@ -12,7 +12,7 @@ T_PROCESS <- proc.time()[["elapsed"]]
 
 parse_args <- function(args) {
   opt <- list(data = NULL, out = NULL, reps = 3L, threads = NA_integer_, n_hvg = 2000L,
-              n_pcs = 30L, k = 20L, resolution = 0.5, seed = 0L, skip_umap = FALSE)
+              n_pcs = 30L, dims = 10L, k = 20L, resolution = 0.5, seed = 0L, skip_umap = FALSE)
   i <- 1L
   while (i <= length(args)) {
     key <- gsub("-", "_", sub("^--", "", args[[i]]))
@@ -132,7 +132,7 @@ base$node <- env$node
 write_outputs <- function(obj, outdir) {
   dir.create(outdir, recursive = TRUE, showWarnings = FALSE)
   pcs <- Embeddings(obj, "pca")[, seq_len(opt$n_pcs), drop = FALSE]
-  nn <- FindNeighbors(obj, dims = seq_len(opt$n_pcs), k.param = opt$k, return.neighbor = TRUE,
+  nn <- FindNeighbors(obj, dims = seq_len(opt$dims), k.param = opt$k, return.neighbor = TRUE,
                       compute.SNN = FALSE, verbose = FALSE)
   idx <- Indices(nn[["RNA.nn"]])  # cells x k, 1-based, usually self first
   idx <- idx[match(colnames(obj), Cells(nn[["RNA.nn"]])), , drop = FALSE]
@@ -153,7 +153,7 @@ write_outputs <- function(obj, outdir) {
 
 # ---------------------------------------------------------------- repeats
 
-dims <- seq_len(opt$n_pcs)
+dims <- seq_len(opt$dims)  # leading PCs for neighbours and UMAP, as in seurat_pbmc3k.R
 for (rep in 0:opt$reps) {
   state$rep <- rep
   state$warmup <- rep == 0L

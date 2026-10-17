@@ -83,8 +83,10 @@ Each runner then repeats these steps, timing each one:
 | `umap` | `RunUMAP` (uwot) | `umap` |
 | `to_cpu` | – | rapids only |
 
-Shared parameters (runner defaults, not exposed by `run_bench.sh`): 2,000 HVGs, 30 PCs,
-k = 20 neighbours including the cell itself (Seurat's `k.param`), resolution 0.5, seed 0,
+Shared parameters (runner defaults, not exposed by `run_bench.sh`): 2,000 HVGs, 30 PCs computed
+and the leading 10 used for neighbours and UMAP (`--dims`, as `seurat_pbmc3k.R` does with `dims = 1:10`;
+the PCs beyond the signal are a flat noise bulk whose order is arbitrary, so neighbours computed on all
+30 are not comparable between engines), k = 20 neighbours including the cell itself (Seurat's `k.param`), resolution 0.5, seed 0,
 2 Leiden iterations, scaled values clipped at 10.
 
 ## Engines
