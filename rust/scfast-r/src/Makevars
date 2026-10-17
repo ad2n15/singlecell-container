@@ -5,7 +5,8 @@
 # Override with SCFASTR_TARGET_DIR=/abs/path (e.g. a cache directory in a container build).
 # cargo must be on PATH or in ~/.cargo/bin.
 # Optional cargo features of the scfastr crate (comma- or space-separated), e.g.
-# SCFASTR_CARGO_FEATURES=cugraph for GPU Leiden (Phase 7).
+# SCFASTR_CARGO_FEATURES=cugraph for GPU Leiden (Phase 7), SCFASTR_CARGO_FEATURES=cuda for
+# CUDA PCA / kNN (Phase 6), or SCFASTR_CARGO_FEATURES=cuda,cugraph for both.
 
 TARGET_DIR = $(if $(SCFASTR_TARGET_DIR),$(SCFASTR_TARGET_DIR),$(CURDIR)/rust/target)
 LIBDIR = $(TARGET_DIR)/release

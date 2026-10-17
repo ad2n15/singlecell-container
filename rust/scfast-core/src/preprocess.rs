@@ -382,7 +382,6 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
 
 /// Pass 2: per flagged gene, `sum over stored entries of min(clip, (x - mu) / sd)^2`.
 fn pass2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, mean: &[f64], sd: &[f64], flag: &[bool], clip: f64, blocks: Blocks) -> Result<Vec<f64>> {
-    let (n, p) = (x.n_rows, x.n_cols);
     fn go<I: Idx, T: Real>(x: &CsrView<'_, I, T>, mean: &[f64], sd: &[f64], flag: &[bool], clip: f64, blocks: Blocks, lo: usize, hi: usize) -> Vec<f64> {
         let (n, p) = (x.n_rows, x.n_cols);
         if hi - lo > 1 {
@@ -410,7 +409,6 @@ fn pass2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, mean: &[f64], sd: &[f64], flag:
         }
         acc
     }
-    let _ = (n, p);
     Ok(go(x, mean, sd, flag, clip, blocks, 0, blocks.count))
 }
 

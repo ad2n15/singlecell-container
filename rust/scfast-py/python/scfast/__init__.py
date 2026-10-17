@@ -396,15 +396,15 @@ def preprocess(
     -------
     dict
         ``"data"``: scipy.sparse.csr_matrix, float32, cells x genes, the log-normalised
-        values (same sparsity pattern as the input; the index arrays are shared with it).
+        values (same sparsity pattern as the input, built on its index arrays).
         ``"library_size"``: float64 (cells,). ``"mean"``, ``"variance"``,
         ``"variance_expected"``, ``"variance_standardized"``: float64 (genes,), the vst
         columns (``vst.*`` in Seurat; constant genes get 0 expected and standardised
         variance). ``"hvg"``: int32 (n_hvg,) gene indices, most variable first.
         ``"hvg_mean"``, ``"hvg_sd"``: float64 (n_hvg,), mean and sample standard deviation
         of the log-normalised values of each HVG (what ``ScaleData`` / :func:`pca` scale
-        with). ``"clip"``: the clip used. ``"X_hvg"``: ``data[:, hvg]`` as a CSR matrix,
-        ready for :func:`pca`.
+        with). ``"clip"``: the clip used. ``"X_hvg"``: ``data[:, hvg]`` as a canonical CSR
+        matrix (columns in ``hvg`` order), ready for :func:`pca`.
 
     Notes
     -----
@@ -432,5 +432,7 @@ def preprocess(
     out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
     norm = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
     out["data"] = norm
-    out["X_hvg"] = norm[:, out["hvg"]]
+    x_hvg = norm[:, out["hvg"]]
+    x_hvg.sort_indices()  # column selection in HVG order leaves rows unsorted; pca() needs canonical CSR
+    out["X_hvg"] = x_hvg
     return out

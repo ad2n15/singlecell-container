@@ -20,7 +20,7 @@
 //! R error. Nothing unwinds into R.
 
 use extendr_api::prelude::*;
-use scfast_core::{cluster, knn, pca, preprocess, snn, CsrView, Knn, RowMajor, SparseGraph};
+use scfast_core::{cluster, knn, pca, preprocess, snn, CsrView, Device, Knn, RowMajor, SparseGraph};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 
@@ -137,14 +137,17 @@ fn f32_to_r(v: &[f32]) -> Robj {
 // ------------------------------------------------------------------ PCA
 
 /// Implicitly scaled PCA of a genes x cells dgCMatrix, read in place as cells x genes CSR.
-/// `oversample` / `power_iters` < 0 keep the scfast-core defaults.
+/// `oversample` / `power_iters` < 0 keep the scfast-core defaults. `device` is "cpu",
+/// "cuda" / "cuda:<i>" or "auto" (see `rs_device`); the device used is returned as `device`.
 /// @keywords internal
 #[extendr]
-fn rs_pca_csc(p: Robj, i: Robj, x: Robj, n_genes: i32, n_cells: i32, npcs: i32, seed: f64, oversample: i32, power_iters: i32) -> RResult<Robj> {
+#[allow(clippy::too_many_arguments)]
+fn rs_pca_csc(p: Robj, i: Robj, x: Robj, n_genes: i32, n_cells: i32, npcs: i32, seed: f64, oversample: i32, power_iters: i32, device: &str) -> RResult<Robj> {
     let view = csc_as_csr(&p, &i, &x, n_genes, n_cells)?;
     if npcs < 1 {
         return err(format!("npcs must be >= 1, got {npcs}"));
     }
+    let dev = parse_device(device)?;
     let mut params = pca::PcaParams { n_comps: npcs as usize, seed: seed_u64(seed)?, ..Default::default() };
     if oversample >= 0 {
         params.oversample = oversample as usize;
@@ -152,7 +155,7 @@ fn rs_pca_csc(p: Robj, i: Robj, x: Robj, n_genes: i32, n_cells: i32, npcs: i32, 
     if power_iters >= 0 {
         params.power_iters = power_iters as usize;
     }
-    let res = run_kernel("pca", || pca::implicit_scaled_pca(view, &params))?;
+    let res = run_kernel("pca", || pca::implicit_scaled_pca_on(view, &params, dev))?;
     if res.embeddings.n_rows != view.n_rows || res.loadings.n_rows != view.n_cols {
         return err(format!(
             "scfast pca: kernel returned embeddings {}x{} and loadings {}x{} for {} cells x {} genes",
@@ -164,7 +167,8 @@ fn rs_pca_csc(p: Robj, i: Robj, x: Robj, n_genes: i32, n_cells: i32, npcs: i32, 
         loadings = rowmajor_to_rmatrix(&res.loadings),
         stdev = f32_to_r(&res.stdev),
         gene_mean = f32_to_r(&res.gene_mean),
-        gene_sd = f32_to_r(&res.gene_sd)
+        gene_sd = f32_to_r(&res.gene_sd),
+        device = dev.name()
     )
     .into())
 }
@@ -186,11 +190,14 @@ fn knn_method(method: &str, hnsw_m: i32, ef_construction: i32, ef_search: i32) -
 }
 
 /// Exact / HNSW k nearest neighbours (self included) of every row of a double matrix
-/// (cells x dims). Returns 1-based indices and Euclidean distances, both n x k.
-/// `auto_threshold` < 0 keeps the scfast-core default.
+/// (cells x dims). Returns 1-based indices and Euclidean distances, both n x k, and the
+/// `device` used. `auto_threshold` < 0 keeps the scfast-core default. On a CUDA device
+/// `method` is ignored (brute force GEMM + top-k).
 /// @keywords internal
 #[extendr]
-fn rs_knn(mat: Robj, n: i32, d: i32, k: i32, method: &str, seed: f64, hnsw_m: i32, ef_construction: i32, ef_search: i32, auto_threshold: f64) -> RResult<Robj> {
+#[allow(clippy::too_many_arguments)]
+fn rs_knn(mat: Robj, n: i32, d: i32, k: i32, method: &str, seed: f64, hnsw_m: i32, ef_construction: i32, ef_search: i32, auto_threshold: f64, device: &str) -> RResult<Robj> {
+    let dev = parse_device(device)?;
     let n = non_negative(n, "number of cells")?;
     let d = non_negative(d, "number of dimensions")?;
     let x = real_slice(&mat, "embedding matrix")?;
@@ -216,7 +223,7 @@ fn rs_knn(mat: Robj, n: i32, d: i32, k: i32, method: &str, seed: f64, hnsw_m: i3
         }
     }
     let rm = RowMajor::from_vec(n, d, rm).map_err(|e| extendr_api::Error::Other(format!("scfast: {e}")))?;
-    let res = run_kernel("knn", || knn::knn(&rm, &params))?;
+    let res = run_kernel("knn", || knn::knn_on(&rm, &params, dev))?;
     let kk = res.k;
     if res.n != n || res.indices.len() != n * kk || res.distances.len() != n * kk {
         return err(format!("scfast knn: kernel returned n = {}, k = {kk} with {} indices for {n} cells", res.n, res.indices.len()));
@@ -239,7 +246,7 @@ fn rs_knn(mat: Robj, n: i32, d: i32, k: i32, method: &str, seed: f64, hnsw_m: i3
             }
         }
     }
-    Ok(list!(idx = idx, dist = dist).into())
+    Ok(list!(idx = idx, dist = dist, device = dev.name()).into())
 }
 
 // ------------------------------------------------------------------ SNN
@@ -408,17 +415,42 @@ fn rs_is_symmetric(p: Robj, i: Robj, x: Robj, n: i32, tol: f64) -> RResult<bool>
 
 // ------------------------------------------------------------------ diagnostics
 
-/// Build information: crate version, rayon thread count, compiled backends.
+/// Build information: crate version, rayon thread count, compiled backends and the CUDA
+/// device state (`cuda` = `cuda_built`, kept for older callers).
 /// @keywords internal
 #[extendr]
 fn rs_info() -> Robj {
+    let info = scfast_core::device_info();
     list!(
         version = env!("CARGO_PKG_VERSION"),
         threads = rayon::current_num_threads() as i32,
-        cuda = false,
+        cuda = info.cuda_built,
+        cuda_built = info.cuda_built,
+        cuda_available = info.cuda_available,
+        device_count = info.device_count as i32,
+        device_name = info.device_name.clone().map(Robj::from).unwrap_or_else(|| Robj::from(())),
+        free_gb = info.free_gb().map(Robj::from).unwrap_or_else(|| Robj::from(())),
+        total_gb = info.total_bytes.map(|b| Robj::from(b as f64 / (1u64 << 30) as f64)).unwrap_or_else(|| Robj::from(())),
+        cuda_error = info.cuda_error.clone().map(Robj::from).unwrap_or_else(|| Robj::from(())),
         extendr = "0.9"
     )
     .into()
+}
+
+/// Parse a PCA / kNN device string with scfast-core's rules; errors are prefixed so the R
+/// side can tell a GPU problem ("scfast device: GPU: ...") from a bad string.
+fn parse_device(device: &str) -> RResult<Device> {
+    Device::parse(device).map_err(|e| extendr_api::Error::Other(format!("scfast device: {e}")))
+}
+
+/// Resolves a PCA / kNN device string ("auto", "cpu", "cuda", "cuda:<i>") to the device the
+/// kernels would run on: "cpu" or "cuda:<i>". "auto" is "cuda:0" only when scfastR was
+/// built with the `cuda` feature and a device is usable; an explicit "cuda" that is not
+/// usable is an error naming the reason.
+/// @keywords internal
+#[extendr]
+fn rs_device(device: &str) -> RResult<String> {
+    Ok(parse_device(device)?.name())
 }
 
 /// Address of an R vector's data, as a hex string (zero-copy checks).
@@ -523,6 +555,7 @@ extendr_module! {
     fn rs_leiden_device;
     fn rs_is_symmetric;
     fn rs_info;
+    fn rs_device;
     fn rs_dataptr;
     fn rs_csr_view_ptrs;
     fn rs_debug_panic;
