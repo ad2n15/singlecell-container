@@ -103,9 +103,10 @@ class RapidsEngine(ScanpyEngine):
         import rmm
         from rmm.allocators.cupy import rmm_cupy_allocator
 
-        # RMM pool for CuPy and cuGraph, as rapids-singlecell recommends: without it cuGraph
-        # Leiden at 500k cells spends half its time in cudaMalloc / cudaFree.
-        rmm.reinitialize(pool_allocator=True)
+        # A pooling allocator for CuPy and cuGraph: without one cuGraph Leiden at 500k cells
+        # spends half its time in cudaMalloc / cudaFree. The driver's stream-ordered pool
+        # (cudaMallocAsync), because RMM's fixed pool fragments and runs out at 500k cells.
+        rmm.mr.set_current_device_resource(rmm.mr.CudaAsyncMemoryResource())
         cp.cuda.set_allocator(rmm_cupy_allocator)
         cp.zeros(1)  # create the CUDA context now, so it counts as start-up
         cp.cuda.Device().synchronize()
