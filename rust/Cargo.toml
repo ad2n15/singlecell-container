@@ -23,6 +23,8 @@ thiserror = "2"
 hnsw_rs = "0.3"
 # Pinned exactly: 0.7.0 was a breaking rewrite of the Leiden core (docs/RUST_ENGINE.md section 4).
 single-clustering = { version = "=0.7.0", default-features = false }
+# Runtime loading of libcugraph_c.so for GPU Leiden (scfast-core feature `cugraph`, Phase 7).
+libloading = "0.8"
 
 [profile.release]
 codegen-units = 1

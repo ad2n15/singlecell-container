@@ -54,30 +54,78 @@ scp_has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
 # Engine resolution (docs/scfast-integration.md, "Config")
 # --------------------------------------------------------------------------
 
-#' Resolve the top-level `engine` setting to "scfast" or "seurat".
+#' `scfastR::scfast_info()` as a list, or NULL when scfastR is not installed (or the
+#' call fails). Tests replace this binding to mock a CUDA build.
+scp_scfast_info <- function() {
+  if (!scp_has_pkg("scfastR")) return(NULL)
+  tryCatch(as.list(scfastR::scfast_info()), error = function(e) NULL)
+}
+
+#' CUDA state of the installed scfastR: `list(built, available)` (logicals).
+#' `scfast_info()` fields `cuda_built` / `cuda_available` are read; a missing
+#' field is FALSE (`cuda` is accepted as a fallback for `cuda_built`), so a
+#' scfastR without the CUDA feature never reports a usable device.
+scp_scfast_cuda <- function(info = scp_scfast_info()) {
+  flag <- function(x) is.logical(x) && length(x) == 1 && isTRUE(x)
+  if (is.null(info)) return(list(built = FALSE, available = FALSE))
+  built <- flag(info$cuda_built) || (is.null(info$cuda_built) && flag(info$cuda))
+  available <- built && flag(info$cuda_available)
+  list(built = built, available = available)
+}
+
+#' Resolve `engine` / `engine_gpu` to "scfast" or "seurat".
 #'
-#' @param cfg  resolved config; a missing `engine` is treated as "auto".
+#' @param cfg  resolved config; a missing `engine` is "auto", a missing
+#'   `engine_gpu` is "auto".
 #' @param device  device the stage will run on, "cpu" or "gpu" (the device plan,
 #'   not the config value "auto"). Any other value is treated as "cpu".
-#' `scfast` needs scfastR (error with an install hint if missing) and a CPU plan
-#' (error with `device = "gpu"`: scfast has no CUDA backend yet). `seurat` is
-#' always "seurat". `auto` is "scfast" when scfastR is installed and the plan is
-#' not GPU, else "seurat".
+#'
+#' CPU plan: `seurat` is always "seurat"; `scfast` needs scfastR (error with an
+#' install hint if missing); `auto` is "scfast" when scfastR is installed.
+#'
+#' GPU plan (docs/scfast-integration.md, "Pipeline wiring"): `engine_gpu: rapids`
+#' is "seurat" (rapids through the exchange); `engine_gpu: scfast` is "scfast"
+#' (in process, device cuda) and errors when scfastR was not built with CUDA or
+#' no device is visible; `engine_gpu: auto` is "scfast" when scfastR reports
+#' `cuda_available`, else "seurat". `engine: seurat` is always "seurat";
+#' `engine: scfast` on a GPU plan that cannot run scfast on CUDA is an error.
 scp_resolve_engine <- function(cfg, device = "cpu") {
   eng <- cfg$engine
   if (is.null(eng)) eng <- "auto"
   if (!(is.character(eng) && length(eng) == 1 && !is.na(eng) && eng %in% c("auto", "scfast", "seurat")))
     scp_stop("engine must be one of auto/scfast/seurat (got '", paste(eng, collapse = ","), "')")
+  eng_gpu <- cfg$engine_gpu
+  if (is.null(eng_gpu)) eng_gpu <- "auto"
+  if (!(is.character(eng_gpu) && length(eng_gpu) == 1 && !is.na(eng_gpu) && eng_gpu %in% c("auto", "scfast", "rapids")))
+    scp_stop("engine_gpu must be one of auto/scfast/rapids (got '", paste(eng_gpu, collapse = ","), "')")
   gpu <- is.character(device) && length(device) == 1 && identical(device, "gpu")
   if (eng == "seurat") return("seurat")
-  if (eng == "scfast") {
-    if (gpu) scp_stop("engine: scfast has no GPU backend; use device: cpu (or engine: auto/seurat)")
-    if (!scp_has_pkg("scfastR"))
-      scp_stop("engine: scfast needs the R package scfastR, which is not installed; ",
-               "install it with `R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80) or set engine: seurat")
-    return("scfast")
+  have <- scp_has_pkg("scfastR")
+  install_hint <- "install it with `R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80) or set engine: seurat"
+  if (!gpu) {
+    if (eng == "scfast") {
+      if (!have) scp_stop("engine: scfast needs the R package scfastR, which is not installed; ", install_hint)
+      return("scfast")
+    }
+    return(if (have) "scfast" else "seurat")
   }
-  if (!gpu && scp_has_pkg("scfastR")) "scfast" else "seurat"
+  # GPU plan
+  if (eng_gpu == "rapids") {
+    if (eng == "scfast") scp_stop("engine: scfast with engine_gpu: rapids has no GPU backend; use device: cpu, ",
+                                  "engine_gpu: auto/scfast, or engine: auto/seurat")
+    return("seurat")
+  }
+  cuda <- scp_scfast_cuda()
+  if (cuda$available) return("scfast")
+  why <- if (!have) "scfastR is not installed"
+         else if (!cuda$built) "scfastR was built without the cuda feature"
+         else "no CUDA device is visible to scfastR"
+  if (eng_gpu == "scfast")
+    scp_stop("engine_gpu: scfast needs scfastR built with CUDA and a visible device (", why, "); ",
+             "use engine_gpu: auto/rapids or device: cpu")
+  if (eng == "scfast")
+    scp_stop("engine: scfast has no GPU backend here (", why, "); use device: cpu (or engine: auto/seurat)")
+  "seurat"
 }
 
 # --------------------------------------------------------------------------

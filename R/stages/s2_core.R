@@ -221,21 +221,25 @@ s2_leiden_leidenbase <- function(snn, resolution, seed, n_iter = 10L) {
 # Engine (docs/scfast-integration.md): auto | scfast | seurat
 # --------------------------------------------------------------------------
 
-#' Resolve cfg$engine for S2 given the device plan. `auto` picks scfast when
-#' scfastR is installed and the plan is CPU. An explicit `scfast` needs scfastR,
-#' a CPU plan and lognorm normalisation. Returns "scfast" or "seurat".
+#' Resolve cfg$engine / cfg$engine_gpu for S2 given the device plan
+#' (scp_resolve_engine in common.R): `auto` picks scfast when scfastR is installed
+#' on a CPU plan, or built with CUDA with a visible device on a GPU plan
+#' (`engine_gpu` forces either). An explicit `scfast` additionally needs lognorm
+#' normalisation. Returns "scfast" or "seurat".
 s2_resolve_engine <- function(cfg, plan, assay = "RNA") {
   eng <- cfg$engine %||% "auto"
   if (!(is.character(eng) && length(eng) == 1 && eng %in% c("auto", "scfast", "seurat")))
     scp_stop("engine must be auto, scfast or seurat (got '", paste(eng, collapse = ","), "')")
   if (eng == "seurat") return("seurat")
-  have <- requireNamespace("scfastR", quietly = TRUE)
-  if (eng == "auto") return(if (have && plan$device == "cpu" && assay == "RNA") "scfast" else "seurat")
-  if (!have) scp_stop("engine: scfast needs the scfastR R package; install it with `R CMD INSTALL rust/scfast-r` (cargo >= 1.80)")
-  if (plan$device != "cpu") scp_stop("engine: scfast has no GPU backend; use device: cpu or auto, or engine: seurat")
-  if (assay != "RNA") scp_stop("engine: scfast supports lognorm normalisation only (normalization: sct needs engine: seurat)")
-  "scfast"
+  if (assay != "RNA") {
+    if (eng == "scfast") scp_stop("engine: scfast supports lognorm normalisation only (normalization: sct needs engine: seurat)")
+    return("seurat")
+  }
+  scp_resolve_engine(cfg, device = if (identical(plan$device, "gpu")) "gpu" else "cpu")
 }
+
+#' Device scfastR runs on for an S2 path: "cuda" on gpu_scfast, else "cpu".
+.s2_scfast_device <- function(path) if (identical(path, "gpu_scfast")) "cuda" else "cpu"
 
 # UMAP on the PCs with uwot, stored as a Seurat "umap" reduction (Seurat's RunUMAP defaults).
 .s2_umap_uwot <- function(obj, reduction, dims, n_neighbors, seed, assay = "RNA") {
@@ -330,16 +334,21 @@ run_s2 <- function(cfg, repo) {
     }
   }
   engine <- "seurat"
-  if (path == "cpu") {
-    engine <- s2_resolve_engine(cfg, plan, assay)
-  } else if (identical(cfg$engine, "scfast") && path == "gpu") {
-    scp_stop("engine: scfast has no GPU backend; use device: cpu or auto, or engine: seurat")
-  }
+  if (path %in% c("cpu", "gpu")) engine <- s2_resolve_engine(cfg, plan, assay)
   if (path == "cpu" && engine == "scfast") {
     path <- "scfast"
     path_reason <- paste0(plan$reason, "; engine scfast (in-process, no exchange files)")
+  } else if (path == "gpu" && engine == "scfast") {
+    # docs/scfast-integration.md "Pipeline wiring": scfastR built with CUDA and a device visible
+    # (or engine_gpu: scfast): same in-process code as cpu_scfast with device = "cuda"; UMAP on CPU.
+    if (integ == "harmony" && !scp_has_pkg("harmony"))
+      scp_stop("integration.method is harmony but the R 'harmony' package is not installed; ",
+               "install harmony (R), set engine_gpu: rapids (harmonypy through the exchange), or set integration.method: none")
+    path <- "gpu_scfast"
+    path_reason <- paste0(plan$reason, "; engine scfast on CUDA (in-process, no exchange files; UMAP on CPU)")
   }
   if (path %in% c("exchange_cpu", "gpu") && assay != "RNA") scp_stop("the exchange (GPU) path supports lognorm normalisation only")
+  scfast_dev <- .s2_scfast_device(path)
 
   # 7. PCs
   pcs_setting <- cfg$pcs
@@ -353,7 +362,7 @@ run_s2 <- function(cfg, repo) {
 
   leiden_impl <- NA_character_
   scfast_ver <- NULL
-  if (path == "scfast") {
+  if (path %in% c("scfast", "gpu_scfast")) {
     scfast_ver <- as.character(scfastR::scfast_info()$version %||% scfastR::scfast_info()$package)
     if (integ == "harmony") integration_impl <- NA_character_
   }
@@ -361,14 +370,15 @@ run_s2 <- function(cfg, repo) {
   gpu_summary <- NULL
   exchange_files <- NULL
 
-  if (path %in% c("cpu", "scfast")) {
-    use_fast <- path == "scfast"
+  if (path %in% c("cpu", "scfast", "gpu_scfast")) {
+    use_fast <- path %in% c("scfast", "gpu_scfast")
     # 5. CPU path (Seurat, or scfastR in process)
     # RunPCAFast scales implicitly from the data layer, so ScaleData is skipped on the scfast path.
     if (assay == "RNA" && !use_fast) obj <- tm("scale", Seurat::ScaleData(obj, features = hvg, verbose = FALSE))
     npcs_run <- if (identical(pcs_setting, "auto")) npcs_compute else max(npcs_compute_fixed, 2L)
     obj <- if (use_fast) {
-      tm("pca", scfastR::RunPCAFast(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed, verbose = FALSE))
+      tm("pca", scfastR::RunPCAFast(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed,
+                                    device = scfast_dev, verbose = FALSE))
     } else tm("pca", Seurat::RunPCA(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed, verbose = FALSE))
     if (identical(pcs_setting, "auto")) {
       el <- s2_elbow_pcs(SeuratObject::Stdev(obj, reduction = "pca"))
@@ -386,7 +396,7 @@ run_s2 <- function(cfg, repo) {
     if (use_fast) {
       obj <- tm("neighbors", scfastR::FindNeighborsFast(obj, reduction = rep_red, dims = dims, k.param = cfg$n_neighbors,
                                                         graph.name = paste0(assay, c("_nn", "_snn")),
-                                                        random.seed = seed, verbose = FALSE))
+                                                        random.seed = seed, device = scfast_dev, verbose = FALSE))
     } else {
       obj <- tm("neighbors", Seurat::FindNeighbors(obj, reduction = rep_red, dims = dims, k.param = cfg$n_neighbors,
                                                    graph.name = paste0(assay, c("_nn", "_snn")), verbose = FALSE))
@@ -483,10 +493,13 @@ run_s2 <- function(cfg, repo) {
   summary <- list(
     stage = "S2", run_id = cfg$run_id, config_hash = cfg$config_hash, created_utc = .scp_utc(),
     device = plan$device, plan = plan$plan, reason = plan$reason, plan_source = plan$source,
-    path = switch(path, cpu = "cpu_seurat", scfast = "cpu_scfast", gpu = "gpu_exchange", exchange_cpu = "exchange_cpu"),
+    path = switch(path, cpu = "cpu_seurat", scfast = "cpu_scfast", gpu_scfast = "gpu_scfast",
+                  gpu = "gpu_exchange", exchange_cpu = "exchange_cpu"),
     engine = engine, scfast_version = scfast_ver,
+    scfast_device = if (path %in% c("scfast", "gpu_scfast")) scfast_dev else NULL,
     path_reason = path_reason,
-    gpu_core_device = if (path %in% c("cpu", "scfast")) NULL else (gpu_summary$device %||% NA),
+    gpu_core_device = if (path %in% c("cpu", "scfast")) NULL
+                      else if (path == "gpu_scfast") "cuda" else (gpu_summary$device %||% NA),
     cells_in = cells_in, cells_out = ncol(obj),
     qc = list(review_action = review_action, decisions = dec_counts),
     normalization = cfg$normalization, n_hvg = n_hvg_used,
