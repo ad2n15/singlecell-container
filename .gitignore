@@ -24,3 +24,6 @@ __pycache__/
 .pytest_cache/
 tests/benchmark/inputs/
 tests/benchmark/results/
+# benchmark runs (commit a chosen baseline with git add -f)
+bench/results/
+rust/target/

@@ -1,0 +1,11 @@
+# Written by hand (no roxygen run); keep in sync with the @export tags in R/scfast.R.
+useDynLib(scfastR, .registration = TRUE)
+
+export(RunPCAFast)
+export(FindNeighborsFast)
+export(FindClustersFast)
+export(scfast_pca)
+export(scfast_knn)
+export(scfast_snn)
+export(scfast_leiden)
+export(scfast_info)

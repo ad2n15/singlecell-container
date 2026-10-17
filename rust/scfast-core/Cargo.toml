@@ -1,0 +1,18 @@
+[package]
+name = "scfast-core"
+description = "Fast single-cell kernels (implicit-scaled PCA, kNN, SNN, Leiden) behind Seurat and Scanpy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+faer.workspace = true
+rayon.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+thiserror.workspace = true
+hnsw_rs.workspace = true
+single-clustering.workspace = true
+
+[dev-dependencies]
