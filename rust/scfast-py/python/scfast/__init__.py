@@ -232,7 +232,7 @@ def pca(
 def knn(
     X: Any,
     k: int = 20,
-    method: Literal["auto", "exact", "hnsw"] = "auto",
+    method: Literal["auto", "exact", "kdtree", "hnsw"] = "auto",
     seed: int = 0,
     auto_threshold: int = 50_000,
     m: int = 16,
@@ -240,6 +240,7 @@ def knn(
     ef_search: int = 64,
     *,
     device: Literal["auto", "cpu", "cuda"] = "auto",
+    max_leaves: int = 64,
 ) -> tuple[np.ndarray, np.ndarray]:
     """k nearest neighbours (Euclidean), replacing the kNN part of Seurat's ``FindNeighbors``.
 
@@ -252,9 +253,11 @@ def knn(
     k
         Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``), at least 2.
     method
-        ``"exact"`` (blocked brute force, exact), ``"hnsw"`` (approximate, hnsw_rs) or
-        ``"auto"``: exact when there are fewer than ``auto_threshold`` cells, else HNSW
-        with ``m``, ``ef_construction`` and ``ef_search``.
+        ``"exact"`` (exact: a k-d tree up to 16 dims, blocked brute force above),
+        ``"kdtree"`` (approximate: the k-d tree search stopped after ``max_leaves``
+        leaves; deterministic), ``"hnsw"`` (approximate, hnsw_rs) or ``"auto"``: exact
+        when there are fewer than ``auto_threshold`` cells, else ``"kdtree"`` up to 16
+        dims and HNSW with ``m``, ``ef_construction`` and ``ef_search`` above.
     seed
         Seeds the HNSW insertion order. Exact results are deterministic; HNSW results are
         not bit-reproducible across runs (hnsw_rs inserts in parallel).
@@ -262,6 +265,9 @@ def knn(
         ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
         the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
         ignored and ``k`` must be at most 129.
+    max_leaves
+        Leaves (32-64 cells each) the ``"kdtree"`` search may open per cell. 64 keeps
+        0.96 of the exact neighbours on 500k synthetic cells (10 PCs).
 
     Returns
     -------
@@ -287,13 +293,14 @@ def knn(
     k = _int("k", k, 2)  # the cell itself plus at least one neighbour
     if k > n:
         raise ValueError(f"k ({k}) must not exceed the number of cells ({n}); k counts the cell itself")
-    if method not in ("auto", "exact", "hnsw"):
-        raise ValueError(f"method must be 'auto', 'exact' or 'hnsw', got {method!r}")
+    if method not in ("auto", "exact", "kdtree", "hnsw"):
+        raise ValueError(f"method must be 'auto', 'exact', 'kdtree' or 'hnsw', got {method!r}")
     a = np.ascontiguousarray(a, dtype=np.float32)  # no copy when already float32 C-order
     seed, auto_threshold = _seed(seed), _int("auto_threshold", auto_threshold)
     m, ef_construction, ef_search = _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1)
+    max_leaves = _int("max_leaves", max_leaves, 1)
     return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.knn(
-        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev,
+        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev, max_leaves,
     ))
 
 

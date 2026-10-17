@@ -328,7 +328,7 @@ fn csr_view_info<'py>(
 
 /// Low-level kNN on a C-contiguous float32 (n, d) array. See scfast.knn.
 #[pyfunction]
-#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu"))]
+#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu", max_leaves = core_knn::AUTO_KD_MAX_LEAVES))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn knn_dense<'py>(
     py: Python<'py>,
@@ -341,19 +341,23 @@ fn knn_dense<'py>(
     ef_construction: usize,
     ef_search: usize,
     device: &str,
+    max_leaves: usize,
 ) -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>)> {
     let (n, d) = (x.shape()[0], x.shape()[1]);
     check_n_fits_i32(n, "knn")?;
     let device = parse_device(device)?;
     let hnsw = KnnMethod::Hnsw { m, ef_construction, ef_search };
-    // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW
-    // parameters apply in auto mode too (the core's Auto uses fixed ones).
+    let kdtree = KnnMethod::KdTree { max_leaves };
+    // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW and
+    // k-d tree parameters apply in auto mode too (the core's Auto uses fixed ones).
     let method = match method {
         "exact" => KnnMethod::Exact,
         "hnsw" => hnsw,
+        "kdtree" => kdtree,
         "auto" if n < auto_threshold => KnnMethod::Exact,
+        "auto" if d <= core_knn::KDTREE_MAX_DIMS => kdtree,
         "auto" => hnsw,
-        other => return Err(PyValueError::new_err(format!("method must be 'auto', 'exact' or 'hnsw', got {other:?}"))),
+        other => return Err(PyValueError::new_err(format!("method must be 'auto', 'exact', 'kdtree' or 'hnsw', got {other:?}"))),
     };
     let xs = contiguous(&x, "X")?;
     let params = KnnParams { k, method, auto_threshold, seed };

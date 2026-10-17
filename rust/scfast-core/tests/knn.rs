@@ -187,6 +187,8 @@ fn exact_matches_naive_across_chunks() {
 #[test]
 fn exact_matches_naive_clustered() {
     assert_matches_naive(&clustered(1200, 30, 8, 7), 20, "clustered 1200x30");
+    // k-d tree path (<= 16 dims), several levels deep
+    assert_matches_naive(&clustered(9000, 10, 12, 11), 20, "clustered 9000x10");
 }
 
 #[test]
@@ -253,6 +255,27 @@ fn auto_switches_at_threshold() {
     assert_contract(&x, &r, "auto (hnsw)");
     let rc = recall(&r, &truth);
     assert!(rc >= 0.95, "auto HNSW recall {rc}");
+
+    let x = clustered(3000, 10, 10, 12);
+    let r = knn(&x, &above).unwrap();
+    assert_eq!(r.indices, knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 64 })).unwrap().indices);
+}
+
+#[test]
+fn kdtree_cap_recall_and_contract() {
+    let x = clustered(20_000, 10, 12, 15);
+    let truth = exact(&x, 20);
+    let r = knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 64 })).unwrap();
+    assert_contract(&x, &r, "kdtree cap 64");
+    let rc = recall(&r, &truth);
+    println!("k-d tree (64 leaves) recall@20 (non-self), 20000 x 10 clustered: {rc:.4}");
+    assert!(rc >= 0.9, "recall {rc}");
+    let all = knn(&x, &params(20, KnnMethod::KdTree { max_leaves: usize::MAX })).unwrap();
+    assert_eq!(all.indices, truth.indices);
+    assert_eq!(all.distances, truth.distances);
+    let r = knn(&ties_and_duplicates(16), &params(20, KnnMethod::KdTree { max_leaves: 1 })).unwrap();
+    assert_contract(&ties_and_duplicates(16), &r, "kdtree cap 1 duplicates");
+    assert!(knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 0 })).is_err());
 }
 
 #[test]
