@@ -207,7 +207,7 @@ def knn(
         other real dtype or memory layout is converted first. The kernel takes its own
         copy of the (small) embedding matrix in any case.
     k
-        Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``).
+        Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``), at least 2.
     method
         ``"exact"`` (blocked brute force, exact), ``"hnsw"`` (approximate, hnsw_rs) or
         ``"auto"``: exact when there are fewer than ``auto_threshold`` cells, else HNSW
@@ -239,7 +239,7 @@ def knn(
     n, d = a.shape
     if n == 0 or d == 0:
         raise ValueError(f"X is empty (shape {a.shape})")
-    k = _int("k", k, 1)
+    k = _int("k", k, 2)  # the cell itself plus at least one neighbour
     if k > n:
         raise ValueError(f"k ({k}) must not exceed the number of cells ({n}); k counts the cell itself")
     if method not in ("auto", "exact", "hnsw"):

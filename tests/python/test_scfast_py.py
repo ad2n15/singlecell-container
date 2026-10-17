@@ -459,6 +459,7 @@ def test_knn_rejects_bad_input(make, exc):
 
 @pytest.mark.parametrize("kwargs, exc", [
     ({"k": 0}, ValueError),
+    ({"k": 1}, ValueError),
     ({"k": 11}, ValueError),  # more than the 10 cells
     ({"k": 2.0}, TypeError),
     ({"method": "annoy"}, ValueError),
@@ -492,12 +493,15 @@ def test_knn_exact_matches_brute_force():
     assert np.all(dist[:, 0] == 0) and np.all(np.diff(dist, axis=1) >= 0)
 
 
-def test_knn_k1_is_self():
+def test_knn_k2_is_self_plus_nearest():
     x, _ = blobs(50, 4)
+    with pytest.raises(ValueError):
+        scfast.knn(x, k=1)  # k counts the cell itself: at least 2
     with kernel():
-        idx, dist = scfast.knn(x, k=1, method="exact")
-    np.testing.assert_array_equal(idx[:, 0], np.arange(50))
-    assert np.all(dist == 0)
+        idx, dist = scfast.knn(x, k=2, method="exact")
+    ref_idx, ref_dist = brute_knn(x, 2)
+    np.testing.assert_array_equal(idx, ref_idx)
+    np.testing.assert_allclose(dist, ref_dist, rtol=1e-6, atol=1e-6)
 
 
 def _recall(idx, ref):
