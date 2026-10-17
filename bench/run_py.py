@@ -105,7 +105,7 @@ class RapidsEngine(ScanpyEngine):
         cp.cuda.Device().synchronize()
         self.cp, self.rsc = cp, rsc
         self.pool = cp.get_default_memory_pool()
-        versions.update({"rapids_singlecell": self.md.version("rapids_singlecell"), "cupy": cp.__version__})
+        versions.update({"rapids_singlecell": rsc.__version__, "cupy": cp.__version__})
         return versions
 
     def sync(self):
