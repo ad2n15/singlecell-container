@@ -1,7 +1,7 @@
 //! The implicitly scaled operator on a CUDA device (feature `cuda`).
 //!
 //! The CSR of the HVG matrix is uploaded once (i64 row offsets, u32 column indices, f32
-//! values) with the per-gene mean and 1/sd. Each randomised-SVD step then does:
+//! values) with the per-gene mean and 1/sd. Each Krylov step then does:
 //!
 //! - `apply`:   host builds `vs = diag(1/sd) V` (row-major f32) and `shift = mu^T vs` (f64,
 //!   rounded once), uploads them, runs the `zv` kernel, downloads the cells x l result.

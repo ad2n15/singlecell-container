@@ -3,26 +3,27 @@
 //!
 //! With X the log-normalised cells x genes matrix (HVGs only), per-gene mean `mu` and
 //! standard deviation `sigma`, the scaled matrix is `Z = (X - 1 mu^T) diag(1/sigma)`.
-//! Randomised SVD only needs `Z v` and `Z^T u`, which are sparse products plus a rank-one
-//! correction, so memory stays at the size of the sparse X.
+//! The SVD only needs `Z v` and `Z^T u`, which are sparse products plus a rank-one
+//! correction (and a small sparse correction for Seurat's clip), so memory stays at the
+//! size of the sparse X.
 //!
 //! # Algorithm
 //!
 //! 1. One parallel pass over the CSR for per-gene mean and standard deviation (n - 1
 //!    denominator, as `ScaleData`); constant genes get sd 1.
-//! 2. Randomised SVD (Halko, Martinsson & Tropp 2011, algorithms 4.4 and 5.1) on the
-//!    implicit operator: Gaussian test matrix (genes x l, l = n_comps + oversample) from
-//!    ChaCha8 seeded with `seed`; range finder with `power_iters` subspace iterations,
-//!    re-orthonormalising after every product; then the thin SVD of the small
-//!    genes x l matrix `Z^T Q`.
-//! 3. Embeddings `Q V_b diag(d)`, loadings `U_b`, all in f64, returned as f32.
+//! 2. Block Krylov SVD (Musco & Musco 2015) on the implicit operator: Gaussian test matrix
+//!    (genes x b, b = n_comps + oversample) from ChaCha8 seeded with `seed`; `power_iters`
+//!    subspace iterations, re-orthonormalising after every product and keeping every
+//!    cells x b block, so the basis K spans the Krylov space (width b x (power_iters + 1));
+//!    then the thin SVD of the genes x width matrix `Z^T K`.
+//! 3. Embeddings `K V_b diag(d)`, loadings `U_b`, all in f64, returned as f32.
 //!
 //! # Memory
 //!
-//! Besides the borrowed X: one cells x l f64 matrix (Q, overwritten in place; 320 bytes
-//! per cell at l = 40, against 16 KB per cell for `ScaleData`'s dense 2,000-HVG matrix),
-//! a few genes x l matrices, per-task chunk buffers, and the `Z^T U` accumulators (see
-//! `operator.rs`; about threads x log2(blocks) genes x l matrices). No transposed copy of X.
+//! Besides the borrowed X: the cells x width f64 basis K (2.2 KB per cell at the defaults,
+//! b = 40 and width 280, against 16 KB per cell for `ScaleData`'s dense 2,000-HVG matrix),
+//! one cells x b block, a few genes x width matrices, per-task chunk buffers, and the
+//! `Z^T U` accumulators (see `operator.rs`). No transposed copy of X.
 //!
 //! # Determinism
 //!
@@ -41,7 +42,7 @@ mod operator;
 
 use operator::{Blocks, Clipped, ScaledOp};
 
-/// The implicit operator `Z` as the randomised SVD sees it: `Z v` and `Z^T u` on
+/// The implicit operator `Z` as the SVD sees it: `Z v` and `Z^T u` on
 /// column-major f64 faer matrices. Implemented by the CPU [`ScaledOp`] and, with feature
 /// `cuda`, by [`cuda::CudaScaledOp`].
 pub(crate) trait Operator {
@@ -58,11 +59,10 @@ pub(crate) trait Operator {
 pub struct PcaParams {
     /// Number of components (Seurat `npcs`; pipeline default 30).
     pub n_comps: usize,
-    /// Extra random directions for the range finder (Halko et al.). Default 30: scRNA-seq
-    /// spectra flatten into a noise bulk after the cell-type components, and the extra
-    /// directions are what lets PCs 10-30 converge (see `Default`).
+    /// Extra random directions per Krylov block (block width `n_comps + oversample`).
+    /// Default 10 (see `Default`).
     pub oversample: usize,
-    /// Power iterations; more improves accuracy when the spectrum decays slowly. Default 10.
+    /// Power iterations, i.e. Krylov blocks beyond the first. Default 6.
     pub power_iters: usize,
     /// RNG seed (Seurat `seed.use`; pipeline default 0). Same seed, same result.
     pub seed: u64,
@@ -73,15 +73,15 @@ pub struct PcaParams {
     pub clip: Option<f64>,
 }
 
-/// Defaults chosen on the parity runs (Seurat 5.0.1, top-10 PC subspace similarity against
-/// unclipped `RunPCA`): `oversample = 10, power_iters = 4` gives 0.936 on the pbmc_like
-/// fixture and 0.88-0.94 on 2k/5k synthetic PBMC-like data, because PCs past the cell-type
-/// signal sit in a flat noise bulk; `oversample = 30, power_iters = 10` gives 0.9998,
-/// 0.994 and 0.986 (signal PCs exact) for about 2.7x the time, still >25x faster than
-/// `ScaleData` + `RunPCA`.
+/// Defaults chosen on PBMC 3k against Seurat 5.6 (Seurat's HVGs, clipped `RunPCA`, kNN
+/// overlap on the top 10 PCs, k = 20): block Krylov with `oversample = 10, power_iters = 6`
+/// gives 0.977 (exact SVD: 0.9975) in 1.1 s at 100k cells on 12 threads, where the plain
+/// randomised SVD needed `oversample = 60, power_iters = 30` (6.4 s) for the same accuracy
+/// and gave 0.905 at `30 / 10` (1.4 s). PCs 9-11 there have nearly equal singular values,
+/// which is the case Krylov methods converge on fastest.
 impl Default for PcaParams {
     fn default() -> Self {
-        Self { n_comps: 30, oversample: 30, power_iters: 10, seed: 0, scale: true, clip: Some(10.0) }
+        Self { n_comps: 30, oversample: 10, power_iters: 6, seed: 0, scale: true, clip: Some(10.0) }
     }
 }
 
@@ -111,7 +111,7 @@ pub struct PcaResult {
 /// Details:
 /// - `gene_sd` is the sd actually used: the sample sd (n - 1 denominator) for scaled genes,
 ///   1 for constant genes, and 1 for every gene when `params.scale` is false.
-/// - `l = n_comps + oversample` is capped at `min(n_cells, n_genes)`.
+/// - The Krylov width `(n_comps + oversample) x (power_iters + 1)` is capped at `min(n_cells, n_genes)`.
 /// - `params.clip` must be positive (`inf` allowed); finite values clip scaled values above it.
 /// - Errors: `InvalidParameter` for `n_comps == 0`, `n_comps >= min(n_cells, n_genes)` or a
 ///   non-positive / NaN `clip`; `InvalidInput` for malformed CSR structure (including
@@ -123,7 +123,7 @@ pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaPa
 /// [`implicit_scaled_pca`] on a chosen [`Device`] (docs/scfast-integration.md Phase 6).
 ///
 /// `Device::Cpu` is exactly [`implicit_scaled_pca`]. `Device::Cuda(i)` runs the two sparse
-/// products of every randomised-SVD step on the GPU (NVRTC CSR kernels with the mean / 1/sd
+/// products of every Krylov step on the GPU (NVRTC CSR kernels with the mean / 1/sd
 /// correction applied on device, f32) and keeps the gene statistics, TSQR and the small SVD
 /// on the CPU in f64; it needs the `cuda` feature, a visible device and enough device memory
 /// for the CSR plus a few cells x l buffers, otherwise it returns [`Error::Gpu`] without
@@ -141,22 +141,22 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
         .collect();
     let inv_sd: Vec<f64> = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
 
-    let l = k.saturating_add(params.oversample).min(n.min(p));
+    let b = k.saturating_add(params.oversample).min(n.min(p));
     let clip = params.clip.filter(|c| c.is_finite());
     let (q, ub, d, vb) = match device {
         Device::Cpu => {
             let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
             match clip {
-                Some(c) => randomized_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), l, params.power_iters, params.seed)?,
-                None => randomized_svd(&op, l, params.power_iters, params.seed)?,
+                Some(c) => block_krylov_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), b, params.power_iters, params.seed)?,
+                None => block_krylov_svd(&op, b, params.power_iters, params.seed)?,
             }
         }
         #[cfg(feature = "cuda")]
         Device::Cuda(ordinal) => {
-            let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, l, ordinal)?;
+            let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, b, ordinal)?;
             match clip {
-                Some(c) => randomized_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), l, params.power_iters, params.seed)?,
-                None => randomized_svd(&op, l, params.power_iters, params.seed)?,
+                Some(c) => block_krylov_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), b, params.power_iters, params.seed)?,
+                None => block_krylov_svd(&op, b, params.power_iters, params.seed)?,
             }
         }
         #[cfg(not(feature = "cuda"))]
@@ -232,34 +232,52 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
     Ok(())
 }
 
-/// Randomised SVD of the implicit operator. Returns (Q: n x l orthonormal, U_b: p x l,
-/// d: l singular values, V_b: l x l) with `Z ≈ (Q V_b) diag(d) U_b^T`.
-fn randomized_svd<O: Operator>(
+/// Block Krylov SVD (Musco & Musco 2015): subspace iteration that keeps every
+/// power-iteration block, so the basis spans `[Z Ω, (Z Z^T) Z Ω, ...]` and the
+/// top singular vectors converge much faster when singular values are close.
+fn block_krylov_svd<O: Operator>(
     op: &O,
-    l: usize,
-    power_iters: usize,
+    b: usize,
+    iters: usize,
     seed: u64,
 ) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
     let (n, p) = (op.nrows(), op.ncols());
-    let omega = dense::gaussian(p, l, seed);
-    let mut q = faer::Mat::<f64>::zeros(n, l);
-    op.apply(omega.as_ref(), q.as_mut())?;
+    let blocks = (iters + 1).min(n.min(p) / b);
+    let width = blocks * b;
+    let mut k = faer::Mat::<f64>::zeros(n, width);
+    let omega = dense::gaussian(p, b, seed);
+    let mut y = faer::Mat::<f64>::zeros(n, b);
+    op.apply(omega.as_ref(), y.as_mut())?;
     drop(omega);
-    dense::orthonormalize(q.as_mut());
-    for _ in 0..power_iters {
-        let mut w = op.apply_t(q.as_ref())?;
-        dense::orthonormalize(w.as_mut());
-        op.apply(w.as_ref(), q.as_mut())?;
-        dense::orthonormalize(q.as_mut());
+    dense::orthonormalize(y.as_mut());
+    // A basis capped by min(n, p) cannot hold every block: the surplus iterations refine
+    // the start block instead.
+    for _ in blocks..iters + 1 {
+        let mut g = op.apply_t(y.as_ref())?;
+        dense::orthonormalize(g.as_mut());
+        op.apply(g.as_ref(), y.as_mut())?;
+        dense::orthonormalize(y.as_mut());
     }
-    // B^T = Z^T Q (p x l) = U_b diag(d) V_b^T, so Z ≈ Q B = (Q V_b) diag(d) U_b^T.
-    let bt = op.apply_t(q.as_ref())?;
+    for i in 0..blocks {
+        k.as_mut().submatrix_mut(0, i * b, n, b).copy_from(y.as_ref());
+        if i + 1 < blocks {
+            let mut g = op.apply_t(y.as_ref())?;
+            dense::orthonormalize(g.as_mut());
+            op.apply(g.as_ref(), y.as_mut())?;
+            dense::orthonormalize(y.as_mut());
+        }
+    }
+    dense::orthonormalize(k.as_mut());
+    // B^T = Z^T K (p x width), one block of b columns per product.
+    let mut bt = faer::Mat::<f64>::zeros(p, width);
+    for i in 0..blocks {
+        let part = op.apply_t(k.as_ref().submatrix(0, i * b, n, b))?;
+        bt.as_mut().submatrix_mut(0, i * b, p, b).copy_from(part.as_ref());
+    }
     let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;
-    Ok((q, ub, d, vb))
+    Ok((k, ub, d, vb))
 }
 
-/// Embeddings `Q V_b[:, :k] diag(d_k signs)` as row-major f32, parallel over fixed row
-/// chunks (each a sequential faer product, so thread-count independent).
 fn embed(q: faer::MatRef<'_, f64>, vb: faer::MatRef<'_, f64>, d: &[f64], signs: &[f64], k: usize) -> RowMajor {
     use rayon::prelude::*;
     const ROWS: usize = 1024;

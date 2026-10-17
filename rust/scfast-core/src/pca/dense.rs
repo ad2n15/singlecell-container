@@ -1,4 +1,4 @@
-//! Dense steps of the randomised SVD, on faer 0.24 with explicit `Par::Seq` inside each
+//! Dense steps of the block Krylov SVD, on faer 0.24 with explicit `Par::Seq` inside each
 //! task so no result depends on faer's global parallelism or the rayon pool size.
 //!
 //! - `orthonormalize`: thin Q of a tall matrix by TSQR. Rows are split into a fixed number
