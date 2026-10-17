@@ -208,12 +208,14 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                 }
                 let e = base + t;
                 let (j, kk) = (heads[e] as usize, tails[e] as usize);
-                let mut cur = get(j);
+                let cur0 = get(j);
+                let mut cur = cur0;
                 let mut oth = get(kk);
                 let dx = [cur[0] - oth[0], cur[1] - oth[1]];
                 let d2 = dx[0] * dx[0] + dx[1] * dx[1];
                 if d2 > 0.0 {
-                    let gc = -2.0 * a * b * d2.powf(b - 1.0) / (a * d2.powf(b) + 1.0);
+                    let pb = d2.powf(b);
+                    let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
                     for d in 0..DIM {
                         let g = clip(gc * dx[d]) * alpha;
                         cur[d] += g;
@@ -225,12 +227,12 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                 let eneg = eps[e] / neg_rate;
                 let n_neg = ((ep - nn[t]) / eneg) as usize;
                 for _ in 0..n_neg {
-                    let q = (xorshift(&mut rng) % n as u64) as usize;
+                    let q = (((xorshift(&mut rng) >> 32) * n as u64) >> 32) as usize;
                     if q == j {
                         continue;
                     }
                     let o = get(q);
-                    let dx = [cur[0] - o[0], cur[1] - o[1]];
+                    let dx = [cur0[0] - o[0], cur0[1] - o[1]];
                     let d2 = dx[0] * dx[0] + dx[1] * dx[1];
                     let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
                     for d in 0..DIM {
