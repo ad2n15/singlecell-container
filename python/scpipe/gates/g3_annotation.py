@@ -6,18 +6,15 @@ Inputs: ``S3/evidence_bundle.json`` and ``S3/annotation_consensus.tsv`` (read
 with the helpers in :mod:`scpipe.gates.g2_context`), plus the cell-type
 label table ``python/scpipe/annotation/markers_human.yaml`` when present.
 
-Label table layout accepted (the file is owned by the annotation developer;
-this reader is tolerant): any of ::
+Label table layout (``markers_human.yaml``, owned by the annotation developer)::
 
-    cell_types:                      # list form
-      - {label: "CD4 T cell", level: fine, cl_id: "CL:0000624", parent: "T cell", markers: [...]}
-    cell_types:                      # dict form keyed by label
-      "CD4 T cell": {cl_id: "CL:0000624", level: fine, markers: [...]}
-    broad: {...}  fine: {...}        # two dicts keyed by label
+    cell_types:
+      - {label_fine: "CD4 T cell", label_broad: "T cell", cl_id: "CL:0000624", markers: [...], generic?: bool}
 
-Any mapping that carries a ``cl_id`` or ``markers`` key and a label (its own
-``label``/``name`` field or its dict key) is taken as a cell type. Without the
-file, :data:`BUILTIN_LABELS` is used. ``Unassigned`` is always allowed.
+The reader is tolerant: any mapping carrying ``cl_id`` or ``markers`` and a
+label (``label_fine``/``label``/``name`` or its dict key) is a cell type; its
+``label_broad`` is allowed as a label too. Without the file,
+:data:`BUILTIN_LABELS` is used. ``Unassigned`` is always allowed.
 
 G3 proposal shape (spec 5)::
 
@@ -59,33 +56,39 @@ BUILTIN_LABELS: dict[str, dict[str, Any]] = {
     "naive B cell": {"cl_id": "CL:0000788", "level": "fine", "parent": "B cell", "markers": ["IGHD", "TCL1A", "FCER2"]},
     "memory B cell": {"cl_id": "CL:0000787", "level": "fine", "parent": "B cell", "markers": ["CD27", "AIM2", "TNFRSF13B"]},
     "plasma cell": {"cl_id": "CL:0000786", "level": "broad", "markers": ["MZB1", "JCHAIN", "XBP1", "SDC1"]},
-    "Monocyte": {"cl_id": "CL:0000576", "level": "broad", "markers": ["LYZ", "CST3", "FCN1", "CTSS"]},
-    "CD14 monocyte": {"cl_id": "CL:0002057", "level": "fine", "parent": "Monocyte", "markers": ["CD14", "S100A8", "S100A9", "VCAN"]},
-    "CD16 monocyte": {"cl_id": "CL:0002396", "level": "fine", "parent": "Monocyte", "markers": ["FCGR3A", "MS4A7", "LST1"]},
-    "Dendritic cell": {"cl_id": "CL:0000451", "level": "broad", "markers": ["FCER1A", "CST3", "CLEC10A"]},
-    "conventional dendritic cell": {"cl_id": "CL:0000990", "level": "fine", "parent": "Dendritic cell", "markers": ["CLEC9A", "CD1C", "FCER1A"]},
-    "plasmacytoid dendritic cell": {"cl_id": "CL:0000784", "level": "fine", "parent": "Dendritic cell", "markers": ["IL3RA", "LILRA4", "CLEC4C"]},
-    "Neutrophil": {"cl_id": "CL:0000775", "level": "broad", "markers": ["FCGR3B", "CSF3R", "S100A8"]},
-    "Mast cell": {"cl_id": "CL:0000097", "level": "broad", "markers": ["TPSAB1", "CPA3", "KIT"]},
-    "Platelet": {"cl_id": "CL:0000233", "level": "broad", "markers": ["PPBP", "PF4", "GNG11", "TUBB1"]},
-    "Erythrocyte": {"cl_id": "CL:0000232", "level": "broad", "markers": ["HBB", "HBA1", "HBA2"]},
-    "Hematopoietic stem cell": {"cl_id": "CL:0000037", "level": "broad", "markers": ["CD34", "SPINK2"]},
-    "Epithelial cell": {"cl_id": "CL:0000066", "level": "broad", "markers": ["EPCAM", "KRT8", "KRT18"]},
-    "Endothelial cell": {"cl_id": "CL:0000115", "level": "broad", "markers": ["PECAM1", "VWF", "CDH5"]},
-    "Fibroblast": {"cl_id": "CL:0000057", "level": "broad", "markers": ["COL1A1", "COL1A2", "DCN"]},
-    "Hepatocyte": {"cl_id": "CL:0000182", "level": "broad", "markers": ["ALB", "APOA1", "TTR"]},
-    "Neuron": {"cl_id": "CL:0000540", "level": "broad", "markers": ["RBFOX3", "SNAP25", "SYT1"]},
+    "monocyte": {"cl_id": "CL:0000576", "level": "broad", "markers": ["LYZ", "CST3", "FCN1", "CTSS"]},
+    "CD14 monocyte": {"cl_id": "CL:0002057", "level": "fine", "parent": "monocyte", "markers": ["CD14", "S100A8", "S100A9", "VCAN"]},
+    "CD16 monocyte": {"cl_id": "CL:0002396", "level": "fine", "parent": "monocyte", "markers": ["FCGR3A", "MS4A7", "LST1"]},
+    "dendritic cell": {"cl_id": "CL:0000451", "level": "broad", "markers": ["FCER1A", "CST3", "CLEC10A"]},
+    "conventional dendritic cell": {"cl_id": "CL:0000990", "level": "fine", "parent": "dendritic cell", "markers": ["CLEC9A", "CD1C", "FCER1A"]},
+    "plasmacytoid dendritic cell": {"cl_id": "CL:0000784", "level": "fine", "parent": "dendritic cell", "markers": ["IL3RA", "LILRA4", "CLEC4C"]},
+    "neutrophil": {"cl_id": "CL:0000775", "level": "broad", "markers": ["FCGR3B", "CSF3R", "S100A8"]},
+    "mast cell": {"cl_id": "CL:0000097", "level": "broad", "markers": ["TPSAB1", "CPA3", "KIT"]},
+    "platelet": {"cl_id": "CL:0000233", "level": "broad", "markers": ["PPBP", "PF4", "GNG11", "TUBB1"]},
+    "erythrocyte": {"cl_id": "CL:0000232", "level": "broad", "markers": ["HBB", "HBA1", "HBA2"]},
+    "hematopoietic stem cell": {"cl_id": "CL:0000037", "level": "broad", "markers": ["CD34", "SPINK2"]},
+    "epithelial cell": {"cl_id": "CL:0000066", "level": "broad", "markers": ["EPCAM", "KRT8", "KRT18"]},
+    "endothelial cell": {"cl_id": "CL:0000115", "level": "broad", "markers": ["PECAM1", "VWF", "CDH5"]},
+    "fibroblast": {"cl_id": "CL:0000057", "level": "broad", "markers": ["COL1A1", "COL1A2", "DCN"]},
+    "hepatocyte": {"cl_id": "CL:0000182", "level": "broad", "markers": ["ALB", "APOA1", "TTR"]},
+    "neuron": {"cl_id": "CL:0000540", "level": "broad", "markers": ["RBFOX3", "SNAP25", "SYT1"]},
     "Unassigned": {"cl_id": None, "level": "broad", "markers": []},
 }
 
 
 def _collect_labels(node: Any, key: str | None, out: dict[str, dict[str, Any]], level_hint: str | None) -> None:
     if isinstance(node, Mapping):
-        if ("cl_id" in node or "markers" in node) and (key or node.get("label") or node.get("name")):
-            label = str(node.get("label") or node.get("name") or key)
+        fine = node.get("label_fine") or node.get("label") or node.get("name") or key
+        if ("cl_id" in node or "markers" in node) and fine:
+            broad = node.get("label_broad") or node.get("parent") or node.get("broad")
             entry = {"cl_id": node.get("cl_id"), "level": node.get("level") or level_hint or "fine",
-                     "parent": node.get("parent") or node.get("broad"), "markers": list(node.get("markers") or [])}
-            out[label] = entry
+                     "parent": broad, "markers": list(node.get("markers") or [])}
+            if node.get("generic") or str(fine) == str(broad):
+                entry["level"] = "broad"
+            out[str(fine)] = entry
+            if broad and str(broad) not in out:
+                # the broad label is allowed on its own; a generic entry (fine == broad) fills in its CL id later
+                out[str(broad)] = {"cl_id": None, "level": "broad", "parent": None, "markers": []}
             return
         for k, v in node.items():
             hint = k if k in ("broad", "fine") else level_hint

@@ -161,6 +161,13 @@ cell_types:
     markers: [LILRA4, IL3RA, CLEC4C, IRF7, TCF4, JCHAIN, PLD4, ITM2C, SERPINF1, PTCRA]
     celltypist_labels: [pDC, pDC precursors]
   # ------------------------------------------------------------ granulocytes
+  - label_fine: granulocyte
+    label_broad: granulocyte
+    cl_id: CL:0000094
+    generic: true
+    tissue: [blood, immune]
+    markers: [S100A8, S100A9, CSF3R, FCGR3B, CXCR2, CLC, MNDA, G0S2]
+    celltypist_labels: [Granulocytes, Promyelocytes, Myelocytes]
   - label_fine: neutrophil
     label_broad: granulocyte
     cl_id: CL:0000775

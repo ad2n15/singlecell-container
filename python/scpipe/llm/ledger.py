@@ -121,9 +121,14 @@ def price_for(prices: Mapping[str, Mapping[str, float]], model: str) -> tuple[di
 class Ledger:
     """Per-run and total cost ledgers with the budget guard (see module docstring)."""
 
-    def __init__(self, path: str | Path, *, run_id: str, budget: Mapping[str, Any] | None = None,
-                 total_path: str | Path | None = None, prices: Mapping[str, Mapping[str, float]] | None = None):
+    def __init__(self, path: str | Path, *, run_id: str = "adhoc", budget: Mapping[str, Any] | None = None,
+                 total_path: str | Path | None = None, prices: Mapping[str, Mapping[str, float]] | None = None,
+                 per_run_limit: float | None = None, total_limit: float | None = None,
+                 usd_to_gbp: float | None = None):
         b = dict(DEFAULT_BUDGET, **{k: v for k, v in (budget or {}).items() if v is not None})
+        for k, v in (("per_run_limit", per_run_limit), ("total_limit", total_limit), ("usd_to_gbp", usd_to_gbp)):
+            if v is not None:
+                b[k] = v
         self.path = Path(path)
         self.run_id = str(run_id)
         self.per_run_limit = float(b["per_run_limit"])

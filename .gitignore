@@ -22,3 +22,5 @@ __pycache__/
 # Python caches
 __pycache__/
 .pytest_cache/
+tests/benchmark/inputs/
+tests/benchmark/results/

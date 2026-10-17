@@ -8,14 +8,19 @@ Per cluster, three sources vote for entries of the marker reference
   across clusters; support = clip(z / 2, 0, 1), zero when the mean score is
   <= 0 (below the control genes), times a coverage factor
   ``min(1, n_genes_found / max(3, ceil(n_genes_set / 2)))`` so sets with only
-  a couple of genes in the data carry little weight. A set votes for the fine
-  entry named by its ``cell_type``.
+  a couple of genes in the data carry little weight, times the ratio of the
+  set's score to the cluster's best lineage score (z-scores are scale free, so
+  this keeps a set that is barely above its background from matching the
+  cluster's real lineage). A set votes for the fine entry named by its
+  ``cell_type``; fine labels without a set of their own inherit their broad
+  group's signature support when fine labels are compared.
 * **celltypist** - fraction of the cluster's cells whose ``majority_voting``
   label maps (case-insensitively, through ``celltypist_labels`` aliases) to
   each entry. Present only when ``S3/celltypist.tsv.gz`` exists.
 * **markers** - overlap of an entry's marker genes with the cluster's top S3
   markers: a hit at rank <= 10 counts 1, a later hit 0.5; the sum is divided
-  by ``min(len(markers), 5)`` and clipped to 1.
+  by ``min(len(markers), 5, number of top markers the cluster has)`` and
+  clipped to 1.
 
 Scores are combined with :data:`DEFAULT_WEIGHTS` (renormalised over the
 sources that are available) at the **broad** level first (a broad label takes
@@ -172,11 +177,21 @@ def _coverage(n_found: int, n_set: int) -> float:
     return min(1.0, n_found / need) if n_found > 0 else 0.0
 
 
+def _valid(x: Any) -> bool:
+    return x is not None and not (isinstance(x, float) and math.isnan(x))
+
+
 def signature_votes(clusters: Mapping[str, Mapping[str, Any]], signature_sets: Mapping[str, Mapping[str, Any]],
-                    ref: MarkerReference) -> tuple[dict[str, dict[str, float]], bool]:
-    """Per cluster, support per fine label from the lineage signature sets. Returns (votes, available)."""
+                    ref: MarkerReference) -> tuple[dict[str, dict[str, float]], bool, set[str]]:
+    """Per cluster, support per fine label from the lineage signature sets.
+
+    Returns ``(votes, available, covered)``; ``covered`` is the set of fine labels that have at
+    least one scored set (fine labels without one inherit their broad group's support).
+    """
     votes: dict[str, dict[str, float]] = {c: {} for c in clusters}
     available = False
+    covered: set[str] = set()
+    usable: dict[str, tuple[str, float]] = {}
     for name, meta in signature_sets.items():
         fine = meta.get("cell_type")
         if (meta.get("category", "lineage") != "lineage") or not fine or fine not in ref.by_fine:
@@ -184,19 +199,28 @@ def signature_votes(clusters: Mapping[str, Mapping[str, Any]], signature_sets: M
         n_found = int(meta.get("n_genes_found", 0) or 0)
         if n_found <= 0:
             continue
-        cov = _coverage(n_found, int(meta.get("n_genes_set", 0) or 0))
+        usable[name] = (fine, _coverage(n_found, int(meta.get("n_genes_set", 0) or 0)))
+        covered.add(fine)
+    # the cluster's strongest lineage set defines the scale: weaker sets are scaled by their ratio to it,
+    # so z-scores (scale free) cannot promote a set that is barely above its background
+    top_score: dict[str, float] = {}
+    for c in clusters:
+        sc = clusters[c].get("signatures") or {}
+        pos = [float(sc[n]) for n in usable if _valid(sc.get(n)) and float(sc[n]) > 0]
+        top_score[c] = max(pos) if pos else 0.0
+    for name, (fine, cov) in usable.items():
         scores = {c: (clusters[c].get("signatures") or {}).get(name) for c in clusters}
         z = _zscores(scores)
         available = True
         for c in clusters:
             raw = scores[c]
-            if raw is None or (isinstance(raw, float) and math.isnan(raw)) or float(raw) <= 0:
+            if not _valid(raw) or float(raw) <= 0 or top_score[c] <= 0:
                 support = 0.0
             else:
-                support = min(1.0, max(0.0, z[c] / 2.0)) * cov
+                support = min(1.0, max(0.0, z[c] / 2.0)) * cov * min(1.0, float(raw) / top_score[c])
             if support > votes[c].get(fine, 0.0):
                 votes[c][fine] = round(support, 4)
-    return votes, available
+    return votes, available, covered
 
 
 def celltypist_votes(clusters: Mapping[str, Mapping[str, Any]], ref: MarkerReference
@@ -246,7 +270,8 @@ def marker_votes(clusters: Mapping[str, Mapping[str, Any]], ref: MarkerReference
                 r = rank.get(g)
                 if r is not None:
                     s += 1.0 if r <= TOP_RANK else 0.5
-            denom = min(len(t.markers), MARKER_DENOM)
+            # a cluster with fewer than MARKER_DENOM markers in total (tiny gene universe) is judged on those
+            denom = min(len(t.markers), MARKER_DENOM, max(1, len(genes)))
             v = min(1.0, s / denom) if denom else 0.0
             if v > 0:
                 d[t.label_fine] = round(v, 4)
@@ -298,7 +323,7 @@ def annotate(clusters: Mapping[str, Mapping[str, Any]], signature_sets: Mapping[
     if weights:
         w.update({k: float(v) for k, v in weights.items()})
     signature_sets = signature_sets or {}
-    sig, sig_av = signature_votes(clusters, signature_sets, ref)
+    sig, sig_av, sig_covered = signature_votes(clusters, signature_sets, ref)
     ct, ct_unmapped, ct_av = celltypist_votes(clusters, ref)
     mk = marker_votes(clusters, ref)
     sources = [s for s, av in (("signature", sig_av), ("celltypist", ct_av), ("markers", True)) if av]
@@ -334,8 +359,11 @@ def annotate(clusters: Mapping[str, Mapping[str, Any]], signature_sets: Mapping[
 
         # fine label inside the winning broad group
         fine_scores: dict[str, float] = {}
+        broad_sig = per_source_broad["signature"].get(best_b, 0.0)
         for t in ref.by_broad[best_b]:
             parts = {s: per_source_fine[s].get(t.label_fine, 0.0) for s in sources}
+            if "signature" in sources and not t.generic and t.label_fine not in sig_covered:
+                parts["signature"] = broad_sig  # lineage-level evidence applies to every fine label of the group
             fine_scores[t.label_fine] = round(_combine(parts, w, sources), 4)
         generic = ref.generic_of(best_b)
         ranked = sorted(fine_scores.items(), key=lambda kv: (-kv[1], kv[0]))

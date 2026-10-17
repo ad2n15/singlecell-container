@@ -131,6 +131,8 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
         "qc.review_action",
         "resources.gpu_mem_cap_gb",
     ),
+    # S3 = R evidence (markers, signatures) + CellTypist + consensus, one stage (scpipe.stages.s3).
+    "S3": ("object_format", "annotation", "signatures"),
     "S4": ("object_format", "seed", "dge", "opentargets.enabled", "opentargets.max_genes_per_direction",
            "opentargets.offline"),
     "S5": ("project", "seed", "report"),
@@ -216,6 +218,12 @@ def default_stages() -> list[Stage]:
               outputs=("S1/qc_decisions.tsv.gz", "S1/qc_summary.json")),
         Stage("S2", "R", _r_stage("S2"), STAGE_CONFIG_KEYS["S2"],
               inputs=(OBJ, "S1/qc_decisions.tsv.gz"), outputs=(OBJ2, "S2/summary.json")),
+        # S3 = the R evidence step (markers, cluster summary, signatures), then CellTypist (skipped with a
+        # note when not installed), then the consensus annotation; one stage, one log (scpipe.stages.s3).
+        Stage("S3", "python", _py_stage("scpipe.stages.s3"), STAGE_CONFIG_KEYS["S3"],
+              inputs=(OBJ2, "config/samples.csv"),
+              outputs=("S3/markers.tsv.gz", "S3/cluster_summary.json", "S3/signatures.tsv.gz",
+                       "S3/evidence_bundle.json", "S3/annotation_consensus.tsv", "S3/celltypist_note.json")),
         # S4 = the R pseudobulk DGE step, then the Open Targets Python step (one stage, one log).
         Stage("S4", "python", _py_stage("scpipe.stages.s4"), STAGE_CONFIG_KEYS["S4"],
               inputs=(OBJ2,), outputs=("S4/dge_summary.json", "S4/opentargets_summary.json"),
@@ -578,13 +586,27 @@ def _outputs_present(run_dir: Path, st: Stage) -> list[str]:
     return [spec for spec in st.outputs if spec not in st.transient and _existing(run_dir, spec) is None]
 
 
-def _plan(stages: Sequence[Stage], until: int, ctx: RunContext, state: dict[str, Any]) -> tuple[int, dict[str, str]]:
-    """Return (index of the first stage to run, {stage id: reason}); len(stages) if nothing to run."""
+def is_gate(st: Stage) -> bool:
+    """Gate stages are G1..G4 (docs/agents-spec.md section 2)."""
+    return len(st.id) >= 2 and st.id[0].upper() == "G" and st.id[1:].isdigit()
+
+
+def _plan(stages: Sequence[Stage], until: int, ctx: RunContext, state: dict[str, Any],
+          no_gates: bool = False) -> tuple[int, dict[str, str]]:
+    """Return (index of the first stage to run, {stage id: reason}); len(stages) if nothing to run.
+
+    A gate recorded as ``skipped`` (an earlier ``--no-gates`` run) counts as done
+    here; :func:`run_pipeline` runs such gates in place without invalidating
+    the stages after them (their fingerprints change if the gate writes a
+    file they consume).
+    """
     reasons: dict[str, str] = {}
     start = until + 1
     for i in range(until + 1):
         st = stages[i]
         rec = state["stages"].get(st.id) or {}
+        if is_gate(st) and (no_gates or rec.get("status") == "skipped"):
+            continue
         if rec.get("status") != "done":
             reasons[st.id] = {"failed": "previous attempt failed", "running": "previous attempt did not finish"}.get(
                 rec.get("status"), "not run yet")
@@ -624,8 +646,13 @@ def run_pipeline(
     until: str | None = None,
     stages: Sequence[Stage] | None = None,
     out=None,
+    no_gates: bool = False,
 ) -> int:
-    """Run the stages for an already prepared run directory. Returns 0 on success, 1 on failure."""
+    """Run the stages for an already prepared run directory. Returns 0 on success, 1 on failure.
+
+    ``no_gates`` (``execution: split`` jobs) records gate stages as ``skipped``
+    instead of running them; a later run without it runs them in place.
+    """
     out = out or sys.stdout
     stages = _registry(stages)
     run_dir = Path(run_dir)
@@ -655,11 +682,22 @@ def run_pipeline(
                          run_dir=str(run_dir), stage_order=[s.id for s in stages])
             state["runner"] = {"pid": os.getpid(), "host": socket.gethostname(), "started_utc": _utc(),
                                "until": stages[last].id}
-            start, reasons = _plan(stages, last, ctx, state)
+            start, reasons = _plan(stages, last, ctx, state, no_gates=no_gates)
+            # Gates skipped by an earlier --no-gates run and not rerun anyway: run them in place.
+            pending_gates = [] if no_gates else [
+                i for i in range(min(start, last + 1)) if is_gate(stages[i])
+                and (state["stages"].get(stages[i].id) or {}).get("status") == "skipped"]
+            for i in pending_gates:
+                reasons[stages[i].id] = "skipped by an earlier --no-gates run"
             say(f"scpipe: run {cfg.get('run_id')} in {run_dir}")
             for i in range(start):
-                say(f"  [{stages[i].id:>4}] skip (done, inputs unchanged)")
-            if start > last:
+                if i in pending_gates:
+                    continue
+                if no_gates and is_gate(stages[i]):
+                    say(f"  [{stages[i].id:>4}] skip (gate; --no-gates)")
+                else:
+                    say(f"  [{stages[i].id:>4}] skip (done, inputs unchanged)")
+            if start > last and not pending_gates:
                 save_state(run_dir, state)
                 say(f"scpipe: nothing to do up to {stages[last].id}; all stages are done and unchanged")
                 return 0
@@ -670,8 +708,14 @@ def run_pipeline(
                     rec["note"] = f"invalidated: {stages[start].id} is rerun"
             save_state(run_dir, state)
 
-            for i in range(start, last + 1):
+            for i in pending_gates + list(range(start, last + 1)):
                 st = stages[i]
+                if no_gates and is_gate(st):
+                    state["stages"][st.id] = {"status": "skipped", "lang": st.lang, "note": "skipped: --no-gates",
+                                              "skipped_utc": _utc()}
+                    save_state(run_dir, state)
+                    say(f"  [{st.id:>4}] skip (gate; --no-gates)")
+                    continue
                 reason = reasons.get(st.id) or f"upstream {stages[start].id} was rerun"
                 fp, parts = _fingerprint(stages, i, ctx, state)
                 missing_in = [s for s in st.inputs if _existing(run_dir, s) is None]
@@ -789,9 +833,9 @@ def _runner_alive(run_dir: Path) -> bool:
 # --------------------------------------------------------------------------
 
 PY_REQUIRED = ("anndata", "scanpy", "h5py", "numpy", "scipy", "pandas", "yaml", "sklearn", "igraph", "leidenalg", "skimage")
-PY_OPTIONAL = ("harmonypy", "rapids_singlecell", "cupy", "psutil")
+PY_OPTIONAL = ("harmonypy", "rapids_singlecell", "cupy", "psutil", "jinja2", "matplotlib", "requests", "celltypist")
 R_REQUIRED = ("Seurat", "SeuratObject", "Matrix", "hdf5r", "jsonlite", "digest", "yaml")
-R_OPTIONAL = ("harmony", "leidenbase", "uwot", "qs2", "scDblFinder", "glmGamPoi", "BPCells", "presto")
+R_OPTIONAL = ("harmony", "leidenbase", "uwot", "qs2", "scDblFinder", "glmGamPoi", "BPCells", "presto", "DESeq2", "limma")
 _DIST = {"yaml": "PyYAML", "sklearn": "scikit-learn", "skimage": "scikit-image", "igraph": "igraph",
          "rapids_singlecell": "rapids-singlecell", "cupy": "cupy"}
 
@@ -918,6 +962,14 @@ def doctor(config_path: str | None = None, run_dir: str | None = None) -> dict[s
     if target:
         ok, detail = _writable(Path(target).expanduser().resolve())
         add("storage", "run_dir", ok, detail)
+    # Portability and LLM checks (docs/agents-spec.md section 8): site file,
+    # execution mode, container, API key + tool-use test, budget, Open Targets.
+    try:
+        from . import site as sitemod
+
+        report["checks"].extend(sitemod.doctor_checks(cfg))
+    except Exception as e:  # never let an extra check break doctor
+        add("site", "portability checks", True, f"skipped: {e}", required=False)
     report["ok"] = all(c["ok"] for c in report["checks"] if c["required"])
     return report
 
@@ -1033,6 +1085,17 @@ def _parser() -> argparse.ArgumentParser:
     s.add_argument("--until", default=None, metavar="STAGE")
     s.add_argument("--detach", action="store_true")
     s.add_argument("--env-file", default=None, help=argparse.SUPPRESS)
+    for sp in (r, s):
+        sp.add_argument("--execution", default=None, choices=cfgmod.EXECUTION_MODES,
+                        help="override execution from the config/site file (direct runs here; slurm/pbs/lsf/sge "
+                             "submit one job; split submits the heavy stages and runs the gates here)")
+        sp.add_argument("--no-gates", action="store_true", help="record gate stages as skipped instead of running them")
+    i = sub.add_parser("init-site", help="detect scheduler, GPU, container runtime and internet; draft a site file")
+    i.add_argument("--write", default=None, metavar="PATH")
+    i.add_argument("--name", default=None)
+    i.add_argument("--no-internet-check", action="store_true")
+    i.add_argument("--config", default=None)
+    i.add_argument("--json", action="store_true")
     t = sub.add_parser("status", help="stage states, timings and peak memory")
     t.add_argument("--run-dir", required=True)
     t.add_argument("--json", action="store_true", help="print state.json")
@@ -1041,6 +1104,19 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--run-dir", default=None)
     d.add_argument("--json", action="store_true")
     return p
+
+
+def _submit_mode(mode: str, resolved: dict[str, Any], rd: Path, stages: Sequence[Stage], until: str | None, out) -> int:
+    """``execution: slurm|pbs|lsf|sge`` submits one job; ``split`` submits the heavy stages (docs/agents-spec.md 8)."""
+    from . import site as sitemod
+
+    if _runner_alive(rd):
+        raise RunnerError(f"another scpipe runner is active in {rd}")
+    if mode == "split":
+        sitemod.submit_split(resolved, rd, [s.id for s in stages], until=until, out=out)
+    else:
+        sitemod.submit(resolved, rd, mode, until=until, out=out)
+    return 0
 
 
 def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None, out=None) -> int:
@@ -1058,20 +1134,45 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
             if _runner_alive(rd):
                 raise RunnerError(f"another scpipe runner is active in {rd}")
             resolved = cfgmod.prepare_run_dir(cfg)
+            mode = a.execution or resolved.get("execution") or "direct"
+            if mode != "direct":
+                return _submit_mode(mode, resolved, rd, _registry(stages), a.until, out)
             if a.detach:
-                args = ["run", "--config", str(cfg["config_file"]), "--run-dir", str(rd)]
+                args = ["run", "--config", str(cfg["config_file"]), "--run-dir", str(rd), "--execution", "direct"]
                 if a.until:
                     args += ["--until", a.until]
+                if a.no_gates:
+                    args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
-            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out)
+            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates)
         if a.cmd == "resume":
             rd = Path(a.run_dir).expanduser().resolve()
             resolved = cfgmod.load_resolved(rd)
             _stage_index(_registry(stages), a.until)
+            mode = a.execution or "direct"  # resume runs here unless asked to submit again
+            if mode != "direct":
+                return _submit_mode(mode, resolved, rd, _registry(stages), a.until, out)
             if a.detach:
-                args = ["resume", "--run-dir", str(rd)] + (["--until", a.until] if a.until else [])
+                args = ["resume", "--run-dir", str(rd), "--execution", "direct"] + (["--until", a.until] if a.until else [])
+                if a.no_gates:
+                    args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
-            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out)
+            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates)
+        if a.cmd == "init-site":
+            from . import site as sitemod
+
+            args = []
+            if a.write:
+                args += ["--write", a.write]
+            if a.name:
+                args += ["--name", a.name]
+            if a.no_internet_check:
+                args += ["--no-internet-check"]
+            if a.config:
+                args += ["--config", a.config]
+            if a.json:
+                args += ["--json"]
+            return sitemod.init_site_main(args, out=out)
         if a.cmd == "status":
             rd = Path(a.run_dir).expanduser().resolve()
             if a.json:

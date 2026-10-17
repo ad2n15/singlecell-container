@@ -196,6 +196,11 @@ def get_provider(cfg_llm: Mapping[str, Any], role: str = "default") -> Provider:
     if kind == "mock":
         from .mock_provider import MockProvider
 
+        if s.get("script") is None:  # scripts may also sit at llm.script (a list, or a dict keyed by role)
+            script = cfg_llm.get("script")
+            if isinstance(script, Mapping):
+                script = script.get(role)
+            s["script"] = script
         return MockProvider.from_settings(s, role)
     if kind == "bedrock":
         raise NotImplementedError(

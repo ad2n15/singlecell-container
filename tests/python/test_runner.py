@@ -347,8 +347,10 @@ def test_r_stage_command_and_rscript_override(tmp_path, monkeypatch):
     assert st["S2"].command(ctx)[0] == "/opt/R/bin/Rscript" and st["S2"].command(ctx)[3] == "S2"
     assert st["S1b"].command(ctx) == [sys.executable, "-m", "scpipe.stages.s1b_doublets", "--run-dir", str(tmp_path)]
     assert st["S1c"].command(ctx)[2] == "scpipe.stages.s1c_qc"
-    assert [s.id for s in R.default_stages()] == ALL
-    assert [s.lang for s in R.default_stages()] == ["R", "R", "python", "python", "R"]
+    # later build steps append stages (S3, S4, gates, S5) after S2
+    assert [s.id for s in R.default_stages()][: len(ALL)] == ALL
+    assert [s.lang for s in R.default_stages()][: len(ALL)] == ["R", "R", "python", "python", "R"]
+    assert st["S4"].command(ctx)[2] == "scpipe.stages.s4" and st["S4"].optional_inputs
 
 
 def test_status_output(project):

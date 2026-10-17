@@ -88,6 +88,14 @@ DEFAULTS: dict[str, Any] = {
     "pcs": "auto",
     "n_neighbors": 20,
     "clustering": {"resolution": 0.5},
+    # S3 evidence and consensus annotation (docs/agents-spec.md sections 4-5).
+    # celltypist: auto (run when installed and a model is available, else skip with a note) | off;
+    # models_dir: CellTypist model cache (null = refs/celltypist next to config.yaml);
+    # min_confidence: consensus below it is low_confidence (the G3 agent may revise it).
+    "annotation": {"celltypist_model": "Immune_All_Low.pkl", "celltypist": "auto", "min_confidence": 0.6,
+                   "models_dir": None},
+    # Optional path to a signature YAML replacing R/stages/data/signatures.yaml.
+    "signatures": None,
     # S4 pseudobulk DGE and Open Targets (docs/agents-spec.md section 6)
     "dge": {
         "sample_col": "sample_id",
@@ -119,7 +127,23 @@ DEFAULTS: dict[str, Any] = {
     "container": {"runtime": "none", "image": None, "options": []},
     "scheduler": {"partition": None, "account": None, "queue": None, "time": "24:00:00", "cpus": None,
                   "mem_gb": None, "gpus": 0, "extra": []},
+    # Gate modes (docs/agents-spec.md section 2 step 5): auto | review | escalate.
+    "gates": {"G1": "auto", "G2": "review", "G3": "auto", "G4": "review"},
 }
+
+# `llm:` (DESIGN 4.8 + agents-spec section 3) is optional and deliberately NOT in
+# DEFAULTS: when the section is absent the gates run rules-only and never call a
+# model. When present it is validated by `_check_llm` and these defaults are
+# applied by `llm_settings()` (used by the gates), not merged into the file.
+LLM_DEFAULTS: dict[str, Any] = {
+    "default": {"provider": "anthropic", "model": "claude-haiku-4-5", "api_key_env": "ANTHROPIC_API_KEY"},
+    "roles": {},
+    "budget": {"currency": "GBP", "total_limit": 30, "per_run_limit": 5, "warn_at_pct": 80, "usd_to_gbp": 0.78,
+               "ledger_path": "~/.scpipe/ledger.json"},
+    "replay": False,
+}
+LLM_PROVIDERS = ("anthropic", "openai_compatible", "mock", "bedrock", "vertex")
+GATE_MODES = ("auto", "review", "escalate")
 
 EXECUTION_MODES = ("direct", "slurm", "pbs", "lsf", "sge", "split")
 SITE_SECTIONS = ("execution", "resources", "container", "scheduler", "scratch")
@@ -133,6 +157,7 @@ ALLOWED = {
     "normalization": ("lognorm", "sct"),
     "device": ("auto", "cpu", "gpu"),
     "integration.method": ("none", "harmony"),
+    "annotation.celltypist": ("auto", "off"),
     "dge.method": ("deseq2", "limma_voom"),
 }
 
@@ -278,6 +303,11 @@ def _merge_defaults(raw: Mapping[str, Any], problems: list[str], warnings: list[
         if k in _DERIVED_KEYS:
             warnings.append(f"key {k!r} is set by the runner; the value in config.yaml is ignored")
             continue
+        if k == "llm":
+            # Optional section (see LLM_DEFAULTS): kept as written, validated in _check_llm.
+            warnings.append("optional key 'llm' is set: the gate agents will call an LLM (not used by S0-S2)")
+            cfg[k] = v
+            continue
         if k not in DEFAULTS:
             # Later build steps add sections (llm, gates, dge, ...); keep them, but say so.
             warnings.append(f"unknown top-level key {k!r} (kept as is, not used by S0-S2)")
@@ -323,6 +353,18 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
     need(isinstance(bk, str) and bool(bk.strip()), f"integration.batch_key must be a non-empty string, got {bk!r}")
     if cfg["normalization"] == "sct" and cfg["device"] == "gpu":
         problems.append("normalization: sct runs on CPU only; use device: cpu or auto with sct")
+    for g, m in (cfg.get("gates") or {}).items():
+        need(isinstance(m, str) and m in GATE_MODES, f"gates.{g} must be one of {list(GATE_MODES)}, got {m!r}")
+    _check_llm(cfg, problems)
+    ann = cfg["annotation"]
+    mc = ann.get("min_confidence")
+    need(_is_num(mc) and 0 <= mc <= 1, f"annotation.min_confidence must be a number from 0 to 1, got {mc!r}")
+    cm = ann.get("celltypist_model")
+    need(isinstance(cm, str) and bool(cm.strip()), f"annotation.celltypist_model must be a non-empty string, got {cm!r}")
+    md = ann.get("models_dir")
+    need(md is None or (isinstance(md, str) and bool(md.strip())), f"annotation.models_dir must be a path or null, got {md!r}")
+    sg = cfg["signatures"]
+    need(sg is None or (isinstance(sg, str) and bool(sg.strip())), f"signatures must be a path or null, got {sg!r}")
     _check_dge(cfg, problems)
     _check_opentargets(cfg, problems)
 
@@ -641,6 +683,16 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
     oc = cfg["opentargets"].get("cache_dir")
     if isinstance(oc, str) and oc.strip():
         cfg["opentargets"]["cache_dir"] = str(_resolve_path(oc, base, problems, "opentargets.cache_dir"))
+    # S3: signature override must exist; the CellTypist model cache is shared across runs (relative to config.yaml).
+    sg = cfg.get("signatures")
+    if isinstance(sg, str) and sg.strip():
+        sp = _resolve_path(sg, base, problems, "signatures")
+        if not sp.is_file():
+            problems.append(f"signatures: file not found: {sp}")
+        cfg["signatures"] = str(sp)
+    md = (cfg.get("annotation") or {}).get("models_dir")
+    if isinstance(md, str) and md.strip():
+        cfg["annotation"]["models_dir"] = str(_resolve_path(md, base, problems, "annotation.models_dir"))
 
     # qc_policy
     policy_path = None

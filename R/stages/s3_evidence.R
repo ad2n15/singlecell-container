@@ -9,6 +9,8 @@
 #                                   median_umis, median_pct_mito, top_markers:[20 genes]}}
 #          S3/signatures.tsv.gz     cluster, signature, category, cell_type, mean_score,
 #                                   median_score, pct_positive, n_genes_set, n_genes_found
+#          S3/cell_clusters.tsv.gz  cell_id, cluster, sample_id (per cell; used by the Python
+#                                   side to aggregate CellTypist votes; not part of the bundle)
 #          S3/s3_r_summary.json     method notes, signature-set coverage, sample metadata
 #                                   hint (sheet extra columns, unique values only), timings
 #          S3/exchange/counts.h5ad  slim counts for CellTypist, written only when
@@ -275,6 +277,9 @@ run_s3 <- function(cfg, repo) {
       top_markers = I(head(top$gene[top$cluster == k], .S3_TOP_SUMMARY)))
   }
   scp_write_json(summary, file.path(out_dir, "cluster_summary.json"))
+  # per-cell cluster map (never part of the bundle): lets the Python side aggregate CellTypist per cluster
+  scp_write_tsv_gz(data.frame(cell_id = colnames(obj), cluster = cl_chr, sample_id = sample, stringsAsFactors = FALSE),
+                   file.path(out_dir, "cell_clusters.tsv.gz"))
 
   # signatures
   sigs <- s3_read_signatures(cfg, repo)

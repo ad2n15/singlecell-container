@@ -18,7 +18,7 @@
         "B cell": {"n_up": 10, "n_down": 4, "n_tested": 9100, "skipped_reason": null,
                    "top_up": [{"gene": "ISG15", "log2fc": 2.4, "padj": 1e-7}, {"gene": "IFI6", "log2fc": 1.9, "padj": 3e-6}],
                    "top_down": [{"gene": "FCER2", "log2fc": -1.2, "padj": 4e-4}]},
-        "Monocyte": {"n_up": 0, "n_down": 0, "n_tested": 0, "skipped_reason": "fewer than 2 replicates in control",
+        "monocyte": {"n_up": 0, "n_down": 0, "n_tested": 0, "skipped_reason": "fewer than 2 replicates in control",
                      "top_up": [], "top_down": []}
       }
     }

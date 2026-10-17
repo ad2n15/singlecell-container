@@ -413,7 +413,7 @@ All three locations are set in the site file.
 ### 7.7 Testing
 
 - PBMC 3k as an end-to-end smoke test, runnable on any site in minutes.
-- A 50k-cell subset run in both CPU and GPU modes and compared (ARI) before any full run.
+- **Benchmarks during development are limited to 2k and 5k cells** (`tests/benchmark/run_bench.sh`), CPU path and GPU path. A 50k-cell subset is run in both modes and compared (ARI) on the HPC before any full run, never on development machines.
 - No hosted CI (we decided not to use GitHub Actions). The unit tests and the end-to-end stage test run locally or on the HPC; `tests/README.md` lists the commands.
 
 ## 8. Repository layout (proposed)
@@ -434,7 +434,7 @@ docs/DESIGN.md     this document
 ## 9. Build order
 
 1. **Exchange format** with round-trip tests. Everything else depends on it.
-2. **Stages S0–S2** with the CPU/GPU switch, validated on PBMC and a 50k subset.
+2. **Stages S0–S2** with the CPU/GPU switch, validated on the synthetic fixture and benchmarked at 2k and 5k cells.
 3. **QC agent + reviewer + gate mechanics**, the template for all later gates.
 4. **Evidence (S3), context agent, annotation agent.**
 5. **DGE (S4), Open Targets, interpretation agent.**

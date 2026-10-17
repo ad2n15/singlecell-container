@@ -539,26 +539,26 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
                         f"ok: stop_reason={getattr(resp, 'stop_reason', '?')}, tool_calls={len(used or [])}", required=False)
                 except Exception as e:
                     add("llm", "tool-use test", False, f"failed: {str(e)[:200]}", required=False)
-        # Budget
+        # Budget: the total ledger shared across runs (scpipe.llm.ledger: {"runs": {run_id: gbp}})
         budget = llm_cfg.get("budget") or {}
-        ledger_path = llm_cfg.get("ledger_path") or os.path.expanduser("~/.scpipe/ledger.json")
+        ledger_path = os.path.expanduser(str(budget.get("ledger_path") or llm_cfg.get("ledger_path") or "~/.scpipe/ledger.json"))
+        limit = budget.get("total_limit", 30.0)
         spent = None
         try:
-            mod = _llm_provider_module()
-            if mod is not None and hasattr(mod, "Ledger"):
-                led = mod.Ledger(ledger_path)
-                spent = getattr(led, "total_gbp", None)
-                spent = spent() if callable(spent) else spent
-            if spent is None and Path(ledger_path).exists():
+            if Path(ledger_path).exists():
                 data = json.loads(Path(ledger_path).read_text())
-                spent = data.get("total_gbp") or data.get("total", {}).get("cost_gbp")
-        except Exception:
-            spent = None
-        limit = budget.get("total_limit") or budget.get("total_limit_gbp")
-        if limit is not None and spent is not None:
-            add("llm", "budget", float(spent) <= float(limit), f"GBP {float(spent):.2f} of {float(limit):.2f} spent ({ledger_path})", required=False)
-        else:
-            add("llm", "budget", True, f"spent {'GBP %.2f' % spent if spent is not None else 'unknown'}; limit {limit if limit is not None else 'not set'}", required=False)
+                runs = data.get("runs") or {}
+                spent = float(sum(float(v) for v in runs.values())) if isinstance(runs, dict) else float(data.get("total_gbp") or 0)
+            else:
+                spent = 0.0
+        except Exception as e:
+            add("llm", "budget", True, f"ledger {ledger_path} unreadable: {e}", required=False)
+        if spent is not None:
+            try:
+                lim = float(limit)
+                add("llm", "budget", spent < lim, f"GBP {spent:.2f} of {lim:.2f} spent across runs ({ledger_path})", required=False)
+            except (TypeError, ValueError):
+                add("llm", "budget", True, f"GBP {spent:.2f} spent; total_limit {limit!r} is not a number", required=False)
     # Open Targets
     ot = cfg.get("opentargets") or {}
     if ot.get("enabled", True) is False:

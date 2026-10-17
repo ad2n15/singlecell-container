@@ -180,3 +180,14 @@ PYTHONPATH=python python -m pytest -q tests/python
 tests/integration/run_roundtrip.sh
 tests/integration/run_stages.sh
 ```
+
+## Benchmarks (development)
+
+Only 2k and 5k cells during development; larger sizes are benchmarked on the HPC.
+
+```bash
+tests/benchmark/run_bench.sh          # S0-S2, CPU and GPU path, 2k and 5k cells
+SIZES="2000" tests/benchmark/run_bench.sh
+```
+
+Results are written to `tests/benchmark/results/` (not committed). `make_bench_inputs.py` refuses sizes above 5,000.

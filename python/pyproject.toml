@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml",
     "scikit-learn",
     "scikit-image",
+    "jinja2",
 ]
 
 [project.scripts]
@@ -28,6 +29,7 @@ scpipe = "scpipe.runner:main"
 harmony = ["harmonypy"]
 gpu = ["rapids-singlecell"]
 test = ["pytest"]
+report = ["matplotlib"]
 
 [tool.setuptools.packages.find]
 where = ["."]
