@@ -8,15 +8,17 @@
 NULL
 
 #' Implicitly scaled PCA of a genes x cells dgCMatrix, read in place as cells x genes CSR.
-#' `oversample` / `power_iters` < 0 keep the scfast-core defaults.
+#' `oversample` / `power_iters` < 0 keep the scfast-core defaults. `device` is "cpu",
+#' "cuda" / "cuda:<i>" or "auto" (see `rs_device`); the device used is returned as `device`.
 #' @keywords internal
-rs_pca_csc <- function(p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters) .Call(wrap__rs_pca_csc, p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters)
+rs_pca_csc <- function(p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters, device) .Call(wrap__rs_pca_csc, p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters, device)
 
 #' Exact / HNSW k nearest neighbours (self included) of every row of a double matrix
-#' (cells x dims). Returns 1-based indices and Euclidean distances, both n x k.
-#' `auto_threshold` < 0 keeps the scfast-core default.
+#' (cells x dims). Returns 1-based indices and Euclidean distances, both n x k, and the
+#' `device` used. `auto_threshold` < 0 keeps the scfast-core default. On a CUDA device
+#' `method` is ignored (brute force GEMM + top-k).
 #' @keywords internal
-rs_knn <- function(mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold) .Call(wrap__rs_knn, mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold)
+rs_knn <- function(mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold, device) .Call(wrap__rs_knn, mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold, device)
 
 #' SNN (Jaccard) graph from an n x k matrix of 1-based neighbour indices (self first).
 #' Returns the full symmetric adjacency as CSR parts (0-based), which are also its CSC parts.
@@ -47,9 +49,17 @@ rs_leiden_device <- function(device) .Call(wrap__rs_leiden_device, device)
 #' @keywords internal
 rs_is_symmetric <- function(p, i, x, n, tol) .Call(wrap__rs_is_symmetric, p, i, x, n, tol)
 
-#' Build information: crate version, rayon thread count, compiled backends.
+#' Build information: crate version, rayon thread count, compiled backends and the CUDA
+#' device state (`cuda` = `cuda_built`, kept for older callers).
 #' @keywords internal
 rs_info <- function() .Call(wrap__rs_info)
+
+#' Resolves a PCA / kNN device string ("auto", "cpu", "cuda", "cuda:<i>") to the device the
+#' kernels would run on: "cpu" or "cuda:<i>". "auto" is "cuda:0" only when scfastR was
+#' built with the `cuda` feature and a device is usable; an explicit "cuda" that is not
+#' usable is an error naming the reason.
+#' @keywords internal
+rs_device <- function(device) .Call(wrap__rs_device, device)
 
 #' Address of an R vector's data, as a hex string (zero-copy checks).
 #' @keywords internal
