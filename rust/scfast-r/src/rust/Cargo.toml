@@ -1,0 +1,25 @@
+[package]
+name = "scfastr"
+description = "extendr bindings for scfast-core (R package scfastR)"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+name = "scfastr"
+
+[dependencies]
+extendr-api = "0.9"
+scfast-core = { path = "../../../scfast-core" }
+
+# Standalone crate: rust/Cargo.toml excludes scfast-r from the workspace, so this table
+# stops cargo from searching upwards and adopting rust/ as its workspace root.
+[workspace]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+# Panics must unwind so extendr can turn them into R errors (never abort the R session).
+panic = "unwind"
