@@ -343,12 +343,16 @@ scfast_info <- function() {
 #' @param seed.use Random seed (`seed` also works, by partial matching).
 #' @param reduction.name,reduction.key Name and key of the stored reduction.
 #' @param device `"auto"`, `"cpu"` or `"cuda"` (CUDA is not built yet; `"auto"` = CPU).
+#' @param oversample,power.iters Randomised SVD accuracy knobs (extra random directions and
+#'   power iterations); `NULL` keeps the engine defaults (10 and 4). Raise them (e.g. 40 and
+#'   8) when the spectrum is flat beyond the leading components and later PCs must match
+#'   an exact SVD closely; cost grows roughly linearly with `power.iters`.
 #' @param verbose Print progress messages.
 #' @return The Seurat object with the reduction added.
 #' @export
 RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.use = 0,
                        reduction.name = "pca", reduction.key = "PC_", device = "auto",
-                       verbose = TRUE) {
+                       oversample = NULL, power.iters = NULL, verbose = TRUE) {
   .check_seurat(object)
   assay <- assay %||% SeuratObject::DefaultAssay(object)
   .check_string(assay, "assay")
@@ -360,6 +364,8 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
   .check_string(reduction.name, "reduction.name")
   .check_string(reduction.key, "reduction.key")
   .check_device(device)
+  if (!is.null(oversample)) .check_count(oversample, "oversample", min = 0)
+  if (!is.null(power.iters)) .check_count(power.iters, "power.iters", min = 0)
   .check_flag(verbose, "verbose")
 
   input <- .pca_input(object, assay, features, verbose)
@@ -369,7 +375,7 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
     warning(sprintf("npcs (%d) reduced to %d (min(features, cells) - 1)", npcs, max.pcs), call. = FALSE)
     npcs <- max.pcs
   }
-  run <- .timed(.pca_native(input$m, npcs, seed.use))
+  run <- .timed(.pca_native(input$m, npcs, seed.use, oversample, power.iters))
   res <- run$value
   pcs <- paste0(reduction.key, seq_len(ncol(res$embeddings)))
   dimnames(res$embeddings) <- list(input$cells, pcs)
@@ -385,7 +391,8 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
       # Every scaled feature has unit variance (no clipping), as total.variance in RunPCA.
       total.variance = length(input$features),
       scfast = list(kernel = "implicit_scaled_pca", engine = scfast_info()$version,
-                    seed = seed.use, seconds = run$seconds,
+                    seed = seed.use, oversample = oversample, power.iters = power.iters,
+                    seconds = run$seconds,
                     gene_mean = res$gene_mean, gene_sd = res$gene_sd)
     )
   )

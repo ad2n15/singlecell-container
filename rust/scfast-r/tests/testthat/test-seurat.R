@@ -24,7 +24,7 @@ test_that("RunPCAFast stores a valid DimReduc without ScaleData", {
   emb <- SeuratObject::Embeddings(red)
   load <- SeuratObject::Loadings(red)
   hvg <- SeuratObject::VariableFeatures(obj)
-  expect_identical(dim(emb), c(ncol(obj), 20L))
+  expect_equal(dim(emb), c(ncol(obj), 20))
   expect_identical(rownames(emb), colnames(obj))
   expect_identical(colnames(emb), paste0("PC_", 1:20))
   expect_identical(rownames(load), hvg)
@@ -38,11 +38,14 @@ test_that("RunPCAFast stores a valid DimReduc without ScaleData", {
   expect_true(any(startsWith(names(o@commands), "RunPCAFast")))
 
   # Seurat's conventions: stdev = sd of the embedding columns, orthonormal loadings, and
-  # embeddings = scaled data %*% loadings (checked against an explicit ScaleData here).
+  # embeddings = scaled data %*% loadings (checked against an explicit ScaleData here). The
+  # last needs an accurate SVD, so this run raises the randomised-SVD settings.
   expect_equal(unname(apply(emb, 2, stats::sd)), sdev, tolerance = 1e-3)
   expect_equal(unname(crossprod(load)), diag(20), tolerance = 1e-3)
+  acc <- RunPCAFast(obj, npcs = 20, oversample = 40, power.iters = 12, verbose = FALSE)[["pca"]]
+  expect_identical(acc@misc$scfast$power.iters, 12)
   z <- t(scale(t(as.matrix(SeuratObject::LayerData(obj, layer = "data")[hvg, ]))))
-  expect_equal(unname(t(z) %*% load), unname(emb), tolerance = 1e-2)
+  expect_equal(unname(t(z) %*% SeuratObject::Loadings(acc)), unname(SeuratObject::Embeddings(acc)), tolerance = 1e-3)
 
   builds(Seurat::ElbowPlot(o))
   builds(Seurat::DimPlot(o, reduction = "pca"))
@@ -167,7 +170,7 @@ test_that("the full fast chain feeds RunUMAP, DimPlot and FindAllMarkers", {
   o <- skip_if_stub(FindNeighborsFast(o, dims = 1:10, verbose = FALSE))
   o <- skip_if_stub(FindClustersFast(o, verbose = FALSE))
   o <- suppressWarnings(Seurat::RunUMAP(o, dims = 1:10, verbose = FALSE))
-  expect_identical(dim(SeuratObject::Embeddings(o, "umap")), c(ncol(o), 2L))
+  expect_equal(dim(SeuratObject::Embeddings(o, "umap")), c(ncol(o), 2))
   builds(Seurat::DimPlot(o, label = TRUE))
   mk <- Seurat::FindAllMarkers(o, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, verbose = FALSE)
   expect_gt(nrow(mk), 0)

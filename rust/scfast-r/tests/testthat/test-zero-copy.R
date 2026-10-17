@@ -46,7 +46,7 @@ test_that("RunPCAFast input: one copy of the variable-feature rows, nothing dens
   hvg <- SeuratObject::VariableFeatures(obj)
   inp <- scfastR:::.pca_input(obj, "RNA")
   expect_s4_class(inp$m, "dgCMatrix")
-  expect_identical(dim(inp$m), c(length(hvg), ncol(obj)))
+  expect_equal(dim(inp$m), c(length(hvg), ncol(obj)))
   expect_identical(inp$features, hvg)
   ref <- SeuratObject::LayerData(obj, layer = "data")[hvg, ]
   expect_equal(unname(as.matrix(inp$m)), unname(as.matrix(ref)))

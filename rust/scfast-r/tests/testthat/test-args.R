@@ -68,13 +68,13 @@ test_that("RunPCAFast validates its arguments", {
   # unknown features are dropped with a warning (the kernel may still be a stub)
   expect_warning(tryCatch(RunPCAFast(obj, features = c(rownames(obj)[1:20], "nope"), npcs = 5, verbose = FALSE),
                           scfast_not_implemented = function(e) NULL), "not in assay")
-  # no variable features
-  o2 <- obj
-  SeuratObject::VariableFeatures(o2) <- character()
-  expect_error(RunPCAFast(o2), "FindVariableFeatures")
   # not normalised
   raw <- SeuratObject::CreateSeuratObject(SeuratObject::LayerData(obj, layer = "counts"))
   expect_error(RunPCAFast(raw, features = rownames(raw)), "NormalizeData")
+  # no variable features
+  o2 <- Seurat::NormalizeData(raw, verbose = FALSE)
+  expect_error(RunPCAFast(o2), "FindVariableFeatures")
+  expect_error(RunPCAFast(obj, power.iters = -1), "power.iters")
 })
 
 test_that("RunPCAFast drops zero-variance features and caps npcs like Seurat", {

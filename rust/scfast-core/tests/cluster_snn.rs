@@ -436,9 +436,12 @@ fn leiden_same_seed_gives_identical_labels() {
     for _ in 0..3 {
         assert_eq!(leiden(&g, &p).unwrap(), first);
     }
+    // overlapping blobs: the RB optimum is not the truth (leidenalg also scores ~0.85 vs
+    // truth here), so other seeds are checked against each other rather than the truth
+    assert!(ari(&first, &truth) > 0.8);
     for seed in 1..5 {
         let other = leiden(&g, &ClusterParams { seed, ..p.clone() }).unwrap();
-        assert!(ari(&other, &truth) > 0.9, "seed {seed}: ARI {}", ari(&other, &truth));
+        assert!(ari(&other, &first) > 0.95, "seed {seed}: ARI vs seed 0 {}", ari(&other, &first));
     }
 }
 
@@ -518,7 +521,7 @@ fn median_secs(reps: usize, mut f: impl FnMut()) -> f64 {
 
 /// Parity and timing on a dataset exported by Seurat (knn.u32, snn_*.{u32,f64}, meta.json
 /// with "n" and "k"), e.g. from the bench synthetic data. Run in release:
-/// `SCFAST_EXT_DIR=<dir> [SCFAST_EXT_OUT=<dir>] [SCFAST_EXT_SEEDS=10] cargo test --release
+/// `SCFAST_EXT_DIR=<dir> [SCFAST_EXT_OUT=<dir>] [SCFAST_EXT_SEEDS=10] [SCFAST_EXT_RES=0.5] cargo test --release
 /// --test cluster_snn -- --ignored --nocapture`. Writes Leiden labels per diagonal variant
 /// and seed to SCFAST_EXT_OUT for comparison against leidenalg.
 #[test]
@@ -559,8 +562,9 @@ fn external_dataset_report() {
     let variants = [("half", g.clone()), ("full", scaled(2.0)), ("drop", no_diag)];
     let seeds: u64 = std::env::var("SCFAST_EXT_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
     let out = std::env::var("SCFAST_EXT_OUT").ok().map(std::path::PathBuf::from);
+    let resolution: f64 = std::env::var("SCFAST_EXT_RES").ok().and_then(|s| s.parse().ok()).unwrap_or(0.5);
     for (name, graph) in &variants {
-        let p = ClusterParams::default();
+        let p = ClusterParams { resolution, ..Default::default() };
         let mut labels = Vec::new();
         let secs = median_secs(3, || labels = leiden(graph, &p).unwrap());
         println!("leiden variant={name} seed=0 clusters={} median_s={secs:.5}", n_clusters(&labels));
@@ -571,27 +575,6 @@ fn external_dataset_report() {
                 let text: String = l.iter().map(|x| format!("{x}\n")).collect();
                 std::fs::write(out.join(format!("rust_{name}_seed{seed}.txt")), text).unwrap();
             }
-        }
-    }
-}
-
-#[test]
-#[ignore]
-fn tmp_dump_blob_graph() {
-    let out = std::env::var("TMP_DUMP").unwrap();
-    for (name, sep, seed) in [("blob3", 3.0, 3u64), ("blob4", 4.0, 3u64)] {
-        let (g, truth) = blob_graph(&[300, 200, 150, 100, 50], sep, seed);
-        let mut s = String::new();
-        for i in 0..g.n {
-            for e in g.indptr[i]..g.indptr[i + 1] {
-                s += &format!("{i} {} {}\n", g.indices[e], g.weights[e]);
-            }
-        }
-        std::fs::write(format!("{out}/{name}.edges"), s).unwrap();
-        std::fs::write(format!("{out}/{name}.truth"), truth.iter().map(|t| format!("{t}\n")).collect::<String>()).unwrap();
-        for seed in 0..10u64 {
-            let l = leiden(&g, &ClusterParams { seed, ..Default::default() }).unwrap();
-            std::fs::write(format!("{out}/{name}.rust{seed}"), l.iter().map(|t| format!("{t}\n")).collect::<String>()).unwrap();
         }
     }
 }
