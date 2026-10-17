@@ -483,6 +483,7 @@ def test_read_counts_drops_antibody_features(tmp_path, capsys):
 def test_pipeline_steps_writes_every_step(tmp_path):
     pytest.importorskip("scanpy")
     pytest.importorskip("scfast")
+    pytest.importorskip("skmisc", reason="scanpy's seurat_v3 HVG flavour needs scikit-misc")
     import pipeline_steps
 
     counts, barcodes, ids, names, _ = synth.generate(1200, 600, 4, seed=1)

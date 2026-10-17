@@ -17,7 +17,7 @@ RUN Rscript -e 'install.packages(c("Seurat","SeuratObject","hdf5r","leidenbase",
  && Rscript -e 'stopifnot(packageVersion("Seurat") >= "5.1.0"); cat("Seurat", as.character(packageVersion("Seurat")), "\n")'
 
 RUN python3 -m venv /opt/venv \
- && pip install --no-cache-dir numpy scipy pandas h5py anndata scanpy scikit-learn matplotlib \
+ && pip install --no-cache-dir numpy scipy pandas h5py anndata scanpy scikit-misc scikit-learn matplotlib \
       leidenalg igraph harmonypy pyyaml pytest "maturin>=1.9.4,<2"
 
 WORKDIR /work
