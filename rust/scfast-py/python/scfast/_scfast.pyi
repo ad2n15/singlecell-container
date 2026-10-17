@@ -149,7 +149,8 @@ def preprocess_csr(
     The arrays are borrowed as in pca_csr. Returns {"data": float32 (nnz,) log-normalised
     values in input order, "library_size": float64 (n_rows,), "mean", "variance",
     "variance_expected", "variance_standardized": float64 (n_cols,), "hvg": int32 (n_hvg,)
-    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float}.
+    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float, "hvg_indptr": int64,
+    "hvg_indices": int32, "hvg_data": float32: the HVG columns as a canonical CSR in HVG order}.
     """
 
 def device_info() -> dict[str, Any]:

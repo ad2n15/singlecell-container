@@ -475,11 +475,11 @@ def preprocess(
         if clip <= 0:
             raise ValueError(f"clip must be positive, got {clip}")
     out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
-    norm = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
-    out["data"] = norm
-    x_hvg = norm[:, out["hvg"]]
-    x_hvg.sort_indices()  # column selection in HVG order leaves rows unsorted; pca() needs canonical CSR
-    out["X_hvg"] = x_hvg
+    out["data"] = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
+    hvg_indptr = out.pop("hvg_indptr")
+    if int(hvg_indptr[-1]) <= _I32_MAX:
+        hvg_indptr = hvg_indptr.astype(np.int32)
+    out["X_hvg"] = sp.csr_matrix((out.pop("hvg_data"), out.pop("hvg_indices"), hvg_indptr), shape=(n_rows, n_hvg))
     return out
 
 
