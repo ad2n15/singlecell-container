@@ -34,6 +34,10 @@ Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - Loess interpolate port (Opus 5.5 medium): Seurat-exact HVGs.
 - Round-1 Sonnet agents (GPU, front end) were interrupted at 22:51; relaunched as Opus 5.5 medium.
 
+## Surprises (evidence)
+- 3 Python tests fail on main too (not touched by this branch): test_runner::test_status_output, test_runner::test_failure_then_resume (log-tail line assertions), test_s3::test_consensus_recovers_planted_types (platelet cluster low_confidence). 498 others pass.
+- Tried and rejected for UMAP: polynomial fast_pow (scalar and 8-lane batched): no gain; the SGD is bound by random gathers.
+
 ## Remaining ideas (ranked)
 
 ## Evidence
