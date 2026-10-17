@@ -16,10 +16,13 @@ Path rules:
   variables (``$USER``, ``${VAR}``) and ``~`` are expanded; relative paths are
   resolved against the directory containing ``config.yaml``. A ``--run-dir``
   override is resolved against the current directory.
-* ``path`` values in ``samples.csv``: relative paths are resolved against the
-  directory containing ``samples.csv`` (env vars and ``~`` expanded too). The
-  absolute result is written to ``samples_resolved`` in
-  ``config.resolved.yaml``, so stages never resolve paths themselves.
+* ``path`` values in ``samples.csv``: relative paths are also resolved against
+  the directory containing ``config.yaml`` (spec section 4: "relative paths
+  are resolved against the directory containing config.yaml"), whatever
+  directory ``samples.csv`` itself is in; env vars and ``~`` are expanded.
+  The absolute results are written to ``samples_resolved`` and that
+  directory to ``config_dir`` in ``config.resolved.yaml`` (S0 in R resolves
+  the copied sheet's paths against ``config_dir``).
 * ``config.resolved.yaml`` points ``samples`` and ``qc_policy`` at the copies
   in ``<run-dir>/config/``; ``samples_source`` / ``qc_policy_source`` hold
   the user's originals. When ``qc_policy`` is not set, the built-in default
@@ -104,6 +107,7 @@ _DERIVED_KEYS = (
     "config_hash",
     "repo_root",
     "config_file",
+    "config_dir",
     "samples_source",
     "qc_policy_source",
     "samples_resolved",
@@ -111,7 +115,7 @@ _DERIVED_KEYS = (
     "policy_hash",
     "scpipe_version",
 )
-_HASH_EXCLUDE = ("run_id", "config_hash", "run_dir", "repo_root", "config_file", "samples_source",
+_HASH_EXCLUDE = ("run_id", "config_hash", "run_dir", "repo_root", "config_file", "config_dir", "samples_source",
                  "qc_policy_source", "samples", "qc_policy", "scpipe_version")
 
 
@@ -402,7 +406,7 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
     resolved_samples: list[dict[str, str]] = []
     if samples_path is not None:
         header, records = _read_samples(samples_path, problems, warnings)
-        resolved_samples = _check_samples(header, records, samples_path.parent, problems, warnings)
+        resolved_samples = _check_samples(header, records, base, problems, warnings)
     bk = cfg["integration"]["batch_key"]
     if cfg["integration"]["method"] == "harmony" and header and isinstance(bk, str) and bk not in header:
         problems.append(
@@ -433,6 +437,7 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
     from . import __version__
 
     cfg["config_file"] = str(config_path)
+    cfg["config_dir"] = str(base)
     cfg["samples_source"] = str(samples_path)
     cfg["qc_policy_source"] = str(policy_path) if policy_path else "builtin-default"
     cfg["samples"] = str(Path(rd) / "config" / "samples.csv")

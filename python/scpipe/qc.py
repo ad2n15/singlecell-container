@@ -42,6 +42,8 @@ Conventions (documented choices where the spec leaves room):
   ``PROTECTED_POP:<name>`` (one per qualifying population, policy order),
   ``SAMPLE_LOSS``, ``CLUSTER_LOSS``. A ``review`` cell keeps the adaptive
   codes that excluded it, followed by the code(s) that rescued it.
+* **Defaults.** Missing policy keys take the spec values; an omitted
+  ``protected_populations`` list means none (see :func:`policy_from_dict`).
 * **Policy hash** = SHA-256 of the canonical JSON (sorted keys, no
   whitespace) of the parsed policy with defaults filled in.
 """
@@ -167,8 +169,12 @@ def _num(x: float) -> int | float:
 def policy_from_dict(raw: Mapping[str, Any] | None, source: str | None = None) -> Policy:
     """Validate a parsed policy mapping, fill defaults and build a :class:`Policy`.
 
-    Missing sections and keys take the spec defaults (section 3.4). A key set
-    to ``null`` in ``hard_limits`` disables that limit. Unknown keys are
+    ``None`` or an empty mapping gives the built-in default policy (the spec
+    example, section 3.4). Otherwise missing sections and keys take the spec
+    defaults, except ``protected_populations``: a list is replaced, never
+    merged, so leaving it out means no protected populations (S1a in R reads
+    the policy file the same way). A key set to ``null`` in ``hard_limits``
+    disables that limit. Unknown keys are
     errors, so a typo never silently disables a rule. All problems are
     reported together in one :class:`QCError`.
     """
@@ -247,7 +253,10 @@ def policy_from_dict(raw: Mapping[str, Any] | None, source: str | None = None) -
             triggers[k] = DEFAULT_POLICY["review_triggers"][k]
         triggers[k] = _num(triggers[k])
 
-    pops_raw = raw.get("protected_populations", DEFAULT_POLICY["protected_populations"])
+    # A list is replaced, not merged: an omitted (or null) protected_populations
+    # means none, as in S1a (R). The built-in default policy, used when the
+    # config sets no qc_policy at all, does list the spec's two populations.
+    pops_raw = raw.get("protected_populations", None) if raw else DEFAULT_POLICY["protected_populations"]
     if pops_raw is None:
         pops_raw = []
     pops: list[dict[str, Any]] = []

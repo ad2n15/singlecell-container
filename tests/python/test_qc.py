@@ -115,7 +115,11 @@ def test_policy_hash_canonical():
 def test_policy_defaults_and_partial():
     pol = qc.policy_from_dict({"hard_limits": {"min_genes": 300}})
     assert pol.min_genes == 300 and pol.min_umis == 400 and pol.max_mito_pct == 25
-    assert pol.protected_populations[0].name == "Platelet"
+    assert pol.n_mads == 3 and pol.max_cluster_removed_pct == 50
+    # A list is replaced, not merged: omitted protected_populations means none (as S1a in R).
+    assert pol.protected_populations == ()
+    assert [p.name for p in qc.policy_from_dict(None).protected_populations] == ["Platelet", "Erythrocyte"]
+    assert qc.policy_from_dict({}).hash == qc.policy_from_dict(None).hash
     pol = qc.policy_from_dict({"protected_populations": []})
     assert pol.protected_populations == ()
 

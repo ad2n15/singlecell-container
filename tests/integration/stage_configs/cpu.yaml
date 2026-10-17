@@ -1,11 +1,12 @@
 # End-to-end test config for S0-S2, CPU path (tests/integration/run_stages.sh).
-# Inputs: tests/fixtures/stage_inputs (make_stage_inputs.py). Relative paths
+# Inputs: tests/fixtures/stage_inputs (make_stage_inputs.py), listed in
+# samples.csv here. Relative paths, including the sample paths in samples.csv,
 # resolve against this directory. gpu.yaml must stay identical apart from
 # `device` and `project`, so the two runs can be compared.
 project: stage_test_cpu
 run_dir: /tmp/scpipe-stage-test/cpu      # always overridden with --run-dir by the harness
 seed: 42
-samples: ../../fixtures/stage_inputs/samples.csv
+samples: samples.csv                     # sample paths in it are relative to this folder
 qc_policy: qc_policy.yaml
 object_format: rds
 resources:

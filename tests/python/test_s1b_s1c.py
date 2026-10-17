@@ -309,7 +309,7 @@ def test_s1b_device_gpu_without_gpu(inproc, tmp_path):
         pytest.skip("a real GPU is present")
     rd, _ = make_run(tmp_path, {"device": "gpu", "doublets": {"method": "none"}})
     r = inproc("scpipe.stages.s1b_doublets", rd)
-    assert r.returncode == 1 and "device='gpu'" in r.stderr
+    assert r.returncode == 1 and "no usable GPU" in r.stderr
     r = inproc("scpipe.stages.s1b_doublets", rd, {"SCPIPE_ALLOW_CPU_AS_GPU": "1"})
     assert r.returncode == 0, r.stderr
     assert "cpu-as-gpu" in r.stdout

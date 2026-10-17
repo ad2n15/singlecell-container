@@ -208,6 +208,23 @@ def read_tsv(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, sep="\t", keep_default_na=False, na_values=[""], dtype={"reasons": str})
 
 
+def cmd_sheets(a) -> int:
+    """SHEET:BASE pairs resolve to the same samples, files and metadata."""
+    import csv
+    c = Check()
+    seen = []
+    for spec in a.sheets:
+        sheet, base = spec.rsplit(":", 1)
+        rows = list(csv.DictReader(open(sheet, newline="")))
+        for r in rows:
+            r["path"] = os.path.realpath(os.path.join(base, r["path"]))
+            c.ok(os.path.exists(r["path"]), f"{sheet}: {r['sample_id']} -> {r['path']}")
+        seen.append((sheet, rows))
+    for sheet, rows in seen[1:]:
+        c.ok(rows == seen[0][1], f"{sheet} matches {seen[0][0]}")
+    return c.done()
+
+
 def cmd_ingest(a) -> int:
     c = Check()
     run, inputs = Path(a.run), Path(a.inputs)
@@ -499,6 +516,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("state"); p.add_argument("run"); p.set_defaults(f=cmd_state)
+    p = sub.add_parser("sheets"); p.add_argument("sheets", nargs="+", metavar="SHEET:BASE"); p.set_defaults(f=cmd_sheets)
     p = sub.add_parser("ingest"); p.add_argument("run"); p.add_argument("inputs"); p.set_defaults(f=cmd_ingest)
     p = sub.add_parser("metrics"); p.add_argument("run"); p.add_argument("inputs"); p.set_defaults(f=cmd_metrics)
     p = sub.add_parser("qc-truth"); p.add_argument("run"); p.add_argument("truth"); p.set_defaults(f=cmd_qc_truth)

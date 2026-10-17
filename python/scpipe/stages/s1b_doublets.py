@@ -15,7 +15,9 @@ Doublets (``doublets.method``):
   ``rapids_singlecell.pp.scrublet`` when ``device`` is ``auto``/``gpu`` and
   a GPU is available; otherwise ``scanpy.pp.scrublet``. Samples with fewer
   than 100 cells are skipped (score NA, call FALSE, warning), as are
-  samples where Scrublet fails (warning).
+  samples where Scrublet fails (warning). The device follows the device plan
+  (``scpipe.resources.choose_plan`` on all cells x pre-clustering HVGs and
+  ``resources.gpu_mem_cap_gb``): ``auto`` uses the GPU only when it fits.
 * ``scdblfinder``: runs in R. If S1a already wrote ``doublet_score`` and
   ``doublet_call``, they are kept; otherwise S1b fails with a message
   (the R implementation is not part of build step 2).
@@ -25,7 +27,7 @@ Pre-clustering: ``PRECLUSTER_N_HVG`` (2,000, or all genes if fewer)
 highly variable genes (scanpy ``seurat`` flavour on the log-normalised X),
 then ``scpipe.gpu_core.run`` on a temporary slim exchange file with 20 PCs,
 15 neighbours and Leiden at resolution 0.3 (seed = ``seed``), on the same
-device choice. Labels go to ``pre_cluster`` as strings. ``gpu_core`` also
+device. Labels go to ``pre_cluster`` as strings. ``gpu_core`` also
 computes a UMAP, which is discarded. The temporary files are deleted.
 
 Value formats: ``doublet_score`` as ``%.6g``, ``NA`` when missing;
@@ -53,13 +55,23 @@ PRECLUSTER_RESOLUTION = 0.3
 S1B_COLUMNS = ("doublet_score", "doublet_call", "pre_cluster")
 
 
-def _device(setting: str) -> str:
-    """'gpu', 'cpu' or 'cpu-as-gpu' (gpu_core's rules, incl. SCPIPE_ALLOW_CPU_AS_GPU)."""
-    from .. import gpu_core
+def choose_device(setting: str, n_cells: int, n_hvg: int, cap_gb: float | None) -> tuple[str, str, dict[str, Any]]:
+    """(device for gpu_core, device actually used, plan).
+
+    The device plan of spec section 5 (``scpipe.resources.choose_plan``) is
+    applied to the pre-clustering matrix (all cells x HVGs), so ``auto``
+    falls back to the CPU when it would not fit the GPU cap; ``gpu`` fails
+    without a usable GPU. The used device is ``gpu``, ``cpu`` or
+    ``cpu-as-gpu`` (``SCPIPE_ALLOW_CPU_AS_GPU=1`` test override).
+    """
+    from .. import gpu_core, resources
 
     try:
-        return gpu_core._resolve_device(setting)
-    except gpu_core.DeviceError as e:
+        info = None if setting == "cpu" else resources.gpu_info(cap_gb)
+        plan = resources.choose_plan(n_cells, n_hvg, setting, info, gpu_mem_cap_gb=cap_gb)
+        core = plan["device"]
+        return core, gpu_core._resolve_device(core), plan
+    except (resources.PlanError, gpu_core.DeviceError) as e:
         raise StageError(str(e)) from e
 
 
@@ -207,9 +219,11 @@ def run(run_dir: Path, cfg: dict[str, Any]) -> None:
             f"e.g. only in the table: {missing}, only in the h5ad: {extra}"
         )
     sample_by_cell = pd.Series(metrics["sample_id"].to_numpy(), index=tsv_cells).reindex(cells).to_numpy()
-    device = _device(device_setting)
+    cap = (cfg.get("resources") or {}).get("gpu_mem_cap_gb")
+    core_device, device, plan = choose_device(device_setting, adata.n_obs, min(PRECLUSTER_N_HVG, adata.n_vars),
+                                              float(cap) if cap is not None else None)
     log(f"{adata.n_obs} cells x {adata.n_vars} genes, {len(set(sample_by_cell))} sample(s); "
-        f"doublets.method={method}, device setting {device_setting} -> {device}")
+        f"doublets.method={method}; device {device_setting} -> {device} ({plan['reason']})")
 
     if method == "scrublet":
         score, call, notes = run_scrublet(adata, sample_by_cell, seed, device)
@@ -227,7 +241,7 @@ def run(run_dir: Path, cfg: dict[str, Any]) -> None:
         log("doublets.method scdblfinder: keeping doublet_score/doublet_call from S1a")
 
     log("pre-clustering (HVGs, 20 PCs, Leiden resolution 0.3) via scpipe.gpu_core")
-    labels, summary = pre_cluster(adata, run_dir, cfg, device_setting)
+    labels, summary = pre_cluster(adata, run_dir, cfg, core_device)
     metrics["pre_cluster"] = pd.Series(labels, index=cells).reindex(tsv_cells).to_numpy()
     log(f"pre-clustering: {summary['n_clusters']} clusters on {summary['device']} in {summary['total_s']:.1f}s")
 

@@ -459,6 +459,8 @@ def test_detach_commands(tmp_path):
     assert cmd[:4] == ["tmux", "new-session", "-d", "-s"] and cmd[4] == "scpipe-my-run-1"
     assert "tmux attach -t scpipe-my-run-1" in how and "logs/runner.log" in how
     assert "-m scpipe run --config c.yaml" in cmd[5]
+    m, cmd, how = R.detach_command(["run"], tmp_path, "r", method="tmux", env_file=tmp_path / "e.json")
+    assert "--env-file" in cmd[5] and "SCPIPE_" not in cmd[5].split("--env-file")[0]
     m, cmd, how = R.detach_command(["resume", "--run-dir", str(tmp_path)], tmp_path, "r", method="nohup")
     assert cmd[0] == "nohup" and cmd[1:4] == [sys.executable, "-m", "scpipe"]
     assert "tail -f" in how and "scpipe status" in how
@@ -496,3 +498,4 @@ def test_detach_end_to_end(project, method):
                            capture_output=True)
     assert calls(rd) == ALL
     assert "finished up to S2" in (rd / "logs" / "runner.log").read_text()
+    assert not list(rd.glob(".scpipe-env-*"))  # the env hand-over file is removed

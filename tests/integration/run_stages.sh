@@ -24,7 +24,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 export RSCRIPT="${RSCRIPT:-Rscript}"
-CONF="$HERE/stage_configs"
 INPUTS="$REPO/tests/fixtures/stage_inputs"
 CHECK=("$PYTHON" "$HERE/check_stages.py")
 NEW_RESOLUTION=1.0
@@ -40,6 +39,26 @@ export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-$WORK/.numba}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-$WORK/.mpl}"
 LOG="$WORK/logs"; mkdir -p "$LOG"
 CPU="$WORK/run_cpu"; GPU="$WORK/run_gpu"
+
+# All runs use a copy of stage_configs/ in the workdir, so the resolution-change
+# config can sit next to cpu.yaml and share its samples.csv (identical inputs ->
+# identical S0/S1 fingerprints). Sample paths are resolved against the folder
+# holding config.yaml, so the copy's samples.csv gets paths relative to it that
+# point back at the fixture; this keeps relative-path resolution under test.
+SRC_CONF="$HERE/stage_configs"
+CONF="$WORK/stage_configs"
+mkdir -p "$CONF"
+cp "$SRC_CONF"/cpu.yaml "$SRC_CONF"/gpu.yaml "$SRC_CONF"/qc_policy.yaml "$CONF"/
+"$PYTHON" - "$INPUTS/samples.csv" "$INPUTS" "$CONF" > "$CONF/samples.csv" <<'PY'
+import csv, os, sys
+sheet, inputs, conf = sys.argv[1:4]
+rows = list(csv.DictReader(open(sheet, newline="")))
+w = csv.DictWriter(sys.stdout, fieldnames=list(rows[0]), lineterminator="\n")
+w.writeheader()
+for r in rows:
+    r["path"] = os.path.relpath(os.path.join(inputs, r["path"]), conf)
+    w.writerow(r)
+PY
 
 echo "scpipe stages S0-S2 end-to-end"
 echo "  repo:    $REPO"
@@ -114,24 +133,32 @@ resume_noop() {  # resume on a finished run: exits 0, reruns nothing
 }
 
 rerun_resolution() {   # clustering.resolution changed: only S2 reruns
-  # The copy lives in $WORK, so make its relative paths absolute first.
-  local cfg="$WORK/configs/cpu_res.yaml"
-  mkdir -p "$WORK/configs"
-  sed -e "s#^samples: .*#samples: $INPUTS/samples.csv#" \
-      -e "s#^qc_policy: .*#qc_policy: $CONF/qc_policy.yaml#" \
-      -e "s#^  resolution: .*#  resolution: $NEW_RESOLUTION#" "$CONF/cpu.yaml" > "$cfg"
+  local cfg="$CONF/cpu_resolution.yaml"
+  sed -e "s#^  resolution: .*#  resolution: $NEW_RESOLUTION#" "$CONF/cpu.yaml" > "$cfg"
   diff "$CONF/cpu.yaml" "$cfg"
   grep -q "resolution: $NEW_RESOLUTION" "$cfg" || { echo "could not edit resolution"; return 1; }
   "${CHECK[@]}" snapshot "$CPU" "$WORK/state_before_resolution.json" || return 1
   pipeline_run "$CPU" "$cfg" || return 1
   "${CHECK[@]}" reran "$WORK/state_before_resolution.json" "$CPU" --stages S2 || return 1
-  local r
-  r="$("$PYTHON" -c 'import json,sys; s=json.load(open(sys.argv[1])); print(s.get("resolution", s.get("clustering", {}).get("resolution") if isinstance(s.get("clustering"), dict) else None))' "$CPU/S2/summary.json")"
-  echo "S2/summary.json resolution: $r"
-  [[ "$r" == "None" || "$r" == "$NEW_RESOLUTION" ]] || { echo "summary resolution $r != $NEW_RESOLUTION"; return 1; }
+  # S2/summary.json must record the new resolution (compared as numbers: 1 == 1.0).
+  "$PYTHON" - "$CPU/S2/summary.json" "$NEW_RESOLUTION" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+r = s.get("resolution")
+if r is None and isinstance(s.get("clustering"), dict):
+    r = s["clustering"].get("resolution")
+print(f"S2/summary.json resolution: {r}")
+sys.exit(0 if r is not None and abs(float(r) - float(sys.argv[2])) < 1e-9 else 1)
+PY
 }
 
-run_step T0  "stage inputs reproducible (--check)"   ""      -- "$PYTHON" "$REPO/tests/fixtures/make_stage_inputs.py" --check
+inputs_ok() {
+  "$PYTHON" "$REPO/tests/fixtures/make_stage_inputs.py" --check || return 1
+  # The three sample sheets must name the same samples, files and metadata.
+  "${CHECK[@]}" sheets "$INPUTS/samples.csv:$INPUTS" "$SRC_CONF/samples.csv:$SRC_CONF" "$CONF/samples.csv:$CONF"
+}
+
+run_step T0  "stage inputs reproducible, sheets agree" ""    -- inputs_ok
 run_step T1  "scpipe doctor"                         ""      -- scpipe doctor --config "$CONF/cpu.yaml"
 run_step C1  "run S0-S2, device cpu"                 "T0"    -- pipeline_run "$CPU" "$CONF/cpu.yaml"
 run_step G1  "run S0-S2, device gpu (CPU fallback)"  "T0"    -- pipeline_run "$GPU" "$CONF/gpu.yaml" SCPIPE_ALLOW_CPU_AS_GPU=1

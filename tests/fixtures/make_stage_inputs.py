@@ -10,6 +10,10 @@ four planted cell types) and writes ``tests/fixtures/stage_inputs/``:
                             layers["counts"] (int32), log-normalised floats in X,
                             gene order permuted and a few genes missing
     samples.csv             sample sheet with paths relative to this directory
+                            (scpipe resolves sample paths against the folder
+                            holding config.yaml, so this sheet suits a config
+                            placed here; the e2e test uses
+                            tests/integration/stage_configs/samples.csv)
     truth.tsv               cell_id (<sample_id>_<barcode>), sample, cell_type,
                             injected (none | lowq | doublet | platelet)
     manifest.json           counts per sample and per injected population,

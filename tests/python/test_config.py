@@ -55,6 +55,17 @@ def test_defaults_and_paths(tmp_path, monkeypatch):
     assert cfg["policy_hash"] == qc.policy_from_dict({"hard_limits": {"min_genes": 250}}).hash
 
 
+def test_sample_paths_relative_to_config_dir(tmp_path):
+    proj = make_project(tmp_path, {"samples": "sheets/samples.csv"})
+    (proj / "sheets").mkdir()
+    (proj / "sheets" / "samples.csv").write_text("sample_id,path\nS2,data/S2.h5ad\n")
+    cfg = C.load_config(proj / "config.yaml")
+    assert cfg["samples_resolved"][0]["path"] == str(proj / "data" / "S2.h5ad")
+    assert cfg["config_dir"] == str(proj)
+    out = C.prepare_run_dir(cfg)
+    assert out["config_dir"] == str(proj)
+
+
 def test_env_expansion_and_override(tmp_path, monkeypatch):
     monkeypatch.setenv("USER", "alice")
     monkeypatch.setenv("SCRATCH_X", str(tmp_path / "scratch"))

@@ -5,7 +5,7 @@
 project: stage_test_gpu
 run_dir: /tmp/scpipe-stage-test/gpu      # always overridden with --run-dir by the harness
 seed: 42
-samples: ../../fixtures/stage_inputs/samples.csv
+samples: samples.csv                     # sample paths in it are relative to this folder
 qc_policy: qc_policy.yaml
 object_format: rds
 resources:

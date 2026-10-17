@@ -116,7 +116,7 @@ SAMPLE_BYTES = 1024**2
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "S0": ("object_format", "samples_resolved", "sample_columns"),
     "S1a": ("object_format", "doublets.method", "policy.protected_populations"),
-    "S1b": ("doublets.method", "seed", "device"),
+    "S1b": ("doublets.method", "seed", "device", "resources.gpu_mem_cap_gb"),
     "S1c": ("policy",),
     "S2": (
         "object_format",
@@ -619,6 +619,8 @@ def run_pipeline(
 
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
+            if signal.getsignal(sig) == signal.SIG_IGN:
+                continue  # e.g. SIGHUP under nohup: keep ignoring it
             prev_handlers[sig] = signal.signal(sig, _raise)
         except (ValueError, OSError):  # not in the main thread
             pass
@@ -912,18 +914,26 @@ def _print_doctor(report: dict[str, Any], out) -> None:
 # --------------------------------------------------------------------------
 
 
-def detach_command(argv: list[str], run_dir: Path, run_id: str, method: str | None = None) -> tuple[str, list[str], str]:
-    """Return (method, command to launch, text telling the user how to follow it)."""
+def detach_command(argv: list[str], run_dir: Path, run_id: str, method: str | None = None,
+                   env_file: Path | None = None) -> tuple[str, list[str], str]:
+    """Return (method, command to launch, text telling the user how to follow it).
+
+    With tmux the detached runner does not inherit this shell's environment
+    (a tmux server may already be running with its own), so the environment is
+    handed over in ``env_file`` (mode 0600, read and deleted by the detached
+    runner via the hidden ``--env-file`` option) rather than on the command
+    line, where other users of a shared node could read it with ``ps``.
+    """
     method = method or os.environ.get("SCPIPE_DETACH_WITH") or ("tmux" if shutil.which("tmux") else "nohup")
     log = run_dir / "logs" / "runner.log"
     inner = [sys.executable, "-m", "scpipe", *argv]
     if method == "tmux":
         safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in run_id)[:60]
         session = f"scpipe-{safe}"
-        keep = {k: v for k, v in os.environ.items() if k in ("PATH", "PYTHONPATH", "HOME", "USER", "LANG", "TMPDIR")
-                or k.startswith("SCPIPE_") or k.startswith("R_")}
-        shell = (f"cd {shlex.quote(str(Path.cwd()))} && env " + " ".join(shlex.quote(f"{k}={v}") for k, v in sorted(keep.items()))
-                 + " " + shlex.join(inner) + f" 2>&1 | tee -a {shlex.quote(str(log))}")
+        if env_file is not None:
+            inner += ["--env-file", str(env_file)]
+        shell = (f"cd {shlex.quote(str(Path.cwd()))} && " + shlex.join(inner)
+                 + f" 2>&1 | tee -a {shlex.quote(str(log))}")
         cmd = ["tmux", "new-session", "-d", "-s", session, shell]
         how = (f"scpipe: running detached in tmux session {session!r}\n"
                f"  reattach:  tmux attach -t {session}   (detach again with Ctrl-b d)\n"
@@ -939,15 +949,37 @@ def detach_command(argv: list[str], run_dir: Path, run_id: str, method: str | No
     raise RunnerError(f"unknown detach method {method!r} (tmux or nohup)")
 
 
+def _write_env_file(run_dir: Path) -> Path:
+    p = run_dir / f".scpipe-env-{os.getpid()}.json"
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(dict(os.environ), fh)
+    return p
+
+
+def _load_env_file(path: str) -> None:
+    p = Path(path)
+    try:
+        env = json.loads(p.read_text())
+    finally:
+        p.unlink(missing_ok=True)
+    os.environ.clear()
+    os.environ.update(env)
+
+
 def _launch_detached(argv: list[str], run_dir: Path, run_id: str, out) -> int:
     if _runner_alive(run_dir):
         raise RunnerError(f"another scpipe runner is active in {run_dir}")
-    method, cmd, how = detach_command(argv, run_dir, run_id)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+    method = os.environ.get("SCPIPE_DETACH_WITH") or ("tmux" if shutil.which("tmux") else "nohup")
+    env_file = _write_env_file(run_dir) if method == "tmux" else None
+    method, cmd, how = detach_command(argv, run_dir, run_id, method, env_file)
     log = run_dir / "logs" / "runner.log"
     if method == "tmux":
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
+            if env_file is not None:
+                env_file.unlink(missing_ok=True)
             raise RunnerError(f"tmux failed: {r.stderr.strip()}")
     else:
         with open(log, "a") as fh:
@@ -971,10 +1003,12 @@ def _parser() -> argparse.ArgumentParser:
     r.add_argument("--run-dir", default=None, help="overrides run_dir in the config")
     r.add_argument("--until", default=None, metavar="STAGE", help="stop after this stage")
     r.add_argument("--detach", action="store_true", help="run inside tmux (or nohup) and return")
+    r.add_argument("--env-file", default=None, help=argparse.SUPPRESS)
     s = sub.add_parser("resume", help="continue from the first incomplete stage")
     s.add_argument("--run-dir", required=True)
     s.add_argument("--until", default=None, metavar="STAGE")
     s.add_argument("--detach", action="store_true")
+    s.add_argument("--env-file", default=None, help=argparse.SUPPRESS)
     t = sub.add_parser("status", help="stage states, timings and peak memory")
     t.add_argument("--run-dir", required=True)
     t.add_argument("--json", action="store_true", help="print state.json")
@@ -988,6 +1022,8 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None, out=None) -> int:
     out = out or sys.stdout
     a = _parser().parse_args(argv)
+    if getattr(a, "env_file", None):
+        _load_env_file(a.env_file)
     try:
         if a.cmd == "run":
             cfg = cfgmod.load_config(a.config, a.run_dir)

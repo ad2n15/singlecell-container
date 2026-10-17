@@ -99,7 +99,7 @@ and deterministic (about 0.5 MB).
 |---|---|
 | `donor_A/` | 10x `matrix.mtx.gz`, `features.tsv.gz`, `barcodes.tsv.gz` (format left blank in `samples.csv`, so S0 must auto-detect it) |
 | `donor_B.h5ad` | Plain AnnData, not an exchange file: raw counts in `layers["counts"]`, log-normalised floats in `X`, genes in a different order and 4 genes missing |
-| `samples.csv` | Sample sheet with paths relative to the folder, plus `donor`, `condition` and `batch` metadata columns |
+| `samples.csv` | Sample sheet with paths relative to this folder, plus `donor`, `condition` and `batch` metadata columns. scpipe resolves sample paths against the folder holding `config.yaml`, so this sheet suits a config placed here; the end-to-end test uses `tests/integration/stage_configs/samples.csv`, which lists the same files |
 | `truth.tsv` | One row per cell: `cell_id` as the pipeline names it (`<sample_id>_<barcode>`), `sample`, planted `cell_type`, `injected` |
 | `manifest.json` | Cells, genes and UMIs per sample, injected counts, and SHA-256 of each file |
 
@@ -132,7 +132,10 @@ KEEP_WORKDIR=1 tests/integration/run_stages.sh
 ```
 
 It uses `tests/integration/stage_configs/cpu.yaml` and `gpu.yaml`, which differ only in `device`,
-and `stage_configs/qc_policy.yaml`. That policy matches `config/examples/qc_policy.yaml` except
+plus `stage_configs/samples.csv` and `stage_configs/qc_policy.yaml`. The script copies them into
+`<workdir>/stage_configs/` (with a `samples.csv` whose relative paths point back at the fixture), so
+the config with a changed resolution can sit next to them and share the same inputs. The same
+configs also work by hand: `scpipe run --config tests/integration/stage_configs/cpu.yaml --run-dir /tmp/x`. That policy matches `config/examples/qc_policy.yaml` except
 for lower hard limits (40 genes, 80 UMIs), because the synthetic cells are shallow. The `gpu` run
 sets the test-only override `SCPIPE_ALLOW_CPU_AS_GPU=1`, so on a machine without a GPU it still
 takes the GPU path (slim exchange file, `python -m scpipe.gpu_core`, merge back) but `gpu_core`
@@ -141,7 +144,7 @@ computes on the CPU. The checks are in `tests/integration/check_stages.py`; each
 
 | Step | What it checks |
 |---|---|
-| T0 | `make_stage_inputs.py --check`: the inputs are reproducible |
+| T0 | `make_stage_inputs.py --check`: the inputs are reproducible; the three sample sheets resolve to the same files |
 | T1 | `scpipe doctor` runs |
 | C1, G1 | `scpipe run --until S2` succeeds with `device: cpu` and with `device: gpu` |
 | C2, G2 | `state.json`: every stage `done`, with fingerprint and start/end times; every `logs/<STAGE>.log`; the config copies and `hashes.json` |
