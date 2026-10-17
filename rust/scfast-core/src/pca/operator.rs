@@ -39,6 +39,129 @@ const ZV_ROWS: usize = 256;
 /// Rows of `U` transposed into a local row-major buffer at a time inside a `Z^T U` leaf.
 const ZTU_SUB_ROWS: usize = 256;
 
+/// `acc += a * w` (equal lengths), in fixed 8-wide chunks so LLVM emits straight-line SIMD
+/// without per-element bounds checks. `FMA` selects fused multiply-add (only used where the
+/// CPU has it: see `use_fma`).
+#[inline(always)]
+fn axpy<const FMA: bool>(acc: &mut [f64], a: f64, w: &[f64]) {
+    debug_assert_eq!(acc.len(), w.len());
+    let mut ac = acc.chunks_exact_mut(8);
+    let mut wc = w.chunks_exact(8);
+    for (x, y) in (&mut ac).zip(&mut wc) {
+        let x: &mut [f64; 8] = x.try_into().unwrap();
+        let y: &[f64; 8] = y.try_into().unwrap();
+        for t in 0..8 {
+            x[t] = if FMA { a.mul_add(y[t], x[t]) } else { x[t] + a * y[t] };
+        }
+    }
+    for (x, y) in ac.into_remainder().iter_mut().zip(wc.remainder()) {
+        *x = if FMA { a.mul_add(*y, *x) } else { *x + a * y };
+    }
+}
+
+/// `buf[r, :] = sum_j x[r0 + r, j] vs[j, :] - shift` for `m` rows (buf row-major m x l).
+#[inline(always)]
+fn zv_kernel<I: Idx, T: Real, const FMA: bool>(
+    x: &CsrView<'_, I, T>,
+    vs: &[f64],
+    shift: &[f64],
+    r0: usize,
+    buf: &mut [f64],
+) {
+    let l = shift.len();
+    for (r, acc) in buf.chunks_exact_mut(l).enumerate() {
+        acc.fill(0.0);
+        let (idx, val) = x.row(r0 + r);
+        for (j, xv) in idx.iter().zip(val) {
+            let j = j.to_usize();
+            axpy::<FMA>(acc, xv.to_f64(), &vs[j * l..(j + 1) * l]);
+        }
+        for (a, s) in acc.iter_mut().zip(shift) {
+            *a -= s;
+        }
+    }
+}
+
+/// `acc[j, :] += x[s0 + r, j] ub[r, :]` and `acc[p, :] += ub[r, :]` for the rows of `ub`.
+#[inline(always)]
+fn ztu_kernel<I: Idx, T: Real, const FMA: bool>(x: &CsrView<'_, I, T>, ub: &[f64], l: usize, s0: usize, acc: &mut [f64]) {
+    let p = x.n_cols;
+    for (r, ur) in ub.chunks_exact(l).enumerate() {
+        for (a, w) in acc[p * l..].iter_mut().zip(ur) {
+            *a += w;
+        }
+        let (idx, val) = x.row(s0 + r);
+        for (j, xv) in idx.iter().zip(val) {
+            let j = j.to_usize();
+            axpy::<FMA>(&mut acc[j * l..(j + 1) * l], xv.to_f64(), ur);
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn zv_kernel_avx2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, vs: &[f64], shift: &[f64], r0: usize, buf: &mut [f64]) {
+    zv_kernel::<I, T, true>(x, vs, shift, r0, buf)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn ztu_kernel_avx2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, ub: &[f64], l: usize, s0: usize, acc: &mut [f64]) {
+    ztu_kernel::<I, T, true>(x, ub, l, s0, acc)
+}
+
+/// Whether the AVX2 + FMA kernels can run (x86_64, detected once at run time). On aarch64
+/// FMA is part of the baseline, so the fused kernels are always used there. Fused and
+/// unfused kernels round differently, so results are reproducible per machine, not across
+/// CPU generations.
+#[inline]
+fn use_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+fn zv_rows<I: Idx, T: Real>(x: &CsrView<'_, I, T>, vs: &[f64], shift: &[f64], r0: usize, buf: &mut [f64], fma: bool) {
+    #[cfg(target_arch = "x86_64")]
+    if fma {
+        // SAFETY: only called when use_fma() detected AVX2 and FMA.
+        return unsafe { zv_kernel_avx2(x, vs, shift, r0, buf) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = fma;
+        return zv_kernel::<I, T, true>(x, vs, shift, r0, buf);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = fma;
+        zv_kernel::<I, T, false>(x, vs, shift, r0, buf)
+    }
+}
+
+fn ztu_rows<I: Idx, T: Real>(x: &CsrView<'_, I, T>, ub: &[f64], l: usize, s0: usize, acc: &mut [f64], fma: bool) {
+    #[cfg(target_arch = "x86_64")]
+    if fma {
+        // SAFETY: only called when use_fma() detected AVX2 and FMA.
+        return unsafe { ztu_kernel_avx2(x, ub, l, s0, acc) };
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = fma;
+        return ztu_kernel::<I, T, true>(x, ub, l, s0, acc);
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = fma;
+        ztu_kernel::<I, T, false>(x, ub, l, s0, acc)
+    }
+}
+
 /// Fixed partition of the rows for the reductions. Depends on the input shape only.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Blocks {
@@ -219,24 +342,12 @@ impl<'a, I: Idx, T: Real> ScaledOp<'a, I, T> {
             }
         }
         let x = &self.x;
+        let fma = use_fma();
         out.par_row_chunks_mut(ZV_ROWS).enumerate().for_each(|(b, mut oc)| {
             let r0 = b * ZV_ROWS;
             let m = oc.nrows();
             let mut buf = vec![0.0f64; m * l];
-            for r in 0..m {
-                let acc = &mut buf[r * l..(r + 1) * l];
-                let (idx, val) = x.row(r0 + r);
-                for (j, xv) in idx.iter().zip(val) {
-                    let j = j.to_usize();
-                    let xv = xv.to_f64();
-                    for (a, w) in acc.iter_mut().zip(&vs[j * l..(j + 1) * l]) {
-                        *a += xv * w;
-                    }
-                }
-                for (a, s) in acc.iter_mut().zip(&shift) {
-                    *a -= s;
-                }
-            }
+            zv_rows(x, &vs, &shift, r0, &mut buf, fma);
             for c in 0..l {
                 let col = oc.rb_mut().col_mut(c).try_as_col_major_mut().expect("column-major").as_slice_mut();
                 for (r, y) in col.iter_mut().enumerate() {
@@ -252,6 +363,7 @@ impl<'a, I: Idx, T: Real> ScaledOp<'a, I, T> {
         assert!(u.nrows() == n);
         let x = &self.x;
         let blocks = self.blocks;
+        let fma = use_fma();
         // Accumulator rows 0..p hold X^T u, row p holds the column sums 1^T u.
         let leaf = |b: usize| -> Result<Vec<f64>> {
             let (r0, r1) = blocks.range(b, n);
@@ -267,20 +379,7 @@ impl<'a, I: Idx, T: Real> ScaledOp<'a, I, T> {
                         ub[r * l + c] = col[r];
                     }
                 }
-                for r in 0..m {
-                    let ur = &ub[r * l..(r + 1) * l];
-                    for (a, w) in acc[p * l..].iter_mut().zip(ur) {
-                        *a += w;
-                    }
-                    let (idx, val) = x.row(s0 + r);
-                    for (j, xv) in idx.iter().zip(val) {
-                        let j = j.to_usize();
-                        let xv = xv.to_f64();
-                        for (a, w) in acc[j * l..(j + 1) * l].iter_mut().zip(ur) {
-                            *a += xv * w;
-                        }
-                    }
-                }
+                ztu_rows(x, &ub[..m * l], l, s0, &mut acc, fma);
                 s0 = s1;
             }
             Ok(acc)
