@@ -183,7 +183,7 @@ new_run <- function(samples, ..., tag = "run") {
               seed = 42L, samples = sf, qc_policy = pf, object_format = "rds",
               resources = list(threads = 1L, max_memory_gb = 4, gpu_mem_cap_gb = 20, nice = 10L),
               doublets = list(method = "none"), qc = list(review_action = "keep"),
-              normalization = "lognorm", n_hvg = 500L, device = "cpu",
+              normalization = "lognorm", n_hvg = 500L, device = "cpu", engine = "seurat",
               integration = list(method = "none", batch_key = "sample_id"),
               pcs = "auto", n_neighbors = 20L, clustering = list(resolution = 0.5))
   over <- list(...)
@@ -584,6 +584,108 @@ test_that("S2 CPU path recovers the planted cell types (purity >= 0.9)", {
   expect_gte(p, 0.9)
   expect_gte(nlevels(obj$seurat_clusters), 4)
   CPU_RUN <<- list(rd = rd, cl = setNames(as.character(obj$seurat_clusters), colnames(obj)))
+})
+
+# ---- S2 scfast path (docs/scfast-integration.md); skipped when scfastR is absent
+test_that("S2 engine resolution: auto picks scfast only for an installed scfastR and a CPU plan", {
+  cpu <- list(device = "cpu"); gpu <- list(device = "gpu")
+  expect_identical(s2_resolve_engine(list(engine = "seurat"), cpu), "seurat")
+  expect_identical(s2_resolve_engine(list(engine = "auto"), gpu), "seurat")
+  expect_error(s2_resolve_engine(list(engine = "bogus"), cpu), "engine must be")
+  if (requireNamespace("scfastR", quietly = TRUE)) {
+    expect_identical(s2_resolve_engine(list(engine = "auto"), cpu), "scfast")
+    expect_identical(s2_resolve_engine(list(), cpu), "scfast")
+    expect_error(s2_resolve_engine(list(engine = "scfast"), gpu), "no GPU backend")
+  } else {
+    expect_identical(s2_resolve_engine(list(engine = "auto"), cpu), "seurat")
+    expect_error(s2_resolve_engine(list(engine = "scfast"), cpu), "scfastR")
+  }
+})
+
+test_that("S2 scfast path recovers the planted cell types and writes no exchange files", {
+  skip_if_not_installed("scfastR")
+  rd <- new_run(TWO, tag = "s2fast", engine = "scfast")
+  stage(rd, run_s0)
+  set.seed(5)
+  dec <- sample(c("keep", "review", "exclude"), 500, TRUE, prob = c(0.9, 0.05, 0.05))
+  write_decisions(rd, dec)
+  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
+  stage(rd, run_s2)
+  obj <- scp_load_object(file.path(rd, "S2"))
+  sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"), simplifyVector = FALSE)
+  expect_equal(ncol(obj), sum(dec != "exclude"))
+  expect_identical(sm$device, "cpu"); expect_identical(sm$plan, "cpu")
+  expect_identical(sm$path, "cpu_scfast"); expect_identical(sm$engine, "scfast")
+  expect_true(is.character(sm$scfast_version) && nzchar(sm$scfast_version))
+  expect_false(dir.exists(file.path(rd, "S2", "exchange")))
+  expect_length(list.files(rd, pattern = "\\.h5ad$", recursive = TRUE), 0)
+  expect_true(all(c("pca", "umap") %in% Reductions(obj)))
+  expect_true(all(c("RNA_snn", "RNA_nn") %in% Graphs(obj)))
+  expect_gte(sm$pcs, 10); expect_lte(sm$pcs, 50)
+  expect_identical(sm$clusters, nlevels(obj$seurat_clusters))
+  expect_identical(Idents(obj), obj$seurat_clusters)
+  expect_true(all(c("load", "subset", "normalize", "hvg", "pca", "neighbors", "leiden", "umap", "save") %in% names(sm$timings_s)))
+  expect_identical(length(VariableFeatures(obj)), 500L)
+  expect_false("scale.data" %in% Layers(obj[["RNA"]]))
+  expect_equal(nrow(obj), 800)
+  expect_identical(ncol(Embeddings(obj, "umap")), 2L)
+  expect_gte(purity(obj$seurat_clusters, truth_for(obj)), 0.9)
+  expect_gte(nlevels(obj$seurat_clusters), 4)
+  if (!is.null(CPU_RUN)) {      # same decisions as the Seurat run: partitions should agree closely
+    expect_identical(colnames(obj), names(CPU_RUN$cl))
+    expect_gte(ari(CPU_RUN$cl, as.character(obj$seurat_clusters)), 0.8)
+  }
+})
+
+test_that("S2 scfast path honours a fixed pcs and review_action exclude", {
+  skip_if_not_installed("scfastR")
+  rd <- new_run(TWO, tag = "s2fastrev", engine = "scfast", qc = list(review_action = "exclude"), pcs = 15L, n_hvg = 300L)
+  stage(rd, run_s0)
+  dec <- rep(c("keep", "review", "keep", "exclude"), length.out = 500)
+  write_decisions(rd, dec)
+  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  stage(rd, run_s2)
+  obj <- scp_load_object(file.path(rd, "S2"))
+  sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
+  expect_equal(ncol(obj), sum(dec == "keep"))
+  expect_identical(sm$path, "cpu_scfast")
+  expect_identical(sm$pcs, 15L)
+  expect_identical(ncol(Embeddings(obj, "pca")), 15L)
+  expect_identical(sm$n_hvg, 300L)
+})
+
+test_that("S2 engine auto uses scfast on a CPU plan and seurat on a GPU plan", {
+  skip_if_not_installed("scfastR")
+  rd <- new_run(TWO, tag = "s2fastauto", engine = "auto")
+  stage(rd, run_s0); write_decisions(rd)
+  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  stage(rd, run_s2)
+  sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
+  expect_identical(sm$path, "cpu_scfast"); expect_identical(sm$engine, "scfast")
+  rd2 <- new_run(TWO, tag = "s2fastgpu", engine = "scfast", device = "gpu")
+  stage(rd2, run_s0); write_decisions(rd2)
+  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"gpu","plan":"in_memory","reason":"t"}')
+  expect_error(stage(rd2, run_s2), "no GPU backend")
+})
+
+test_that("S2 scfast path with harmony: R harmony runs in process, else falls back to exchange_cpu with a warning", {
+  skip_if_not_installed("scfastR")
+  rd <- new_run(TWO, tag = "s2fastharm", engine = "scfast", device = "auto",
+                integration = list(method = "harmony", batch_key = "sample_id"))
+  stage(rd, run_s0); write_decisions(rd)
+  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  if (scp_has_pkg("harmony")) {
+    stage(rd, run_s2)
+    sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
+    expect_identical(sm$path, "cpu_scfast")
+    expect_true("harmony" %in% Reductions(scp_load_object(file.path(rd, "S2"))))
+  } else {
+    skip_if_not(has_harmonypy, "harmonypy not available for the exchange fallback")
+    out <- utils::capture.output(run_s2(scp_read_config(rd), REPO))
+    expect_true(any(grepl("\\[WARN\\].*falling back to the exchange_cpu path", out)))
+    sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
+    expect_identical(sm$path, "exchange_cpu"); expect_identical(sm$engine, "seurat")
+  }
 })
 
 test_that("S2 review_action exclude drops review cells; fixed pcs is honoured", {

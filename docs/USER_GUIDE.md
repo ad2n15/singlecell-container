@@ -18,8 +18,9 @@ scpipe doctor --config config.yaml
 # 2. run; --detach keeps it alive inside tmux when your SSH session drops
 scpipe run --config config.yaml --detach
 
-# 3. follow it
+# 3. follow it: text, or open <run_dir>/dashboard.html (rewritten after every stage; refreshes itself)
 scpipe status --run-dir /scratch/$USER/scpipe/my_study
+scpipe dashboard --run-dir /scratch/$USER/scpipe/my_study --watch 30   # optional: keep regenerating
 
 # 4. if a gate stops the run for your approval (exit code 3), it prints what to do:
 scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage G2 [--from-file edited.json] [--by you]
@@ -62,6 +63,7 @@ Start from [`config/examples/`](../config/examples). Settings are validated befo
 runs and every problem is reported at once. The sections added by build steps 3–7:
 
 ```yaml
+engine: auto                     # auto | scfast | seurat   (section 5b): which engine runs the CPU steps
 site: iridisx                    # a name in conf/sites/<name>.yaml, or a path; supplies defaults for
                                  # execution, resources, container, scheduler, scratch (config.yaml wins per key)
 execution: direct                # direct | slurm | pbs | lsf | sge | split   (section 5)
@@ -110,6 +112,23 @@ report:
   top_markers: 10                # markers per cluster shown in report.html
 ```
 
+### Engine: Rust, Seurat or GPU
+
+`engine` picks the code that does doublets, pre-clustering, PCA, neighbours and Leiden:
+
+| `engine` | What runs | Exchange `.h5ad` files |
+|---|---|---|
+| `auto` (default) | Rust `scfast` when `scfastR` is installed and the device plan is CPU; otherwise Seurat | none on the Rust path |
+| `scfast` | Rust only. Errors if `scfastR` is missing, or with `device: gpu` (no GPU backend yet) | none |
+| `seurat` | Seurat on CPU; rapids-singlecell through the exchange when the plan is GPU | GPU path only |
+
+On the Rust path S1a scores doublets itself (a Scrublet-style detector) and S2 runs entirely in R,
+so Python and Scanpy are not involved and nothing is written for the exchange. `S2/summary.json`
+records `path` (`cpu_scfast`, `cpu_seurat`, `gpu_exchange`, `exchange_cpu`), `engine` and
+`scfast_version`. Doublet calls differ slightly from Scrublet's (the detector is a reimplementation),
+and Harmony without the R `harmony` package falls back to the exchange route. `scpipe doctor` prints
+the engine `auto` would choose. Install steps, including Rust, are in [`INSTALL.md`](INSTALL.md).
+
 ## 3. The run directory
 
 ```
@@ -130,6 +149,18 @@ report:
 ```
 
 Put the run directory on scratch; results you keep belong on project storage.
+
+### Watching a run: the dashboard
+
+`<run_dir>/dashboard.html` is one self-contained page (no network, no JavaScript) that `scpipe run`
+rewrites after every stage change. It shows the pipeline strip (S0 … S5 with the four gates)
+coloured by status, a wall-clock timeline with the waiting time at each gate hatched, and a card
+per stage and gate: wall time, peak memory, cells in and out, QC keep/review/exclude, engine and
+path, clusters, the S2 step timings, contrasts, the gate mode, who decided, fallback, reviewer
+verdict and a link to that gate's `report.html`. Open it over SMB/`scp`, or in a browser on the
+login node; while the run is live it reloads itself every 30 s. `scpipe dashboard --run-dir D`
+regenerates it by hand, and `--watch N` keeps doing so until the run finishes. The tail of the log
+is shown inline for a running, waiting or failed stage. Set `SCPIPE_NO_DASHBOARD=1` to disable it.
 
 ## 4. Gates and approvals
 

@@ -23,11 +23,11 @@ flowchart LR
     S0[any format → one Seurat object]
   end
   subgraph qc["S1 QC"]
-    S1a[S1a metrics R] --> S1b[S1b doublets py] --> S1c[S1c rules engine py]
+    S1a[S1a metrics R<br/>+ doublets on Rust path] --> S1b[S1b doublets py<br/>pass-through on Rust path] --> S1c[S1c rules engine py]
   end
   G1{{G1 QC gate}}
   subgraph core["S2 core processing"]
-    S2[normalise · HVG · PCA · Harmony · neighbours · Leiden · UMAP<br/>CPU: Seurat · GPU: rapids-singlecell via exchange]
+    S2[normalise · HVG · PCA · Harmony · neighbours · Leiden · UMAP<br/>CPU: Rust scfast in process (default) or Seurat · GPU: rapids-singlecell via exchange]
   end
   subgraph ev["S3 evidence"]
     S3[markers · signatures · CellTypist · consensus annotation]
@@ -47,10 +47,10 @@ flowchart LR
 |---|---|---|---|---|
 | S0 ingest | R | `samples.csv`, 10x h5 / mtx, h5ad, loom, csv/tsv, Seurat rds/qs2 | `S0/object.rds`, `ingest_report.json` | Format auto-detected; gene union; non-integer counts refused; human-gene check |
 | S1a metrics | R | S0 | `S1/qc_metrics.tsv.gz`, `metrics_counts.h5ad` | genes, UMIs, % mito/ribo/hb, protected-population scores |
-| S1b doublets | Python | S1a | `qc_metrics.tsv.gz` (+ doublet score, pre-cluster) | scrublet per sample (scDblFinder via R optional) |
+| S1b doublets | Python | S1a | `qc_metrics.tsv.gz` (+ doublet score, pre-cluster) | Seurat/GPU path: scrublet per sample. Rust path: S1a already wrote score, call and pre-cluster, S1b passes through |
 | S1c rules | Python | S1a/b, `qc_policy.yaml` | `S1/qc_decisions.tsv.gz`, `qc_summary.json` | hard limits → adaptive MAD bounds → doublets → protected rescue → review triggers; reason codes per cell |
 | **G1** QC gate | Python | S1, policy | `gates/G1/*`, may rewrite `qc_decisions.tsv.gz` | agent may only *tighten* within policy; decisions re-applied through the rules engine |
-| S2 core | R (+ Python on GPU) | S0, decisions | `S2/object.rds`, `summary.json` | device plan from free GPU memory; exchange slim → `gpu_core` → results merged back by barcode and checksum |
+| S2 core | R (+ Python on GPU) | S0, decisions | `S2/object.rds`, `summary.json` | device plan from free GPU memory. CPU + `scfastR`: `cpu_scfast`, all in process. GPU: exchange slim → `gpu_core` → results merged back by barcode and checksum |
 | S3 evidence | R + Python | S2 | `S3/markers.tsv.gz`, `cluster_summary.json`, `signatures.tsv.gz`, `celltypist.tsv.gz`, `annotation_consensus.tsv`, `evidence_bundle.json` | consensus = weighted vote of signatures, CellTypist and markers against 72 human cell types with CL IDs |
 | **G2** context | Python | S3 bundle | `gates/G2/*` | tissue (UBERON) and disease candidates (EFO) — speculative, so `review` by default |
 | **G3** annotation | Python | S3 bundle, consensus | `gates/G3/*` → `S3/annotation.tsv` | agent may relabel only `low_confidence` / `conflict` clusters |
@@ -66,9 +66,27 @@ process under `nice` with thread, memory and GPU-memory caps passed as environme
 keys and input files that stage uses, so `scpipe run` again skips finished stages and a config
 change reruns only the stages that depend on it. A gate that needs a human exits with code 3;
 `scpipe approve` records the decision and `scpipe resume` carries on. `--detach` runs inside
-tmux (or nohup) so a dropped SSH session doesn't kill the run.
+tmux (or nohup) so a dropped SSH session doesn't kill the run. After every state change the runner
+rewrites `dashboard.html` (`python/scpipe/dashboard.py`): a self-contained page with the pipeline
+strip, a timeline and a card per stage and gate, built only from `state.json`, the stage summaries
+and the gate files.
 
-## 3. CPU ⇄ GPU switching
+## 3. Engines and CPU ⇄ GPU switching
+
+`engine` (`auto`, `scfast`, `seurat`) and `device` together choose the path. The Rust engine
+(`scfast`, [`RUST_ENGINE.md`](RUST_ENGINE.md), wiring in [`scfast-integration.md`](scfast-integration.md))
+is CPU-only today, so:
+
+| plan | `engine: auto` picks | path in `S2/summary.json` | exchange files |
+|---|---|---|---|
+| CPU, `scfastR` installed | scfast | `cpu_scfast` | none |
+| CPU, no `scfastR` | seurat | `cpu_seurat` | none |
+| GPU fits | seurat | `gpu_exchange` (rapids-singlecell) | yes, as below |
+
+On the Rust path S1a computes doublet scores and pre-clusters in R (`R/stages/doublets_scfast.R`),
+S2 runs `RunPCAFast`, `FindNeighborsFast`, `FindClustersFast` and `uwot` UMAP in process, and
+Python `gpu_core --engine rust` offers the same kernels for the exchange route. The exchange below
+is used only when the GPU does the work.
 
 ```mermaid
 sequenceDiagram
@@ -149,6 +167,8 @@ directory and `~/.scpipe/`.
 
 ## 7. Repository layout
 
+`rust/` holds the `scfast` workspace (core, PyO3 bindings, extendr R package).
+
 ```
 R/exchange/         exchange format (R side)
 R/stages/           S0, S1a, S2, S3, S4, S5 export; gene lists and signature sets
@@ -169,11 +189,11 @@ doublets and platelets (`tests/README.md`):
 
 | Suite | Covers |
 |---|---|
-| R testthat (≈980 expectations) | exchange format, S0 every input format, S1a metrics by hand, S2 CPU and GPU paths, S3 markers and signatures, S4 planted DE genes recovered by DESeq2 and limma |
-| Python pytest (≈300 tests) | exchange, gpu_core, config validation, runner fingerprints and resume, QC rules, S1b/S1c, consensus annotation, Open Targets client with recorded responses, LLM providers and ledger, every gate and agent with a scripted mock LLM, report, site tooling |
+| R testthat (≈1,080 expectations) | exchange format, S0 every input format, S1a metrics by hand, S2 CPU and GPU paths, S3 markers and signatures, S4 planted DE genes recovered by DESeq2 and limma |
+| Python pytest (≈470 tests) | exchange, gpu_core, config validation, runner fingerprints and resume, QC rules, S1b/S1c, consensus annotation, Open Targets client with recorded responses, LLM providers and ledger, every gate and agent with a scripted mock LLM, report, site tooling |
 | `run_roundtrip.sh` | R ↔ Python exchange, merge-back and every refusal case |
 | `run_stages.sh` | S0–S2 on CPU and GPU paths; QC decisions vs planted truth; clusters vs planted types (ARI) |
-| `run_full.sh` | the whole pipeline S0 → S5 through all four gates with a mock LLM and offline Open Targets |
+| `run_full.sh` | the whole pipeline S0 → S5 through all four gates with a mock LLM and offline Open Targets; uses the Rust engine when `scfastR` is installed |
 
 Not yet exercised anywhere but the HPC: a real GPU, the live Claude API, the live Open Targets
 API (both were unreachable from the development workspace). `scpipe doctor` on the login node

@@ -20,10 +20,12 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 |---|---|
 | **Any dataset** | 10x `.h5` / mtx, `.h5ad`, loom, csv/tsv, Seurat `.rds`/`.qs2`; format auto-detected; samples merged with a gene union; human-organism check |
 | **QC by rules, advised by an agent** | Hard limits, per-sample adaptive bounds, doublets, protected populations (platelets, erythrocytes…) and review triggers from `qc_policy.yaml`. The QC agent can only tighten thresholds within the policy; every cell carries its reason codes |
+| **Rust engine** | `scfast` (Rust) does doublets, PCA, neighbours, SNN and Leiden in process on CPU, so no Seurat ⇄ AnnData exchange is needed and Scanpy is not used; `engine: auto|scfast|seurat` |
 | **CPU ⇄ GPU** | Seurat on CPU; rapids-singlecell on an NVIDIA GPU (24 GB L4 is enough for ~1M cells) through an exchange format whose counts checksum is identical in R and Python, so results are only ever merged into the object they came from |
 | **Annotation** | Consensus of lineage signatures, CellTypist and markers against 72 human cell types with Cell Ontology IDs; the annotation agent touches only low-confidence or conflicting clusters |
 | **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
 | **Pseudobulk DGE + Open Targets** | Conditions, replicates and contrasts from config; DESeq2 (limma-voom fallback); up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
+| **Run dashboard** | `<run_dir>/dashboard.html`, rewritten after every stage: pipeline strip, timeline with gate waits, per-stage and per-gate cards with timings, memory, cells, QC counts, engine, clusters, decisions and links to the gate reports |
 | **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `scpipe approve` for humans; full audit log and replay |
 | **Any LLM, £30 cap** | Claude Haiku 4.5 by default; OpenAI-compatible servers (vLLM, Ollama) supported; a ledger refuses any call that would cross the per-run or total budget and falls back to rules |
 | **Any HPC** | `direct`, SLURM/PBS/LSF/SGE or `split` execution; `scpipe init-site` and `doctor`; Apptainer and Docker recipes; resource caps and `nice` for shared login nodes; checkpoints and `resume` |
@@ -42,6 +44,7 @@ install.packages(c("harmony", "qs2", "presto"))   # optional
 python -m venv .venv && source .venv/bin/activate
 pip install -e "python[harmony,llm,report,test]"
 pip install -e "python[gpu]"                      # NVIDIA GPU, CUDA 12
+# optional Rust engine (needs cargo >= 1.80): R CMD INSTALL rust/scfast-r ; see docs/INSTALL.md
 ```
 
 Copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
@@ -51,7 +54,7 @@ Copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`
 export ANTHROPIC_API_KEY=...                       # or any provider; omit for rules-only gates
 scpipe doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
 scpipe run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
-scpipe status --run-dir /scratch/$USER/scpipe/my_study
+scpipe status --run-dir /scratch/$USER/scpipe/my_study     # or open <run_dir>/dashboard.html
 scpipe approve --run-dir ... --stage G2 --by me   # when a gate stops for you
 scpipe resume  --run-dir ...                      # continue after a gate, disconnect or kill
 ```
@@ -71,6 +74,8 @@ protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents be
 | [`docs/exchange-spec.md`](docs/exchange-spec.md) | The Seurat ⇄ AnnData contract and checksum |
 | [`docs/stages-spec.md`](docs/stages-spec.md) | S0–S2, the runner, the QC rules engine, config schema |
 | [`docs/agents-spec.md`](docs/agents-spec.md) | Gates, agents, LLM adapter and budget, S3–S5, portability |
+| [`docs/INSTALL.md`](docs/INSTALL.md) | Install and run on the Iridis X L4 node, Linux and Windows (WSL2) |
+| [`docs/scfast-integration.md`](docs/scfast-integration.md) | How the Rust engine is wired into S1/S2 and `gpu_core` |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Install, configure, run, review gates, sites and schedulers |
 | [`tests/README.md`](tests/README.md) | Fixtures, unit and integration tests, benchmarks |
 | [`bench/README.md`](bench/README.md) | Benchmark harness: times Seurat, Scanpy, rapids and scfast step by step and checks parity with Seurat |
@@ -92,7 +97,8 @@ docs/             architecture, design, specs, user guide
 All seven build steps are implemented and tested offline: ≈980 R expectations, ≈300 Python
 tests, the exchange round trip, the S0–S2 CPU-vs-GPU comparison and the full S0 → S5 run with a
 mock LLM all pass (see [`tests/README.md`](tests/README.md)). There is no hosted CI; tests run
-locally or on the HPC.
+locally or on the HPC. The Rust engine path (`engine: scfast`) passes the full S0 → S5 run and
+≈1,080 R expectations; the GPU path is unchanged.
 
 Not yet exercised outside the HPC: a real GPU, the live Claude API and the live Open Targets API
 (unreachable from the development workspace). Before the first real run on Iridis: confirm with

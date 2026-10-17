@@ -500,6 +500,56 @@ def _llm_provider_module():
     return llm
 
 
+def scfastr_version() -> str | None:
+    """Version of the R package scfastR, or None (no Rscript, or package not installed)."""
+    rs = os.environ.get("SCPIPE_RSCRIPT") or "Rscript"
+    if shutil.which(rs) is None:
+        return None
+    expr = 'if (nzchar(system.file(package = "scfastR"))) cat(as.character(utils::packageVersion("scfastR")))'
+    try:
+        r = subprocess.run([rs, "--vanilla", "-e", expr], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else None
+
+
+def scfast_py_version() -> str | None:
+    """Version of the Python module scfast (rust/scfast-py), or None if it cannot be imported."""
+    try:
+        import scfast
+    except Exception:
+        return None
+    return str(getattr(scfast, "__version__", "unknown"))
+
+
+def resolve_engine(cfg: Mapping[str, Any] | None, *, scfastr: str | None, gpu_available: bool) -> tuple[str, str]:
+    """The engine a run would use, as ``(engine, reason)``; engine is ``scfast`` or ``seurat``.
+
+    ``auto`` picks scfast when scfastR is installed and the device plan is CPU (``device: cpu``, or
+    ``device: auto`` with no usable GPU), else seurat. ``engine: scfast`` without scfastR is an error
+    (``RuntimeError`` with an install hint); with ``device: gpu`` it is a config error already.
+    """
+    cfg = cfg or {}
+    engine = cfg.get("engine", "auto")
+    device = cfg.get("device", "auto")
+    if engine == "seurat":
+        return "seurat", "engine: seurat"
+    if engine == "scfast":
+        if device == "gpu":
+            raise RuntimeError("engine: scfast has no GPU backend; it cannot be combined with device: gpu")
+        if scfastr is None:
+            raise RuntimeError("engine: scfast needs the R package scfastR; install it with "
+                               "`R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80)")
+        return "scfast", "engine: scfast"
+    gpu_plan = device == "gpu" or (device == "auto" and gpu_available)
+    if gpu_plan:
+        return "seurat", "device plan is GPU (scfast has no CUDA backend)"
+    if scfastr is None:
+        return "seurat", "scfastR is not installed"
+    return "scfast", "scfastR is installed and the device plan is CPU"
+
+
 def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     """Checks appended by ``scpipe doctor``: site, execution, container, LLM, Open Targets, budget."""
     checks: list[dict[str, Any]] = []
@@ -597,6 +647,25 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
                 add("llm", "budget", spent < lim, f"GBP {spent:.2f} of {lim:.2f} spent across runs ({ledger_path})", required=False)
             except (TypeError, ValueError):
                 add("llm", "budget", True, f"GBP {spent:.2f} spent; total_limit {limit!r} is not a number", required=False)
+    # scfast engine (docs/scfast-integration.md): all optional, the Seurat path needs neither.
+    r_ver = scfastr_version()
+    py_ver = scfast_py_version()
+    add("engine", "scfastR", r_ver is not None,
+        r_ver or "not installed (optional; `R CMD INSTALL rust/scfast-r`)", required=False)
+    add("engine", "scfast (python)", py_ver is not None,
+        py_ver or "not importable (optional; `maturin develop --release -m rust/scfast-py/Cargo.toml`)",
+        required=False)
+    try:
+        from .gpu_core import gpu_available as _gpu_ok
+
+        gpu_ok = bool(_gpu_ok()[0])
+    except Exception:
+        gpu_ok = False
+    try:
+        eng, why = resolve_engine(cfg, scfastr=r_ver, gpu_available=gpu_ok)
+        add("engine", "engine (resolved)", True, f"{eng} ({why}; engine: {cfg.get('engine', 'auto')})", required=False)
+    except RuntimeError as e:
+        add("engine", "engine (resolved)", False, str(e), required=cfg.get("engine") == "scfast")
     # Open Targets
     ot = cfg.get("opentargets") or {}
     if ot.get("enabled", True) is False:

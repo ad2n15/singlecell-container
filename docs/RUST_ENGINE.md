@@ -1,7 +1,7 @@
 # scfast: Rust engine for the singlecell pipeline — plan
 
-Status: **in progress** · Version 0.3 · 17 Oct 2026 · Branch: `feat/rust-engine`
-Scope: plan only. No Rust code exists yet. Companion to [`DESIGN.md`](DESIGN.md) and [`exchange-spec.md`](exchange-spec.md).
+Status: **CPU engine built and wired into the pipeline** (see [scfast-integration.md](scfast-integration.md)); CUDA backend not built · Version 0.4 · 17 Oct 2026
+Scope: plan; the CPU crates exist under `rust/`. Companion to [`DESIGN.md`](DESIGN.md) and [`exchange-spec.md`](exchange-spec.md).
 
 ## 1. Goal
 

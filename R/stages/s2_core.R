@@ -218,6 +218,38 @@ s2_leiden_leidenbase <- function(snn, resolution, seed, n_iter = 10L) {
 }
 
 # --------------------------------------------------------------------------
+# Engine (docs/scfast-integration.md): auto | scfast | seurat
+# --------------------------------------------------------------------------
+
+#' Resolve cfg$engine for S2 given the device plan. `auto` picks scfast when
+#' scfastR is installed and the plan is CPU. An explicit `scfast` needs scfastR,
+#' a CPU plan and lognorm normalisation. Returns "scfast" or "seurat".
+s2_resolve_engine <- function(cfg, plan, assay = "RNA") {
+  eng <- cfg$engine %||% "auto"
+  if (!(is.character(eng) && length(eng) == 1 && eng %in% c("auto", "scfast", "seurat")))
+    scp_stop("engine must be auto, scfast or seurat (got '", paste(eng, collapse = ","), "')")
+  if (eng == "seurat") return("seurat")
+  have <- requireNamespace("scfastR", quietly = TRUE)
+  if (eng == "auto") return(if (have && plan$device == "cpu" && assay == "RNA") "scfast" else "seurat")
+  if (!have) scp_stop("engine: scfast needs the scfastR R package; install it with `R CMD INSTALL rust/scfast-r` (cargo >= 1.80)")
+  if (plan$device != "cpu") scp_stop("engine: scfast has no GPU backend; use device: cpu or auto, or engine: seurat")
+  if (assay != "RNA") scp_stop("engine: scfast supports lognorm normalisation only (normalization: sct needs engine: seurat)")
+  "scfast"
+}
+
+# UMAP on the PCs with uwot, stored as a Seurat "umap" reduction (Seurat's RunUMAP defaults).
+.s2_umap_uwot <- function(obj, reduction, dims, n_neighbors, seed, assay = "RNA") {
+  emb <- SeuratObject::Embeddings(obj, reduction)[, dims, drop = FALSE]
+  set.seed(seed)
+  um <- uwot::umap(emb, n_neighbors = min(n_neighbors, nrow(emb) - 1L), n_components = 2L,
+                   metric = "cosine", min_dist = 0.3, n_threads = 1L, verbose = FALSE)
+  rownames(um) <- rownames(emb)
+  colnames(um) <- paste0("umap_", 1:2)
+  obj[["umap"]] <- SeuratObject::CreateDimReducObject(embeddings = um, key = "umap_", assay = assay)
+  obj
+}
+
+# --------------------------------------------------------------------------
 # Stage
 # --------------------------------------------------------------------------
 
@@ -288,14 +320,26 @@ run_s2 <- function(cfg, repo) {
     if (identical(cfg$device, "auto") && s2_python_has(repo, "harmonypy")) {
       path <- "exchange_cpu"
       path_reason <- paste0(plan$reason, "; R harmony not installed, so the exchange path runs Harmony with harmonypy on the CPU")
-      scp_log(path_reason)
+      if (identical(tryCatch(s2_resolve_engine(cfg, plan, assay), error = function(e) "seurat"), "scfast"))
+        scp_warn_log("engine scfast: the R 'harmony' package is not installed; falling back to the exchange_cpu path (harmonypy)")
+      else scp_log(path_reason)
     } else {
       scp_stop("integration.method is harmony but the R 'harmony' package is not installed",
                if (identical(cfg$device, "auto")) " and Python harmonypy is not available" else "",
                "; install harmony (R) or harmonypy (Python, with device: auto), or set integration.method: none")
     }
   }
-  if (path != "cpu" && assay != "RNA") scp_stop("the exchange (GPU) path supports lognorm normalisation only")
+  engine <- "seurat"
+  if (path == "cpu") {
+    engine <- s2_resolve_engine(cfg, plan, assay)
+  } else if (identical(cfg$engine, "scfast") && path == "gpu") {
+    scp_stop("engine: scfast has no GPU backend; use device: cpu or auto, or engine: seurat")
+  }
+  if (path == "cpu" && engine == "scfast") {
+    path <- "scfast"
+    path_reason <- paste0(plan$reason, "; engine scfast (in-process, no exchange files)")
+  }
+  if (path %in% c("exchange_cpu", "gpu") && assay != "RNA") scp_stop("the exchange (GPU) path supports lognorm normalisation only")
 
   # 7. PCs
   pcs_setting <- cfg$pcs
@@ -308,15 +352,24 @@ run_s2 <- function(cfg, repo) {
   }
 
   leiden_impl <- NA_character_
+  scfast_ver <- NULL
+  if (path == "scfast") {
+    scfast_ver <- as.character(scfastR::scfast_info()$version %||% scfastR::scfast_info()$package)
+    if (integ == "harmony") integration_impl <- NA_character_
+  }
   integration_impl <- if (integ == "harmony") NA_character_ else "none"
   gpu_summary <- NULL
   exchange_files <- NULL
 
-  if (path == "cpu") {
-    # 5. CPU path (Seurat)
-    if (assay == "RNA") obj <- tm("scale", Seurat::ScaleData(obj, features = hvg, verbose = FALSE))
+  if (path %in% c("cpu", "scfast")) {
+    use_fast <- path == "scfast"
+    # 5. CPU path (Seurat, or scfastR in process)
+    # RunPCAFast scales implicitly from the data layer, so ScaleData is skipped on the scfast path.
+    if (assay == "RNA" && !use_fast) obj <- tm("scale", Seurat::ScaleData(obj, features = hvg, verbose = FALSE))
     npcs_run <- if (identical(pcs_setting, "auto")) npcs_compute else max(npcs_compute_fixed, 2L)
-    obj <- tm("pca", Seurat::RunPCA(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed, verbose = FALSE))
+    obj <- if (use_fast) {
+      tm("pca", scfastR::RunPCAFast(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed, verbose = FALSE))
+    } else tm("pca", Seurat::RunPCA(obj, assay = assay, features = hvg, npcs = npcs_run, seed.use = seed, verbose = FALSE))
     if (identical(pcs_setting, "auto")) {
       el <- s2_elbow_pcs(SeuratObject::Stdev(obj, reduction = "pca"))
       pcs_used <- el$n
@@ -330,11 +383,24 @@ run_s2 <- function(cfg, repo) {
       integration_impl <- paste0("harmony (R ", scp_pkg_version("harmony"), ")")
       dims <- seq_len(min(pcs_used, ncol(SeuratObject::Embeddings(obj, "harmony"))))
     }
-    obj <- tm("neighbors", Seurat::FindNeighbors(obj, reduction = rep_red, dims = dims, k.param = cfg$n_neighbors,
-                                                 graph.name = paste0(assay, c("_nn", "_snn")), verbose = FALSE))
+    if (use_fast) {
+      obj <- tm("neighbors", scfastR::FindNeighborsFast(obj, reduction = rep_red, dims = dims, k.param = cfg$n_neighbors,
+                                                        graph.name = paste0(assay, c("_nn", "_snn")),
+                                                        random.seed = seed, verbose = FALSE))
+    } else {
+      obj <- tm("neighbors", Seurat::FindNeighbors(obj, reduction = rep_red, dims = dims, k.param = cfg$n_neighbors,
+                                                   graph.name = paste0(assay, c("_nn", "_snn")), verbose = FALSE))
+    }
     snn_name <- paste0(assay, "_snn")
     cl <- NULL
-    if (.s2_seurat_has_leidenbase_clusters()) {
+    if (use_fast) {
+      t0 <- proc.time()[["elapsed"]]
+      obj <- scfastR::FindClustersFast(obj, graph.name = snn_name, resolution = cfg$clustering$resolution,
+                                       random.seed = seed, verbose = FALSE)
+      timings[["leiden"]] <- round(proc.time()[["elapsed"]] - t0, 3)
+      cl <- obj$seurat_clusters
+      leiden_impl <- paste0("scfastR::FindClustersFast (Leiden), scfastR ", scfast_ver)
+    } else if (.s2_seurat_has_leidenbase_clusters()) {
       cl <- tryCatch({
         o2 <- Seurat::FindClusters(obj, graph.name = snn_name, algorithm = 4, resolution = cfg$clustering$resolution,
                                    random.seed = seed, verbose = FALSE)
@@ -356,7 +422,8 @@ run_s2 <- function(cfg, repo) {
     obj[[paste0(snn_name, "_res.", cfg$clustering$resolution)]] <- cl
     SeuratObject::Idents(obj) <- cl
     # Seurat's one-time notice that uwot became the default is not a problem here
-    obj <- tm("umap", withCallingHandlers(
+    obj <- if (use_fast) tm("umap", .s2_umap_uwot(obj, rep_red, dims, cfg$n_neighbors, seed, assay)) else
+      tm("umap", withCallingHandlers(
       Seurat::RunUMAP(obj, reduction = rep_red, dims = dims, n.neighbors = cfg$n_neighbors,
                       umap.method = "uwot", seed.use = seed, verbose = FALSE),
       warning = function(w) if (grepl("default method for RunUMAP has changed", conditionMessage(w))) invokeRestart("muffleWarning")))
@@ -409,16 +476,17 @@ run_s2 <- function(cfg, repo) {
   cl <- obj$seurat_clusters
   sizes <- table(cl)
   obj@misc$scpipe_s2 <- list(run_id = cfg$run_id, config_hash = cfg$config_hash, device = plan$device,
-                             plan = plan$plan, path = path, pcs = pcs_used, created_utc = .scp_utc())
+                             plan = plan$plan, path = path, engine = engine, pcs = pcs_used, created_utc = .scp_utc())
   tm("save", scp_save_object(obj, out_dir, cfg$object_format))
 
   gpu_peak <- gpu_summary$peak_gpu_pool_bytes
   summary <- list(
     stage = "S2", run_id = cfg$run_id, config_hash = cfg$config_hash, created_utc = .scp_utc(),
     device = plan$device, plan = plan$plan, reason = plan$reason, plan_source = plan$source,
-    path = switch(path, cpu = "cpu_seurat", gpu = "gpu_exchange", exchange_cpu = "exchange_cpu"),
+    path = switch(path, cpu = "cpu_seurat", scfast = "cpu_scfast", gpu = "gpu_exchange", exchange_cpu = "exchange_cpu"),
+    engine = engine, scfast_version = scfast_ver,
     path_reason = path_reason,
-    gpu_core_device = if (path == "cpu") NULL else (gpu_summary$device %||% NA),
+    gpu_core_device = if (path %in% c("cpu", "scfast")) NULL else (gpu_summary$device %||% NA),
     cells_in = cells_in, cells_out = ncol(obj),
     qc = list(review_action = review_action, decisions = dec_counts),
     normalization = cfg$normalization, n_hvg = n_hvg_used,
@@ -438,7 +506,7 @@ run_s2 <- function(cfg, repo) {
     exchange = exchange_files,
     packages = list(R = paste(R.version$major, R.version$minor, sep = "."), Seurat = scp_pkg_version("Seurat"),
                     SeuratObject = scp_pkg_version("SeuratObject"), harmony = scp_pkg_version("harmony"),
-                    leidenbase = scp_pkg_version("leidenbase"), uwot = scp_pkg_version("uwot"))
+                    leidenbase = scp_pkg_version("leidenbase"), scfastR = scp_pkg_version("scfastR"), uwot = scp_pkg_version("uwot"))
   )
   scp_write_json(summary, file.path(out_dir, "summary.json"))
   scp_log(sprintf("S2 done: %d cells, %d PCs, %d clusters, path %s", ncol(obj), pcs_used, length(sizes), summary$path))

@@ -84,6 +84,7 @@ DEFAULTS: dict[str, Any] = {
     "qc": {"review_action": "keep"},
     "normalization": "lognorm",
     "n_hvg": 2000,
+    "engine": "auto",
     "device": "auto",
     "integration": {"method": "none", "batch_key": "sample_id"},
     "pcs": "auto",
@@ -160,6 +161,7 @@ ALLOWED = {
     "qc.review_action": ("keep", "exclude"),
     "normalization": ("lognorm", "sct"),
     "device": ("auto", "cpu", "gpu"),
+    "engine": ("auto", "scfast", "seurat"),
     "integration.method": ("none", "harmony"),
     "annotation.celltypist": ("auto", "off"),
     "dge.method": ("deseq2", "limma_voom"),
@@ -355,6 +357,9 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
     need(_is_num(res) and res > 0, f"clustering.resolution must be a positive number, got {res!r}")
     bk = cfg["integration"]["batch_key"]
     need(isinstance(bk, str) and bool(bk.strip()), f"integration.batch_key must be a non-empty string, got {bk!r}")
+    if cfg["engine"] == "scfast" and cfg["device"] == "gpu":
+        problems.append("engine: scfast has no GPU backend; use device: cpu or auto with engine: scfast "
+                        "(or engine: seurat / auto for device: gpu)")
     if cfg["normalization"] == "sct" and cfg["device"] == "gpu":
         problems.append("normalization: sct runs on CPU only; use device: cpu or auto with sct")
     for g, m in (cfg.get("gates") or {}).items():

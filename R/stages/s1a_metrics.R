@@ -1,10 +1,17 @@
 # scpipe stage S1a: per-cell QC metrics (docs/stages-spec.md section 3.2).
 #
 # Inputs:  S0/object.rds (or .qs2), qc_policy.yaml (protected populations)
-# Outputs: S1/metrics_counts.h5ad  exchange file, full mode (counts + log-normalised X, all cells)
+# Outputs: S1/metrics_counts.h5ad  exchange file, full mode (counts + log-normalised X, all cells);
+#                                  not written when the engine resolves to scfast
 #          S1/qc_metrics.tsv.gz    partial metrics (no S1b columns), gzip TSV, columns:
 #            cell_id, sample_id, n_genes, n_umis, pct_mito, pct_ribo, pct_hb,
 #            log10_genes_per_umi, protected_<name> ... (policy order)
+#
+# Engine scfast (scp_resolve_engine, docs/scfast-integration.md): S1a also runs the
+# doublet detector and pre-clustering (R/stages/doublets_scfast.R) and appends
+# doublet_score, doublet_call, pre_cluster to qc_metrics.tsv.gz; no .h5ad is written
+# and S1b passes through. doublets.method none/scdblfinder are not scfast-aware:
+# `none` writes NA/FALSE scores (pre_cluster still computed); scdblfinder is an error.
 #
 # Percentages are 0-100. log10_genes_per_umi = log10(n_genes) / log10(n_umis),
 # NA when n_umis <= 1. protected_<name> is the fraction (0-1) of the cell's
@@ -83,6 +90,19 @@ s1a_compute_metrics <- function(obj, policy, assay = "RNA") {
   list(metrics = df, warnings = warn)
 }
 
+# Device the S1 stages would run on ("cpu" or "gpu"), for engine resolution: the device
+# plan of S2 (same hook and fallbacks) when it can be computed, else the config value.
+.s1a_plan_device <- function(cfg, repo, n_cells, n_genes) {
+  if (identical(cfg$device, "cpu")) return("cpu")
+  if (identical(cfg$device, "gpu") && !exists("s2_choose_plan", mode = "function")) return("gpu")
+  if (!exists("s2_choose_plan", mode = "function")) return("cpu")
+  tryCatch(s2_choose_plan(cfg, repo, n_cells, min(cfg$n_hvg, n_genes))$device,
+           error = function(e) {
+             scp_warn_log("device plan unavailable for engine resolution (", conditionMessage(e), "); using device: ", cfg$device)
+             if (identical(cfg$device, "gpu")) "gpu" else "cpu"
+           })
+}
+
 run_s1a <- function(cfg, repo) {
   in_dir <- file.path(cfg$run_dir, "S0")
   out_dir <- scp_stage_dir(cfg, "S1")
@@ -94,16 +114,39 @@ run_s1a <- function(cfg, repo) {
 
   res <- scp_timed("compute metrics", s1a_compute_metrics(obj, policy))$value
   for (w in res$warnings) scp_warn_log(w)
-  scp_timed("write qc_metrics.tsv.gz", scp_write_tsv_gz(res$metrics, file.path(out_dir, "qc_metrics.tsv.gz")))
+  engine <- scp_resolve_engine(cfg, .s1a_plan_device(cfg, repo, ncol(obj), nrow(obj)))
+  scp_log("S1a: engine ", engine, " (config engine: ", cfg$engine %||% "auto", ")")
+  h5 <- file.path(out_dir, "metrics_counts.h5ad")
 
-  obj <- scp_timed("NormalizeData", Seurat::NormalizeData(obj, normalization.method = "LogNormalize",
-                                                           scale.factor = 1e4, verbose = FALSE))$value
-  scp_timed("write metrics_counts.h5ad",
-            write_exchange(obj, file.path(out_dir, "metrics_counts.h5ad"), mode = "full",
-                           run_id = cfg$run_id, stage = "S1a", config_hash = cfg$config_hash,
-                           reductions = character(), graphs = FALSE))
-  probs <- validate_exchange(file.path(out_dir, "metrics_counts.h5ad"))
-  if (length(probs)) scp_stop("metrics_counts.h5ad failed validation:\n  ", paste(probs, collapse = "\n  "))
+  if (identical(engine, "scfast")) {
+    method <- cfg$doublets$method %||% "scrublet"
+    if (identical(method, "scdblfinder"))
+      scp_stop("doublets.method scdblfinder is not implemented for engine scfast; use scrublet or none")
+    unlink(h5)  # no exchange file on this path; drop a stale one from an earlier engine
+    dbl <- scp_timed("scfast doublets + pre-clustering",
+                     scp_doublets_scfast(scp_counts(obj), res$metrics$sample_id, cfg$seed))$value
+    for (w in dbl$notes) scp_log(w)
+    tab <- scp_dbl_format(dbl$table)
+    if (identical(method, "none")) {
+      tab$doublet_score <- "NA"
+      tab$doublet_call <- "FALSE"
+    }
+    stopifnot(identical(tab$cell_id, res$metrics$cell_id))
+    res$metrics$doublet_score <- tab$doublet_score
+    res$metrics$doublet_call <- tab$doublet_call
+    res$metrics$pre_cluster <- tab$pre_cluster
+    scp_timed("write qc_metrics.tsv.gz", scp_write_tsv_gz(res$metrics, file.path(out_dir, "qc_metrics.tsv.gz")))
+  } else {
+    scp_timed("write qc_metrics.tsv.gz", scp_write_tsv_gz(res$metrics, file.path(out_dir, "qc_metrics.tsv.gz")))
+    obj <- scp_timed("NormalizeData", Seurat::NormalizeData(obj, normalization.method = "LogNormalize",
+                                                             scale.factor = 1e4, verbose = FALSE))$value
+    scp_timed("write metrics_counts.h5ad",
+              write_exchange(obj, h5, mode = "full",
+                             run_id = cfg$run_id, stage = "S1a", config_hash = cfg$config_hash,
+                             reductions = character(), graphs = FALSE))
+    probs <- validate_exchange(h5)
+    if (length(probs)) scp_stop("metrics_counts.h5ad failed validation:\n  ", paste(probs, collapse = "\n  "))
+  }
   m <- res$metrics
   scp_log(sprintf("S1a done: %d cells; median genes %.0f, median UMIs %.0f, median pct_mito %.2f; peak memory %s GB",
                   nrow(m), stats::median(m$n_genes), stats::median(m$n_umis),

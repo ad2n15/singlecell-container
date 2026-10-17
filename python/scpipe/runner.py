@@ -116,8 +116,8 @@ SAMPLE_BYTES = 1024**2
 
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "S0": ("object_format", "samples_resolved", "sample_columns"),
-    "S1a": ("object_format", "doublets.method", "policy.protected_populations"),
-    "S1b": ("doublets.method", "seed", "device", "resources.gpu_mem_cap_gb"),
+    "S1a": ("object_format", "doublets.method", "engine", "policy.protected_populations"),
+    "S1b": ("doublets.method", "engine", "seed", "device", "resources.gpu_mem_cap_gb"),
     "S1c": ("policy",),
     # G1 = the QC gate (scpipe.gates.g1_qc): rules baseline, optional LLM worker + reviewer, human approval.
     "G1": ("policy", "gates.G1", "llm"),
@@ -125,6 +125,7 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
         "object_format",
         "normalization",
         "n_hvg",
+        "engine",
         "device",
         "integration",
         "pcs",
@@ -219,7 +220,9 @@ def default_stages() -> list[Stage]:
               inputs=(OBJ,), outputs=("S1/metrics_counts.h5ad", "S1/qc_metrics.tsv.gz"),
               transient=("S1/metrics_counts.h5ad",)),
         Stage("S1b", "python", _py_stage("scpipe.stages.s1b_doublets"), STAGE_CONFIG_KEYS["S1b"],
-              inputs=("S1/metrics_counts.h5ad", "S1/qc_metrics.tsv.gz"), outputs=("S1/qc_metrics.tsv.gz",)),
+              inputs=("S1/qc_metrics.tsv.gz",), outputs=("S1/qc_metrics.tsv.gz",)),
+        # metrics_counts.h5ad (S1a, transient, absent on the scfast path) is deliberately not an input here:
+        # S1b depends on S1a through qc_metrics.tsv.gz, and S1c deletes the h5ad, which would change S1b's fingerprint.
         Stage("S1c", "python", _py_stage("scpipe.stages.s1c_qc"), STAGE_CONFIG_KEYS["S1c"],
               inputs=("S1/qc_metrics.tsv.gz", "config/qc_policy.yaml"),
               outputs=("S1/qc_decisions.tsv.gz", "S1/qc_summary.json")),
@@ -406,6 +409,18 @@ def save_state(run_dir: Path, state: dict[str, Any]) -> None:
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=False) + "\n")
     os.replace(tmp, p)
+    _refresh_dashboard(Path(run_dir))
+
+
+def _refresh_dashboard(run_dir: Path) -> None:
+    """Best effort: keep <run_dir>/dashboard.html current after every state change."""
+    if os.environ.get("SCPIPE_NO_DASHBOARD"):
+        return
+    try:
+        from . import dashboard
+        dashboard.build(run_dir, watch=30)
+    except Exception as e:  # never let the dashboard break a run
+        sys.stderr.write(f"scpipe: dashboard not updated: {e}\n")
 
 
 class _Lock:
@@ -767,7 +782,7 @@ def run_pipeline(
                         return 130
                 rec.update(ended_utc=_utc(), wall_s=round(wall, 3), peak_rss_bytes=peak, exit_code=code)
                 if code == 0:
-                    absent = [s for s in st.outputs if _existing(run_dir, s) is None]
+                    absent = [s for s in st.outputs if s not in st.transient and _existing(run_dir, s) is None]
                     if absent:
                         code = rec["exit_code"] = 1
                         with open(log_path, "a") as fh:
@@ -1137,6 +1152,10 @@ def _parser() -> argparse.ArgumentParser:
     t = sub.add_parser("status", help="stage states, timings and peak memory")
     t.add_argument("--run-dir", required=True)
     t.add_argument("--json", action="store_true", help="print state.json")
+    db = sub.add_parser("dashboard", help="render <run_dir>/dashboard.html (stages, gates, timeline); --watch N keeps it live")
+    db.add_argument("--run-dir", required=True)
+    db.add_argument("--out", default=None)
+    db.add_argument("--watch", type=int, default=None, metavar="SECONDS")
     d = sub.add_parser("doctor", help="preflight checks")
     d.add_argument("--config", default=None)
     d.add_argument("--run-dir", default=None)
@@ -1217,6 +1236,10 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
             if a.json:
                 args += ["--json"]
             return sitemod.init_site_main(args, out=out)
+        if a.cmd == "dashboard":
+            from . import dashboard
+            return dashboard.main(["--run-dir", a.run_dir] + (["--out", a.out] if a.out else [])
+                                  + (["--watch", str(a.watch)] if a.watch else []))
         if a.cmd == "status":
             rd = Path(a.run_dir).expanduser().resolve()
             if a.json:
