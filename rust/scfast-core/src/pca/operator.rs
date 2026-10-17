@@ -33,7 +33,7 @@ const MAX_BLOCKS: usize = 256;
 const MIN_BLOCK_ROWS: usize = 64;
 /// A leaf should do at least this many times more scatter work than it spends zeroing and
 /// merging its accumulator.
-const ACC_WORK_RATIO: usize = 8;
+const ACC_WORK_RATIO: usize = 64;
 /// Rows per task for the row-parallel `Z V` product (no reduction, so any size is exact).
 const ZV_ROWS: usize = 256;
 /// Rows of `U` transposed into a local row-major buffer at a time inside a `Z^T U` leaf.
