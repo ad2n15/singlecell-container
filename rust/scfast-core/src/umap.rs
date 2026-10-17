@@ -202,23 +202,29 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().for_each(|(c, (nx, nn))| {
             let base = c * chunk;
             let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(base as u64 * 0x2545_F491_4F6C_DD1D) | 1;
+            let mut row = (usize::MAX, [0f32; DIM], [0f32; DIM]);
             for t in 0..nx.len() {
                 if nx[t] > ep {
                     continue;
                 }
                 let e = base + t;
                 let (j, kk) = (heads[e] as usize, tails[e] as usize);
-                let cur0 = get(j);
-                let mut cur = cur0;
+                if j != row.0 {
+                    if row.0 != usize::MAX {
+                        put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
+                    }
+                    row = (j, get(j), [0.0; DIM]);
+                }
+                let (cur0, delta) = (row.1, &mut row.2);
                 let mut oth = get(kk);
-                let dx = [cur[0] - oth[0], cur[1] - oth[1]];
+                let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
                 let d2 = dx[0] * dx[0] + dx[1] * dx[1];
                 if d2 > 0.0 {
                     let pb = d2.powf(b);
                     let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
                     for d in 0..DIM {
                         let g = clip(gc * dx[d]) * alpha;
-                        cur[d] += g;
+                        delta[d] += g;
                         oth[d] -= g;
                     }
                     put(kk, oth);
@@ -236,11 +242,13 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     let d2 = dx[0] * dx[0] + dx[1] * dx[1];
                     let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
                     for d in 0..DIM {
-                        cur[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
+                        delta[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
                     }
                 }
                 nn[t] += n_neg as f32 * eneg;
-                put(j, cur);
+            }
+            if row.0 != usize::MAX {
+                put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
             }
         });
     }
