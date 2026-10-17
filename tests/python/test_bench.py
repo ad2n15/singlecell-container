@@ -448,3 +448,51 @@ BIG = common.ADOPT_MIN_CELLS
 def test_verdict(row, parity_ok, expected):
     assert report.verdict(row, parity_ok) == expected
     assert report.verdict(pd.Series(row), parity_ok) == expected
+
+
+# ---------------------------------------------------------------- hashing / multiplexed 10x files
+
+
+def _write_multiplex_h5(path, n_cells=40, n_genes=30, n_ab=4):
+    """A 10x v3 h5 whose features are genes followed by Antibody Capture features."""
+    import h5py
+
+    rng = np.random.default_rng(0)
+    m = sp.csc_matrix(rng.poisson(1.0, size=(n_genes + n_ab, n_cells)).astype(np.int32))
+    with h5py.File(path, "w") as f:
+        g = f.create_group("matrix")
+        g["data"], g["indices"], g["indptr"] = m.data, m.indices.astype(np.int64), m.indptr.astype(np.int64)
+        g["shape"] = np.array(m.shape, dtype=np.int32)
+        g["barcodes"] = np.array([f"BC{i}-1".encode() for i in range(n_cells)])
+        ft = g.create_group("features")
+        ft["id"] = np.array([f"ENSG{i}".encode() for i in range(n_genes)] + [f"AB{i}".encode() for i in range(n_ab)])
+        ft["name"] = np.array([f"G{i}".encode() for i in range(n_genes)] + [f"Hashtag{i}".encode() for i in range(n_ab)])
+        ft["feature_type"] = np.array([b"Gene Expression"] * n_genes + [b"Antibody Capture"] * n_ab)
+    return m
+
+
+def test_read_counts_drops_antibody_features(tmp_path, capsys):
+    m = _write_multiplex_h5(tmp_path / "hash.h5")
+    counts, barcodes, ids, names = h5io.read_counts(tmp_path / "hash.h5")
+    assert counts.shape == (40, 30) and len(ids) == len(names) == 30
+    assert not any(n.startswith("Hashtag") for n in names)
+    assert (counts.toarray() == m.toarray()[:30].T).all()  # genes kept, in order, cells x genes
+    assert "dropping 4 others (Antibody Capture)" in capsys.readouterr().out
+
+
+def test_pipeline_steps_writes_every_step(tmp_path):
+    pytest.importorskip("scanpy")
+    pytest.importorskip("scfast")
+    import pipeline_steps
+
+    counts, barcodes, ids, names, _ = synth.generate(1200, 600, 4, seed=1)
+    h5 = tmp_path / "d.h5"
+    h5io.write_10x_h5(h5, counts, barcodes, ids, names)
+    out = tmp_path / "out"
+    rc = pipeline_steps.main(["--input", str(h5), "--out", str(out), "--max-mt", "100", "--umap-epochs", "20"])
+    assert rc == 0
+    for step in ["01_qc", "02_normalize", "03_hvg", "04_pca", "05_neighbors", "06_cluster", "07_umap"]:
+        assert any((out / step).iterdir()), step
+    clusters = pd.read_csv(out / "06_cluster" / "clusters.csv")
+    assert clusters["cluster"].nunique() >= 3
+    assert (out / "summary.md").exists() and (out / "final.h5ad").exists()

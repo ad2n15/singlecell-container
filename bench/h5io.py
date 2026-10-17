@@ -71,13 +71,28 @@ def _read_10x_h5(path: Path):
         shape = tuple(g["shape"][()])  # genes x cells
         csc = sp.csc_matrix((g["data"][()], g["indices"][()], g["indptr"][()]), shape=shape)
         barcodes = [b.decode() for b in g["barcodes"][()]]
+        keep = None
         if "features" in g:
             ids = [x.decode() for x in g["features/id"][()]]
             names = [x.decode() for x in g["features/name"][()]]
+            # Multiplexed / CITE-seq / hashing files carry Antibody Capture, Multiplexing Capture
+            # and CRISPR features next to the genes; only genes belong in the RNA workflow.
+            if "feature_type" in g["features"]:
+                ft = np.array([x.decode() for x in g["features/feature_type"][()]])
+                if (ft != "Gene Expression").any():
+                    keep = ft == "Gene Expression"
+                    kinds = sorted(set(ft[~keep]))
+                    print(f"{path.name}: keeping {int(keep.sum())} Gene Expression features, dropping "
+                          f"{int((~keep).sum())} others ({', '.join(kinds)})")
         else:  # Cell Ranger v2
             ids = [x.decode() for x in g["genes"][()]]
             names = [x.decode() for x in g["gene_names"][()]]
-    return csc.T.tocsr(), barcodes, ids, names
+    m = csc.T.tocsr()
+    if keep is not None:
+        m = m[:, np.flatnonzero(keep)]
+        ids = [x for x, k in zip(ids, keep) if k]
+        names = [x for x, k in zip(names, keep) if k]
+    return m, barcodes, ids, names
 
 
 def write_10x_h5(path: str | Path, counts_cells_x_genes, barcodes, gene_ids, gene_names,
