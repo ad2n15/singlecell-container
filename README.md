@@ -12,6 +12,7 @@ Both scripts apply the same QC thresholds and end with the same 9 annotated cell
 | `scanpy_pbmc3k.py` | Scanpy: the same workflow with Leiden clustering |
 | `plots/` | Seurat figures |
 | `plots_scanpy/` | Scanpy figures |
+| `bench/` | Benchmark harness: times Seurat, Scanpy, rapids and scfast step by step, checks parity with Seurat, writes a report ([`bench/README.md`](bench/README.md)) |
 
 ## Results
 
