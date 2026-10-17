@@ -428,6 +428,39 @@ def test_s4_driver_skip_dge(tmp_path, net):
     assert (rd / "S4" / "opentargets_summary.json").exists()
 
 
+def test_config_validates_contrasts_against_sample_sheet(tmp_path):
+    """dge.contrasts must name values of the sample sheet's condition column; cache_dir becomes absolute."""
+    from scpipe import config as C
+
+    proj = tmp_path / "proj"
+    (proj / "data" / "A").mkdir(parents=True)
+    for f in ("matrix.mtx", "features.tsv", "barcodes.tsv"):
+        (proj / "data" / "A" / f).write_text("x")
+    (proj / "data" / "B.h5ad").write_text("x")
+    (proj / "samples.csv").write_text("sample_id,path,format,condition,batch\nA,data/A,,control,B1\nB,data/B.h5ad,h5ad,treated,B2\n")
+
+    def load(contrasts, **dge):
+        cfg = {"project": "demo", "run_dir": "runs/demo", "samples": "samples.csv",
+               "dge": {"contrasts": contrasts, **dge}, "opentargets": {"cache_dir": "refs/ot"}}
+        (proj / "config.yaml").write_text(yaml.safe_dump(cfg))
+        return C.load_config(proj / "config.yaml")
+
+    good = [{"name": "treated_vs_control", "numerator": "treated", "denominator": "control", "covariates": ["batch"]}]
+    cfg = load(good)
+    assert cfg["dge"]["contrasts"] == good and cfg["dge"]["method"] == "deseq2"
+    assert cfg["opentargets"]["cache_dir"] == str(proj / "refs" / "ot")
+    with pytest.raises(C.ConfigError, match="'disease' is not a value of samples.csv column 'condition'"):
+        load([{"name": "x", "numerator": "disease", "denominator": "control"}])
+    with pytest.raises(C.ConfigError, match="'donor' is not a samples.csv column"):
+        load([{"name": "x", "numerator": "treated", "denominator": "control", "covariates": ["donor"]}])
+    with pytest.raises(C.ConfigError, match="dge.condition_col 'group' is not a samples.csv column"):
+        load(good, condition_col="group")
+    with pytest.raises(C.ConfigError, match="used twice"):
+        load(good + good)
+    with pytest.raises(C.ConfigError, match="dge.method"):
+        load(good, method="edger")
+
+
 def test_no_network_in_tests(tmp_path, no_network):
     """Sanity: an unpatched call path would be caught (every test above patches requests.post)."""
     c = client(tmp_path)

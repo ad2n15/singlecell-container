@@ -8,9 +8,17 @@ exactly five names from this module:
 Each is taken from the real module when it exists (``scpipe.llm``,
 ``scpipe.agents.base``, ``scpipe.gates.protocol``; docs/agents-spec.md
 sections 2 and 3) and otherwise from the minimal fallback below, so the
-agents and their tests run before those modules land. **The fallbacks are
-meant to be deleted** once the real modules exist; nothing outside this file
-depends on fallback-only names.
+agents and their tests run before those modules land. The real modules now
+exist and are what every normal import gets; the fallbacks are kept only as
+a documented contract (``test_shim_fallback_loop_matches_contract`` loads
+them with the real modules hidden) and can be deleted together with that
+test. Nothing outside this file depends on fallback-only names.
+
+Semantics that differ between the real protocol and the fallback
+``run_gate``: the real one runs a reviewer agent (``llm.roles.reviewer``),
+writes ``pending.json`` instead of ``decision.json`` while waiting for a
+human, and returns a ``GateResult`` (dict-like: ``res["continue"]``); the
+fallback has a rules-only reviewer and always writes ``decision.json``.
 
 Interfaces assumed (they mirror ``scpipe.agents.base`` / ``scpipe.llm``):
 

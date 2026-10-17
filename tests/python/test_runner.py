@@ -347,9 +347,12 @@ def test_r_stage_command_and_rscript_override(tmp_path, monkeypatch):
     assert st["S2"].command(ctx)[0] == "/opt/R/bin/Rscript" and st["S2"].command(ctx)[3] == "S2"
     assert st["S1b"].command(ctx) == [sys.executable, "-m", "scpipe.stages.s1b_doublets", "--run-dir", str(tmp_path)]
     assert st["S1c"].command(ctx)[2] == "scpipe.stages.s1c_qc"
-    # later build steps append stages (S3, S4, gates, S5) after S2
-    assert [s.id for s in R.default_stages()][: len(ALL)] == ALL
-    assert [s.lang for s in R.default_stages()][: len(ALL)] == ["R", "R", "python", "python", "R"]
+    # docs/agents-spec.md section 1: S0 S1a S1b S1c G1 S2 S3 G2 G3 S4 G4 S5
+    real = [s.id for s in R.default_stages()]
+    assert real[:6] == ["S0", "S1a", "S1b", "S1c", "G1", "S2"]
+    assert [s.lang for s in R.default_stages()][:6] == ["R", "R", "python", "python", "python", "R"]
+    assert st["G1"].command(ctx)[2] == "scpipe.gates.g1_qc"
+    assert "S1/qc_decisions.tsv.gz" in st["G1"].inputs and "S1/qc_decisions.tsv.gz" in st["G1"].outputs
     assert st["S4"].command(ctx)[2] == "scpipe.stages.s4" and st["S4"].optional_inputs
 
 

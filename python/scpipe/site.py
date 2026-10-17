@@ -467,29 +467,28 @@ def submit_split(cfg: Mapping[str, Any], run_dir: Path, stage_ids: list[str], *,
 
 
 def _llm_section(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
-    """``llm:`` with defaults filled in (``config.llm_settings`` when present), or None when unset.
+    """``llm:`` normalised to the DESIGN 4.8 shape (``default``, ``roles``, ``budget``, ``replay``), or None when unset.
 
-    Accepts both the DESIGN 4.8 shape (``llm.default.provider``) and the older
-    flat shape (``llm.provider``), which is folded into ``default``.
+    The older flat shape (``llm.provider`` / ``llm.model`` / ``llm.api_key_env`` /
+    ``llm.base_url``) is folded into ``default``. Budget defaults come from
+    ``config.LLM_DEFAULTS`` when that exists. ``api_key_env`` is left unset
+    unless the user set it, so the doctor can pick the provider's own default.
     """
     raw = cfg.get("llm")
     if not raw or not isinstance(raw, Mapping):
         return None
-    fn = getattr(cfgmod, "llm_settings", None)
-    if callable(fn):
-        try:
-            out = fn(cfg)
-            if out is not None:
-                return dict(out)
-        except Exception:
-            pass
+    defaults = getattr(cfgmod, "LLM_DEFAULTS", {}) or {}
     out: dict[str, Any] = {"default": dict(raw.get("default") or {}), "roles": dict(raw.get("roles") or {}),
-                           "budget": dict(raw.get("budget") or {}), "replay": raw.get("replay", False)}
+                           "budget": dict(defaults.get("budget") or {}), "replay": raw.get("replay", False)}
+    out["budget"].update(raw.get("budget") or {})
     for k in ("provider", "model", "api_key_env", "base_url"):
         if k in raw and k not in out["default"]:
             out["default"][k] = raw[k]
-    if "ledger_path" in raw:
-        out["ledger_path"] = raw["ledger_path"]
+    out["default"].setdefault("provider", (defaults.get("default") or {}).get("provider") or "anthropic")
+    out["default"].setdefault("model", (defaults.get("default") or {}).get("model") or "claude-haiku-4-5")
+    for k in ("ledger_path", "script"):
+        if k in raw:
+            out[k] = raw[k]
     return out
 
 
@@ -524,7 +523,8 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         sched = detect_scheduler() if ex == "split" else ex
         spec = SCHEDULERS.get(sched or "")
         have = spec is not None and shutil.which(spec["submit"]) is not None
-        add("site", "execution", have, f"{ex}: " + (f"{spec['submit']} found" if have else f"no submit command for {sched or 'any scheduler'} on PATH"))
+        add("site", "execution", have, f"{ex}: " + (f"{spec['submit']} found" if have else
+                                                   (f"{spec['submit']} (for {sched}) is not on PATH" if spec else "no scheduler (sbatch/qsub/bsub) on PATH")))
     # Container
     c = cfg.get("container") or {}
     rt = c.get("runtime", "none")
