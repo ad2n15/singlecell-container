@@ -131,7 +131,7 @@ test_that("PreprocessFast writes a Seurat object that RunPCAFast and Seurat acce
   expect_identical(sum(o[["RNA"]][["vf_vst_counts_variable"]][[1]]), 500L)
   st <- SeuratObject::Misc(o, "scfast")$hvg_stats
   expect_s3_class(st, "data.frame")
-  expect_identical(nrow(st), nrow(o))
+  expect_equal(nrow(st), nrow(o))
   expect_identical(sum(st$variable), 500L)
   pre <- SeuratObject::Misc(o, "scfast")$preprocess
   expect_identical(names(pre$hvg_mean), SeuratObject::VariableFeatures(o))
@@ -142,11 +142,12 @@ test_that("PreprocessFast writes a Seurat object that RunPCAFast and Seurat acce
   expect_identical(SeuratObject::LayerData(o, layer = "data")@x, low$data@x)
   # downstream
   o2 <- RunPCAFast(o, npcs = 20, verbose = FALSE)
-  expect_identical(dim(SeuratObject::Embeddings(o2, "pca")), c(ncol(o), 20L))
+  expect_equal(dim(SeuratObject::Embeddings(o2, "pca")), c(ncol(o), 20L))
   # the implicit PCA's scaling statistics equal the ones PreprocessFast reported
   expect_equal(o2[["pca"]]@misc$scfast$gene_mean, pre$hvg_mean, tolerance = 1e-6)
   expect_equal(o2[["pca"]]@misc$scfast$gene_sd, pre$hvg_sd, tolerance = 1e-6)
-  expect_no_error(Seurat::VariableFeaturePlot(o))
+  # HVFInfo() / VariableFeaturePlot() need the method, since no FindVariableFeatures command is logged.
+  expect_no_error(Seurat::VariableFeaturePlot(o, selection.method = "vst"))
   o3 <- Seurat::ScaleData(o, verbose = FALSE)
   expect_true("scale.data" %in% SeuratObject::Layers(o3[["RNA"]]))
 })

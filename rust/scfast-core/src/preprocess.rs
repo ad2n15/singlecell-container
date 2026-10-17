@@ -424,8 +424,8 @@ fn pass2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, mean: &[f64], sd: &[f64], flag:
 /// least-squares quadratic in `(x - x_i)` is solved from its normal equations (3 x 3,
 /// f64; the centring keeps it well conditioned). When the neighbourhood is degenerate (all
 /// points at the same `x`, so `h = 0`), the fit falls back to the weighted mean of the
-/// points at that `x`, which is what the local polynomial collapses to. With `span >= 1`
-/// every point is a neighbour and `h` is scaled by `span` as R does.
+/// points at that `x`, which is what the local polynomial collapses to. With `span > 1`
+/// every point is a neighbour and `h` is scaled by `sqrt(span)`, as R does.
 pub fn loess_direct(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
     let n = x.len();
     if y.len() != n {
@@ -443,7 +443,8 @@ pub fn loess_direct(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
     let xs: Vec<f64> = order.iter().map(|&i| x[i]).collect();
     let ys: Vec<f64> = order.iter().map(|&i| y[i]).collect();
     let q = ((n as f64 * span + 1e-5).floor() as usize).clamp(1, n);
-    let bandwidth_scale = span.max(1.0);
+    // R scales the bandwidth by sqrt(span) when span > 1 (checked against stats::loess).
+    let bandwidth_scale = span.max(1.0).sqrt();
 
     let fitted_sorted: Vec<f64> = (0..n)
         .into_par_iter()

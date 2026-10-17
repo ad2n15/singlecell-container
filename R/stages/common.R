@@ -90,11 +90,11 @@ scp_scfast_cuda <- function(info = scp_scfast_info()) {
 #' `cuda_available`, else "seurat". `engine: seurat` is always "seurat";
 #' `engine: scfast` on a GPU plan that cannot run scfast on CUDA is an error.
 scp_resolve_engine <- function(cfg, device = "cpu") {
-  eng <- cfg$engine
+  eng <- cfg[["engine"]]  # [[ ]]: `$` would partially match engine_gpu
   if (is.null(eng)) eng <- "auto"
   if (!(is.character(eng) && length(eng) == 1 && !is.na(eng) && eng %in% c("auto", "scfast", "seurat")))
     scp_stop("engine must be one of auto/scfast/seurat (got '", paste(eng, collapse = ","), "')")
-  eng_gpu <- cfg$engine_gpu
+  eng_gpu <- cfg[["engine_gpu"]]
   if (is.null(eng_gpu)) eng_gpu <- "auto"
   if (!(is.character(eng_gpu) && length(eng_gpu) == 1 && !is.na(eng_gpu) && eng_gpu %in% c("auto", "scfast", "rapids")))
     scp_stop("engine_gpu must be one of auto/scfast/rapids (got '", paste(eng_gpu, collapse = ","), "')")

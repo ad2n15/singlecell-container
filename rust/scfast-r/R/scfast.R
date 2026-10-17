@@ -763,7 +763,8 @@ scfast_preprocess <- function(counts, n_hvg = 2000, scale.factor = 1e4, loess.sp
 #' `ScaleData()`, which `RunPCAFast()` applies implicitly) with one streaming pass over the
 #' assay's counts (see [scfast_preprocess()]). Writes the `data` layer, the variable
 #' features (and the `vf_vst_counts_*` feature meta data that `HVFInfo()` and
-#' `VariableFeaturePlot()` read), and `Misc(object, "scfast")$hvg_stats`.
+#' `VariableFeaturePlot()` read: pass `selection.method = "vst"` to them, as no
+#' `FindVariableFeatures` command is logged), and `Misc(object, "scfast")$hvg_stats`.
 #'
 #' @param object A Seurat object with raw counts.
 #' @param n_hvg Number of variable features (Seurat `nfeatures`).

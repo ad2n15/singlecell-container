@@ -227,7 +227,7 @@ s2_leiden_leidenbase <- function(snn, resolution, seed, n_iter = 10L) {
 #' (`engine_gpu` forces either). An explicit `scfast` additionally needs lognorm
 #' normalisation. Returns "scfast" or "seurat".
 s2_resolve_engine <- function(cfg, plan, assay = "RNA") {
-  eng <- cfg$engine %||% "auto"
+  eng <- cfg[["engine"]] %||% "auto"
   if (!(is.character(eng) && length(eng) == 1 && eng %in% c("auto", "scfast", "seurat")))
     scp_stop("engine must be auto, scfast or seurat (got '", paste(eng, collapse = ","), "')")
   if (eng == "seurat") return("seurat")

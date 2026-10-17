@@ -686,7 +686,10 @@ test_that("S2 scfast path recovers the planted cell types and writes no exchange
   expect_gte(sm$pcs, 10); expect_lte(sm$pcs, 50)
   expect_identical(sm$clusters, nlevels(obj$seurat_clusters))
   expect_identical(Idents(obj), obj$seurat_clusters)
-  expect_true(all(c("load", "subset", "normalize", "hvg", "pca", "neighbors", "leiden", "umap", "save") %in% names(sm$timings_s)))
+  # Phase 9: the fused PreprocessFast() replaces normalize + hvg (+ scale) on the scfast path.
+  expect_true(all(c("load", "subset", "preprocess", "pca", "neighbors", "leiden", "umap", "save") %in% names(sm$timings_s)))
+  expect_false(any(c("normalize", "hvg", "scale") %in% names(sm$timings_s)))
+  expect_match(sm$preprocessing, "PreprocessFast")
   expect_identical(length(VariableFeatures(obj)), 500L)
   expect_false("scale.data" %in% Layers(obj[["RNA"]]))
   expect_equal(nrow(obj), 800)
