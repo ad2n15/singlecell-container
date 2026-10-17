@@ -60,7 +60,7 @@ Rscript -e 'testthat::test_file("tests/R/test-exchange.R")'
 ## Python unit tests
 
 ```bash
-PYTHONPATH=python pytest -q tests/python
+PYTHONPATH=python python -m pytest -q tests/python
 ```
 
 ## Round-trip
@@ -176,7 +176,7 @@ already caps itself at 2 threads and runs under `nice`). A full check is:
 
 ```bash
 Rscript -e 'testthat::test_dir("tests/R")'
-PYTHONPATH=python pytest -q tests/python
+PYTHONPATH=python python -m pytest -q tests/python
 tests/integration/run_roundtrip.sh
 tests/integration/run_stages.sh
 ```
