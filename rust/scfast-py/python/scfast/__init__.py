@@ -240,7 +240,7 @@ def knn(
     ef_search: int = 64,
     *,
     device: Literal["auto", "cpu", "cuda"] = "auto",
-    max_leaves: int = 64,
+    eps: float = 0.7,
 ) -> tuple[np.ndarray, np.ndarray]:
     """k nearest neighbours (Euclidean), replacing the kNN part of Seurat's ``FindNeighbors``.
 
@@ -254,8 +254,8 @@ def knn(
         Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``), at least 2.
     method
         ``"exact"`` (exact: a k-d tree up to 16 dims, blocked brute force above),
-        ``"kdtree"`` (approximate: the k-d tree search stopped after ``max_leaves``
-        leaves; deterministic), ``"hnsw"`` (approximate, hnsw_rs) or ``"auto"``: exact
+        ``"kdtree"`` (approximate: the k-d tree search with the (1 + ``eps``) pruning
+        rule; deterministic), ``"hnsw"`` (approximate, hnsw_rs) or ``"auto"``: exact
         when there are fewer than ``auto_threshold`` cells, else ``"kdtree"`` up to 16
         dims and HNSW with ``m``, ``ef_construction`` and ``ef_search`` above.
     seed
@@ -265,9 +265,10 @@ def knn(
         ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
         the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
         ignored and ``k`` must be at most 129.
-    max_leaves
-        Leaves (32-64 cells each) the ``"kdtree"`` search may open per cell. 64 keeps
-        0.96 of the exact neighbours on 500k synthetic cells (10 PCs).
+    eps
+        ``"kdtree"`` skips a tree node once it is farther than the current k-th distance
+        divided by ``1 + eps``; 0 is exact. 0.7 keeps about 0.95 of the exact neighbours
+        (100k-1.3M cells, 10 PCs).
 
     Returns
     -------
@@ -298,9 +299,11 @@ def knn(
     a = np.ascontiguousarray(a, dtype=np.float32)  # no copy when already float32 C-order
     seed, auto_threshold = _seed(seed), _int("auto_threshold", auto_threshold)
     m, ef_construction, ef_search = _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1)
-    max_leaves = _int("max_leaves", max_leaves, 1)
+    eps = float(eps)
+    if not (np.isfinite(eps) and eps >= 0):
+        raise ValueError(f"eps must be finite and >= 0, got {eps}")
     return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.knn(
-        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev, max_leaves,
+        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev, eps,
     ))
 
 

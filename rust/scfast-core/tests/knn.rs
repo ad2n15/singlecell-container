@@ -258,24 +258,26 @@ fn auto_switches_at_threshold() {
 
     let x = clustered(3000, 10, 10, 12);
     let r = knn(&x, &above).unwrap();
-    assert_eq!(r.indices, knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 64 })).unwrap().indices);
+    assert_eq!(r.indices, knn(&x, &params(20, KnnMethod::KdTree { eps: 0.7 })).unwrap().indices);
 }
 
 #[test]
-fn kdtree_cap_recall_and_contract() {
+fn kdtree_eps_recall_and_contract() {
     let x = clustered(20_000, 10, 12, 15);
     let truth = exact(&x, 20);
-    let r = knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 64 })).unwrap();
-    assert_contract(&x, &r, "kdtree cap 64");
+    let r = knn(&x, &params(20, KnnMethod::KdTree { eps: 0.7 })).unwrap();
+    assert_contract(&x, &r, "kdtree eps 0.7");
     let rc = recall(&r, &truth);
-    println!("k-d tree (64 leaves) recall@20 (non-self), 20000 x 10 clustered: {rc:.4}");
+    println!("k-d tree (eps 0.7) recall@20 (non-self), 20000 x 10 clustered: {rc:.4}");
     assert!(rc >= 0.9, "recall {rc}");
-    let all = knn(&x, &params(20, KnnMethod::KdTree { max_leaves: usize::MAX })).unwrap();
+    let all = knn(&x, &params(20, KnnMethod::KdTree { eps: 0.0 })).unwrap();
     assert_eq!(all.indices, truth.indices);
     assert_eq!(all.distances, truth.distances);
-    let r = knn(&ties_and_duplicates(16), &params(20, KnnMethod::KdTree { max_leaves: 1 })).unwrap();
-    assert_contract(&ties_and_duplicates(16), &r, "kdtree cap 1 duplicates");
-    assert!(knn(&x, &params(20, KnnMethod::KdTree { max_leaves: 0 })).is_err());
+    let r = knn(&ties_and_duplicates(16), &params(20, KnnMethod::KdTree { eps: 5.0 })).unwrap();
+    assert_contract(&ties_and_duplicates(16), &r, "kdtree eps 5 duplicates");
+    for eps in [-0.1, f64::NAN, f64::INFINITY] {
+        assert!(knn(&x, &params(20, KnnMethod::KdTree { eps })).is_err(), "eps {eps}");
+    }
 }
 
 #[test]

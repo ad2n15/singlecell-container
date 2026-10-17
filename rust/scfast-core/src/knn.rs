@@ -1,6 +1,6 @@
 //! k nearest neighbours on PC embeddings: replaces the kNN part of Seurat's
-//! `FindNeighbors` (Annoy, approximate) with exact search for moderate sizes and a
-//! leaf-capped k-d tree (up to 16 dimensions) or HNSW for large ones.
+//! `FindNeighbors` (Annoy, approximate) with exact search for moderate sizes and an
+//! approximate k-d tree (up to 16 dimensions) or HNSW for large ones.
 //!
 //! # Output contract (all methods)
 //!
@@ -49,18 +49,21 @@
 //! order. Repeated runs give nearly identical neighbour sets (recall vs exact is what is
 //! guaranteed in practice, not identity). Use `Exact` when reproducibility matters.
 //!
-//! # k-d tree with a leaf cap (`KnnMethod::KdTree`)
+//! # Approximate k-d tree (`KnnMethod::KdTree`)
 //!
-//! The exact k-d tree search, stopped after `max_leaves` leaves (of 32 to 64 points),
-//! visited nearest box first. Approximate, deterministic and independent of the thread
-//! count; distances and ordering follow the contract above. On the 500k cells above,
-//! `max_leaves = 64` takes 12 CPU-s, shares 0.96 of each cell's neighbours with the exact
-//! answer and gives Leiden labels with ARI 0.997 against the exact graph's. HNSW
-//! (m = 16, ef_construction = 200) was 16x slower than exact search at 100k cells there.
+//! The exact k-d tree search with the (1 + eps) rule of Arya et al.: a node is skipped once
+//! its box is farther than the current (k - 1)-th distance divided by `1 + eps`.
+//! Deterministic and independent of the thread count; distances and ordering follow the
+//! contract above. Measured with eps = 0.7 (10 PCs, k = 20, 12-core M-series): share of each
+//! cell's neighbours that the exact answer also has 0.957 / 0.955 / 0.946 on 100k and 500k
+//! synthetic cells and the 1.29M-cell 10x brain set, in 0.12 / 0.96 / 4.6 s against
+//! 0.31 / 3.3 / 12.6 s exact. A fixed cap on visited leaves was tried first: its overlap fell
+//! with n (0.96 at 500k synthetic, 0.82 at 1.29M brain for the same cap). HNSW
+//! (m = 16, ef_construction = 200) took 8.5 s at 100k cells.
 //!
 //! # Auto (`KnnMethod::Auto`)
 //!
-//! `Exact` when `n < auto_threshold`. Otherwise `KdTree { max_leaves: 64 }` up to
+//! `Exact` when `n < auto_threshold`. Otherwise `KdTree { eps: 0.7 }` up to
 //! `KDTREE_MAX_DIMS` dimensions, and HNSW with m = 16, ef_construction = 200,
 //! ef_search = max(2k, 64) above.
 
@@ -80,9 +83,9 @@ pub enum KnnMethod {
     Exact,
     /// Approximate HNSW (hnsw_rs). `m` = links per node, `ef_construction`, `ef_search`.
     Hnsw { m: usize, ef_construction: usize, ef_search: usize },
-    /// k-d tree search stopped after `max_leaves` leaves; approximate, for up to
-    /// `KDTREE_MAX_DIMS` dimensions (any dimension works, but it slows down above).
-    KdTree { max_leaves: usize },
+    /// k-d tree search with the (1 + eps) pruning rule; approximate for `eps > 0`, exact
+    /// at 0. Meant for up to `KDTREE_MAX_DIMS` dimensions (any works, but slows down above).
+    KdTree { eps: f64 },
     /// Exact below `auto_threshold` cells; above, `KdTree` up to `KDTREE_MAX_DIMS`
     /// dimensions and HNSW beyond.
     Auto,
@@ -105,11 +108,11 @@ impl Default for KnnParams {
     }
 }
 
-/// Up to this many dimensions exact search uses the k-d tree, and `Auto` the leaf-capped
+/// Up to this many dimensions exact search uses the k-d tree, and `Auto` the approximate
 /// k-d tree, instead of the GEMM brute force and HNSW.
 pub const KDTREE_MAX_DIMS: usize = 16;
-/// Leaf cap used by `KnnMethod::Auto` (see the module docs for the measurement).
-pub const AUTO_KD_MAX_LEAVES: usize = 64;
+/// `eps` used by `KnnMethod::Auto` (see the module docs for the measurement).
+pub const AUTO_KD_EPS: f64 = 0.7;
 
 /// HNSW settings used by `KnnMethod::Auto` above `auto_threshold`.
 const AUTO_M: usize = 16;
@@ -161,17 +164,17 @@ pub fn knn_on(x: &RowMajor, params: &KnnParams, device: Device) -> Result<Knn> {
             validate_hnsw(m, ef_construction, ef_search)?;
             Ok(hnsw::hnsw_knn(x, k, m, ef_construction, ef_search, params.seed))
         }
-        KnnMethod::KdTree { max_leaves } => {
-            if max_leaves == 0 {
-                return Err(Error::InvalidParameter("k-d tree max_leaves must be at least 1".into()));
+        KnnMethod::KdTree { eps } => {
+            if !(eps >= 0.0 && eps.is_finite()) {
+                return Err(Error::InvalidParameter(format!("k-d tree eps must be finite and >= 0, got {eps}")));
             }
-            Ok(kdtree::kdtree_knn(x, k, max_leaves))
+            Ok(kdtree::kdtree_knn(x, k, eps))
         }
         KnnMethod::Auto => {
             if n < params.auto_threshold {
                 Ok(exact_knn(x, k))
             } else if x.n_cols <= KDTREE_MAX_DIMS {
-                Ok(kdtree::kdtree_knn(x, k, AUTO_KD_MAX_LEAVES))
+                Ok(kdtree::kdtree_knn(x, k, AUTO_KD_EPS))
             } else {
                 let ef_search = (2 * k).max(AUTO_EF_SEARCH_MIN);
                 Ok(hnsw::hnsw_knn(x, k, AUTO_M, AUTO_EF_CONSTRUCTION, ef_search, params.seed))
@@ -182,7 +185,7 @@ pub fn knn_on(x: &RowMajor, params: &KnnParams, device: Device) -> Result<Knn> {
 
 fn exact_knn(x: &RowMajor, k: usize) -> Knn {
     if x.n_cols <= KDTREE_MAX_DIMS {
-        kdtree::kdtree_knn(x, k, usize::MAX)
+        kdtree::kdtree_knn(x, k, 0.0)
     } else {
         exact::exact_knn(x, k)
     }

@@ -328,7 +328,7 @@ fn csr_view_info<'py>(
 
 /// Low-level kNN on a C-contiguous float32 (n, d) array. See scfast.knn.
 #[pyfunction]
-#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu", max_leaves = core_knn::AUTO_KD_MAX_LEAVES))]
+#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu", eps = core_knn::AUTO_KD_EPS))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn knn_dense<'py>(
     py: Python<'py>,
@@ -341,13 +341,13 @@ fn knn_dense<'py>(
     ef_construction: usize,
     ef_search: usize,
     device: &str,
-    max_leaves: usize,
+    eps: f64,
 ) -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>)> {
     let (n, d) = (x.shape()[0], x.shape()[1]);
     check_n_fits_i32(n, "knn")?;
     let device = parse_device(device)?;
     let hnsw = KnnMethod::Hnsw { m, ef_construction, ef_search };
-    let kdtree = KnnMethod::KdTree { max_leaves };
+    let kdtree = KnnMethod::KdTree { eps };
     // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW and
     // k-d tree parameters apply in auto mode too (the core's Auto uses fixed ones).
     let method = match method {

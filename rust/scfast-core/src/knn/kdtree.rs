@@ -107,13 +107,12 @@ impl Tree {
 
     /// Best-first search: nodes are opened in increasing box distance, each one followed
     /// down its nearer side, the farther sides queued. Stops when the nearest queued box is
-    /// beyond the current (k - 1)-th distance (exact), or after `max_leaves` leaves.
-    fn search(&self, q: &[f64], self_pos: usize, max_leaves: usize, best: &mut Best, queue: &mut Vec<Pending>) {
+    /// beyond the current (k - 1)-th squared distance times `shrink` (1 for exact search).
+    fn search(&self, q: &[f64], self_pos: usize, shrink: f64, best: &mut Best, queue: &mut Vec<Pending>) {
         queue.clear();
         queue.push(Pending { lb: 0.0, v: 0, s: 0, e: self.perm.len() as u32, level: 0 });
-        let mut leaves = 0;
         while let Some(Pending { lb, mut v, s, e, mut level }) = pop_min(queue) {
-            if lb > best.worst() || leaves == max_leaves {
+            if lb > best.worst() * shrink {
                 break;
             }
             let (mut s, mut e) = (s as usize, e as usize);
@@ -123,10 +122,10 @@ impl Tree {
                 let (dl, dr) = (self.box_d2(l as usize, q), self.box_d2(r as usize, q));
                 let (near, far, dn, df, ns, ne, fs, fe) =
                     if dl <= dr { (l, r, dl, dr, s, m, m, e) } else { (r, l, dr, dl, m, e, s, m) };
-                if df <= best.worst() {
+                if df <= best.worst() * shrink {
                     push(queue, Pending { lb: df, v: far, s: fs as u32, e: fe as u32, level: level + 1 });
                 }
-                if dn > best.worst() {
+                if dn > best.worst() * shrink {
                     level = u32::MAX;
                     break;
                 }
@@ -135,7 +134,6 @@ impl Tree {
             if level == u32::MAX {
                 continue;
             }
-            leaves += 1;
             let len = e - s;
             let mut acc = [0f64; LEAF_SIZE + 1];
             let acc = &mut acc[..len];
@@ -300,8 +298,11 @@ impl Best {
     }
 }
 
-/// `max_leaves = usize::MAX` gives the exact answer; a cap makes the search approximate.
-pub(super) fn kdtree_knn(x: &RowMajor, k: usize, max_leaves: usize) -> Knn {
+/// `eps = 0` gives the exact answer. With `eps > 0` a node is skipped when its box is
+/// farther than the current (k - 1)-th distance divided by `1 + eps`, so each reported
+/// neighbour is within `1 + eps` times the distance of the true one of the same rank.
+pub(super) fn kdtree_knn(x: &RowMajor, k: usize, eps: f64) -> Knn {
+    let shrink = 1.0 / ((1.0 + eps) * (1.0 + eps));
     let (n, d) = (x.n_rows, x.n_cols);
     let tree = Tree::build(x);
     let mut tidx = vec![0u32; n * k];
@@ -312,7 +313,7 @@ pub(super) fn kdtree_knn(x: &RowMajor, k: usize, max_leaves: usize) -> Knn {
             for (t, (irow, drow)) in ib.chunks_exact_mut(k).zip(db.chunks_exact_mut(k)).enumerate() {
                 let pos = c * QUERY_CHUNK + t;
                 best.items.clear();
-                tree.search(tree.point(pos, q), pos, max_leaves, best, queue);
+                tree.search(tree.point(pos, q), pos, shrink, best, queue);
                 write_row(tree.perm[pos] as usize, &best.items, irow, drow);
             }
         },
