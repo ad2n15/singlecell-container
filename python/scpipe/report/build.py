@@ -29,7 +29,7 @@ import math
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Sequence, Iterable, Mapping
 
 from . import plots
 
@@ -475,8 +475,12 @@ def build_report(run_dir: str | Path, out: str | Path | None = None, ctx: Mappin
     return out
 
 
-def render_gate_report(gate_dir: str | Path) -> str:
-    """One gate's report.html (bundle, proposal, review, decision) as a string."""
+def render_gate_report(gate_dir: str | Path, extra_sections: Sequence[tuple[str, str]] = ()) -> str:
+    """One gate's report.html (bundle, proposal, review, decision) as a string.
+
+    ``extra_sections`` are ``(title, html)`` pairs a gate module adds (its ``report_sections``),
+    rendered before the footer.
+    """
     gdir = Path(gate_dir)
     gate = gdir.name.upper()
     g = _gate(gdir, gate)
@@ -484,7 +488,8 @@ def render_gate_report(gate_dir: str | Path) -> str:
     cfg = _yaml(rd / "config" / "config.resolved.yaml")
     run = {"run_id": cfg.get("run_id") or rd.name, "project": cfg.get("project"), "run_dir": str(rd)}
     llm = _llm(rd, cfg)
-    return _env().get_template("gate.html.j2").render(gate=g, run=run, llm=llm, generated_utc=_utc())
+    return _env().get_template("gate.html.j2").render(gate=g, run=run, llm=llm, generated_utc=_utc(),
+                                                       extra_sections=list(extra_sections))
 
 
 # --------------------------------------------------------------------------

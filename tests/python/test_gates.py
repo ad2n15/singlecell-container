@@ -123,7 +123,7 @@ def test_g1_rules_only_without_llm(tmp_path):
     bundle = json.loads((rd / "gates" / "G1" / "bundle.json").read_text())
     assert "cell_id" not in json.dumps(bundle) and bundle["bundle_sha256"] == dec["bundle_sha256"]
     html = (rd / "gates" / "G1" / "report.html").read_text()
-    assert html.startswith("<!doctype html>") and "decided by rules" in html and "QC decisions per sample" in html
+    assert html.lower().startswith("<!doctype html>") and "decided by rules" in html and "QC decisions per sample" in html
     assert "no LLM calls" in html and "http" not in html.split("<body>")[0]  # self-contained: no CDN
     summary = json.loads((rd / "gates" / "G1" / "qc_summary.json").read_text())
     assert summary["decided_by"] == "rules" and summary["counts"]["exclude"] > 0

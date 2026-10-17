@@ -136,6 +136,10 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     ),
     # S3 = R evidence (markers, signatures) + CellTypist + consensus, one stage (scpipe.stages.s3).
     "S3": ("object_format", "annotation", "signatures"),
+    # G2 context (tissue/disease), G3 annotation, G4 DGE interpretation: scpipe.gates.g{2,3,4}_*.
+    "G2": ("gates.G2", "llm", "annotation.celltypist_model", "opentargets"),
+    "G3": ("gates.G3", "llm", "annotation"),
+    "G4": ("gates.G4", "llm", "dge", "opentargets"),
     "S4": ("object_format", "seed", "dge", "opentargets.enabled", "opentargets.max_genes_per_direction",
            "opentargets.offline"),
     "S5": ("project", "seed", "report"),
@@ -234,10 +238,19 @@ def default_stages() -> list[Stage]:
               inputs=(OBJ2, "config/samples.csv"),
               outputs=("S3/markers.tsv.gz", "S3/cluster_summary.json", "S3/signatures.tsv.gz",
                        "S3/evidence_bundle.json", "S3/annotation_consensus.tsv", "S3/celltypist_note.json")),
+        Stage("G2", "python", _py_stage("scpipe.gates.g2_context"), STAGE_CONFIG_KEYS["G2"],
+              inputs=("S3/evidence_bundle.json",), optional_inputs=("S3/annotation_consensus.tsv",),
+              outputs=("gates/G2/decision.json",)),
+        Stage("G3", "python", _py_stage("scpipe.gates.g3_annotation"), STAGE_CONFIG_KEYS["G3"],
+              inputs=("S3/evidence_bundle.json", "S3/annotation_consensus.tsv"),
+              outputs=("gates/G3/decision.json",)),
         # S4 = the R pseudobulk DGE step, then the Open Targets Python step (one stage, one log).
         Stage("S4", "python", _py_stage("scpipe.stages.s4"), STAGE_CONFIG_KEYS["S4"],
               inputs=(OBJ2,), outputs=("S4/dge_summary.json", "S4/opentargets_summary.json"),
               optional_inputs=S4_OPTIONAL),
+        Stage("G4", "python", _py_stage("scpipe.gates.g4_interpretation"), STAGE_CONFIG_KEYS["G4"],
+              inputs=("S4/dge_summary.json",), optional_inputs=("S4/opentargets_summary.json",),
+              outputs=("gates/G4/decision.json",)),
         # S5 must stay last: the R export (S5/umap.tsv.gz, S5/expr_subset.tsv.gz) then report.html/explorer.html.
         Stage("S5", "python", _py_stage("scpipe.stages.s5_report"), STAGE_CONFIG_KEYS["S5"],
               inputs=(OBJ2,), outputs=("S5/report.html", "S5/explorer.html", "S5/umap.tsv.gz"),

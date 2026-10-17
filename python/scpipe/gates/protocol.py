@@ -70,7 +70,7 @@ import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Sequence, Any, Mapping
 
 from ..config import ConfigError, canonical_json, llm_settings, load_resolved
 from ..llm import AgentLog, BudgetExceeded, Ledger, ProviderError, get_provider, sha256_text
@@ -256,6 +256,23 @@ def _rules_review(verdict: str, text: str, severity: str = "info") -> dict[str, 
     return {"verdict": verdict, "findings": [{"severity": severity, "text": text}], "reviewer": {"model": "rules"}}
 
 
+def _upgrade_report(gate_dir: Path, sections: Sequence[tuple[str, str]] = (), notes: Sequence[str] = ()) -> None:
+    """Re-render report.html with the shared report templates once the gate files are on disk.
+
+    The simple renderer in :mod:`scpipe.gates.report` is always written first, so a failure
+    here (templates missing, jinja2 absent) leaves a usable report and is only logged.
+    """
+    try:
+        import html as _html
+        from scpipe.report.build import render_gate_report
+        extra = list(sections)
+        if notes:
+            extra.append(("Notes", "<ul>" + "".join(f"<li>{_html.escape(str(n))}</li>" for n in notes) + "</ul>"))
+        (gate_dir / "report.html").write_text(render_gate_report(gate_dir, extra), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - never fail a gate over its pretty report
+        _log(f"{gate_dir.name}: shared report template unavailable ({exc}); kept the plain report")
+
+
 def approve_command(run_dir: Path, gate_id: str) -> str:
     return f"scpipe approve --run-dir {run_dir} --stage {gate_id}"
 
@@ -295,10 +312,12 @@ def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResu
             prev["mode"] = mode
             g.apply(prev, bundle)
             ledger_status = _ledger_status(run_dir, cfg)
+            sections = g.report_sections(bundle, proposal, review, prev)
             html = render_report(gate_id, run_dir, bundle, proposal, review, prev, "continue", ledger_status, notes,
-                                 g.report_sections(bundle, proposal, review, prev))
+                                 sections)
             files = write_gate_files(gate_dir, bundle, None, None, prev, html)
             (gate_dir / "pending.json").unlink(missing_ok=True)
+            _upgrade_report(gate_dir, sections, notes)
             return GateResult(gate_id, mode, "continue", prev, proposal, review, files, notes)
 
     # 2-4. Rules, worker, reviewer.
@@ -354,9 +373,10 @@ def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResu
                    "reviewer_verdict": review.get("verdict"), "approve": approve_command(run_dir, gate_id),
                    "bundle_sha256": bundle_sha, "proposal_sha256": proposal_sha}
         files["pending"] = _write_json(gate_dir / "pending.json", pending)
-        html = render_report(gate_id, run_dir, bundle, proposal, review, None, "wait", ledger_status, notes,
-                             g.report_sections(bundle, proposal, review, None))
+        sections = g.report_sections(bundle, proposal, review, None)
+        html = render_report(gate_id, run_dir, bundle, proposal, review, None, "wait", ledger_status, notes, sections)
         files.update(write_gate_files(gate_dir, None, None, None, None, html))
+        _upgrade_report(gate_dir, sections, notes)
         _log(f"{gate_id}: waiting for a human; {approve_command(run_dir, gate_id)}")
         return GateResult(gate_id, mode, "wait", None, proposal, review, files, notes)
 
@@ -364,10 +384,12 @@ def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResu
                 "decision": decision_content, "changes_vs_proposal": [], "bundle_sha256": bundle_sha,
                 "proposal_sha256": proposal_sha, "fallback": fallback}
     g.apply(decision, bundle)
+    sections = g.report_sections(bundle, proposal, review, decision)
     html = render_report(gate_id, run_dir, bundle, proposal, review, decision, "continue", ledger_status, notes,
-                         g.report_sections(bundle, proposal, review, decision))
+                         sections)
     files.update(write_gate_files(gate_dir, None, None, None, decision, html))
     (gate_dir / "pending.json").unlink(missing_ok=True)
+    _upgrade_report(gate_dir, sections, notes)
     _log(f"{gate_id}: decided by {decided_by} (mode {mode}); run continues")
     return GateResult(gate_id, mode, "continue", decision, proposal, review, files, notes)
 
