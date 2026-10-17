@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pandas as pd
 import pytest
 import yaml
 
 from scpipe import qc
-from scpipe.agents.qc_agent import AGENT_REVIEW, MAX_REVIEW_CELLS, QCContext, QCWorker
+from scpipe.agents.qc_agent import AGENT_REVIEW, QCContext, QCWorker
 from scpipe.agents.reviewer import Reviewer, normalise_verdict
 from scpipe.llm import get_provider
 from scpipe.llm.mock_provider import MockProvider

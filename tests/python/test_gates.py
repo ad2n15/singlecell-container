@@ -9,7 +9,6 @@ code 3 while waiting), ``scpipe approve`` and ``scpipe resume``.
 
 from __future__ import annotations
 
-import gzip
 import io
 import json
 import sys
