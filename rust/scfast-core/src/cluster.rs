@@ -4,7 +4,7 @@
 //! (`RBConfigurationVertexPartition`) and Scanpy optimise (docs/RUST_ENGINE.md section 4).
 //! Its Leiden loop is reproduced in [`leiden_rb`] with local moving and refinement replaced
 //! by parallel, thread-count-independent versions (`cluster/local_move.rs`,
-//! `cluster/refine.rs`); aggregation is single-clustering's. 500k synthetic cells (10 PCs,
+//! `cluster/refine.rs`) and its aggregation run in parallel (`cluster/aggregate.rs`). 500k synthetic cells (10 PCs,
 //! k = 20, 12-core M-series): 5.0 s -> 1.8 s, ARI 0.999 against leidenalg on the same graph
 //! at 100k.
 //! GPU (Phase 7): cuGraph Leiden ([`crate::cugraph::CugraphLeiden`], feature `cugraph`) behind
@@ -41,6 +41,7 @@ use single_clustering::community_search::leiden::{LeidenConfig, Objective, Parti
 use single_clustering::network::CSRNetwork;
 use single_clustering::ClusteringError;
 
+mod aggregate;
 mod local_move;
 mod refine;
 
@@ -144,7 +145,8 @@ impl Clusterer for SingleClusteringLeiden {
 
 /// single-clustering 0.7.0's `leiden` (RB, refinement on, its default tolerance, patience
 /// and level cap) with its sequential local move and refinement replaced by the parallel
-/// [`local_move::local_move`] and [`refine::refine`]. Aggregation is single-clustering's.
+/// [`local_move::local_move`] and [`refine::refine`], and its aggregation by the parallel
+/// (bit-identical) [`aggregate::aggregate`].
 fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
     let config = LeidenConfig::default();
     let objective = Rb::new(params.resolution);
@@ -178,7 +180,7 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
             );
             let mut collapse_by = Partition::from_membership(&level_graph, &refined);
             let grouping = collapse_by.renumber_into_grouping();
-            let coarse = level_graph.aggregate(&grouping);
+            let coarse = aggregate::aggregate(&level_graph, &grouping);
             if coarse.node_count() >= level_graph.node_count() {
                 break;
             }
