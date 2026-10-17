@@ -55,6 +55,7 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::OnceLock;
 
 use libloading::Library;
+use rayon::prelude::*;
 
 use crate::cluster::{relabel_by_size, validate_shape, ClusterParams, Clusterer};
 use crate::error::{Error, Result};
@@ -691,25 +692,35 @@ fn validate_edges(g: &SparseGraph) -> Result<()> {
     if let Some(w) = g.weights.iter().find(|w| !w.is_finite() || **w < 0.0) {
         return Err(Error::InvalidInput(format!("graph weights must be finite and non-negative, found {w}")));
     }
-    for i in 0..g.n {
-        let (s, e) = (g.indptr[i], g.indptr[i + 1]);
-        for (&j, &w) in g.indices[s..e].iter().zip(&g.weights[s..e]) {
-            let j = j as usize;
-            if j == i {
-                continue;
+    let row = |j: usize| {
+        let (js, je) = (g.indptr[j], g.indptr[j + 1]);
+        (&g.indices[js..je], &g.weights[js..je])
+    };
+    let asymmetric = (0..g.n).into_par_iter().find_map_first(|i| {
+        let (cols, ws) = row(i);
+        cols.iter().zip(ws).find_map(|(&j, &w)| {
+            if j as usize == i {
+                return None;
             }
-            let (js, je) = (g.indptr[j], g.indptr[j + 1]);
-            let back = g.indices[js..je].iter().zip(&g.weights[js..je]).find(|(&k, _)| k as usize == i).map(|(_, &w)| w);
+            let (back_cols, back_ws) = row(j as usize);
+            // Canonical rows are sorted: binary search; otherwise scan.
+            let pos = if back_cols.is_sorted() {
+                back_cols.binary_search(&(i as u32)).ok()
+            } else {
+                back_cols.iter().position(|&k| k as usize == i)
+            };
+            let back = pos.map(|p| back_ws[p]);
             match back {
-                Some(wb) if (wb - w).abs() <= 1e-6 * w.abs().max(wb.abs()).max(1.0) => {}
-                _ => {
-                    return Err(Error::InvalidInput(format!(
-                        "graph is not symmetric: edge {i}->{j} has weight {w} but {j}->{i} is {}",
-                        back.map_or("missing".to_string(), |b| b.to_string())
-                    )))
-                }
+                Some(wb) if (wb - w).abs() <= 1e-6 * w.abs().max(wb.abs()).max(1.0) => None,
+                _ => Some((i, j, w, back)),
             }
-        }
+        })
+    });
+    if let Some((i, j, w, back)) = asymmetric {
+        return Err(Error::InvalidInput(format!(
+            "graph is not symmetric: edge {i}->{j} has weight {w} but {j}->{i} is {}",
+            back.map_or("missing".to_string(), |b| b.to_string())
+        )));
     }
     Ok(())
 }

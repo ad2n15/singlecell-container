@@ -100,11 +100,16 @@ class RapidsEngine(ScanpyEngine):
         versions = super().startup()
         import cupy as cp
         import rapids_singlecell as rsc
+        import rmm
+        from rmm.allocators.cupy import rmm_cupy_allocator
 
+        # RMM pool for CuPy and cuGraph, as rapids-singlecell recommends: without it cuGraph
+        # Leiden at 500k cells spends half its time in cudaMalloc / cudaFree.
+        rmm.reinitialize(pool_allocator=True)
+        cp.cuda.set_allocator(rmm_cupy_allocator)
         cp.zeros(1)  # create the CUDA context now, so it counts as start-up
         cp.cuda.Device().synchronize()
         self.cp, self.rsc = cp, rsc
-        self.pool = cp.get_default_memory_pool()
         versions.update({"rapids_singlecell": rsc.__version__, "cupy": cp.__version__})
         return versions
 
@@ -112,8 +117,8 @@ class RapidsEngine(ScanpyEngine):
         self.cp.cuda.Device().synchronize()
 
     def gpu_mem(self):
-        # bytes held by CuPy's pool after the step: an upper bound on live allocations
-        return int(self.pool.total_bytes())
+        free, total = self.cp.cuda.runtime.memGetInfo()
+        return int(total - free)  # includes the RMM pool and scfast's own allocations
 
     def to_gpu(self, a):
         self.rsc.get.anndata_to_GPU(a)
@@ -245,10 +250,6 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         self.leiden_device = self.scfast.leiden_device("auto")
         versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
         return versions
-
-    def gpu_mem(self):
-        free, total = self.cp.cuda.runtime.memGetInfo()
-        return int(total - free)  # scfast allocates outside CuPy's pool
 
     def neighbors(self, a, cfg):
         import numpy as np
