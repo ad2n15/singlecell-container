@@ -33,7 +33,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from scpipe.gates.g2_context import cluster_table, read_consensus, read_evidence_bundle
+from scpipe.gates.g2_context import cluster_table, marker_names, read_consensus, read_evidence_bundle
 
 GATE = "G3"
 WORKER_ROLE = "annotation_worker"
@@ -74,6 +74,7 @@ BUILTIN_LABELS: dict[str, dict[str, Any]] = {
     "neuron": {"cl_id": "CL:0000540", "level": "broad", "markers": ["RBFOX3", "SNAP25", "SYT1"]},
     "Unassigned": {"cl_id": None, "level": "broad", "markers": []},
 }
+
 
 
 def _collect_labels(node: Any, key: str | None, out: dict[str, dict[str, Any]], level_hint: str | None) -> None:
@@ -237,7 +238,7 @@ def report_sections(bundle: Mapping[str, Any], proposal: Mapping[str, Any], revi
                      "proposed broad": r.get("label_broad"), "proposed fine": r.get("label_fine"), "cl_id": r.get("cl_id"),
                      "proposed conf": r.get("confidence"), "status": r.get("status"),
                      "changed": "yes" if any(r.get(k) != cons.get(k) for k in ("label_broad", "label_fine", "cl_id")) else "",
-                     "top_markers": ", ".join(list(c.get("top_markers") or [])[:8])})
+                     "top_markers": ", ".join(marker_names(c.get("top_markers"), 8))})
     return [("Annotation (consensus vs proposal)", table(rows)),
             ("Unresolved clusters the agent may relabel", "<p>" + (", ".join(bundle.get("low_confidence_clusters") or []) or "<em>none</em>") + "</p>")]
 

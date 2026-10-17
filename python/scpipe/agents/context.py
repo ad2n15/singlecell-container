@@ -37,6 +37,8 @@ ENTITY_TYPES = ("disease", "tissue", "target", "drug")
 _OT_ENTITIES = ("disease", "target", "drug")
 
 
+from scpipe.gates.g2_context import marker_names  # noqa: E402
+
 def tool(name: str, description: str, input_schema: Mapping[str, Any], fn: Callable[..., Any],
          proposal: bool = False) -> dict[str, Any]:
     """A tool dict for the agent base."""
@@ -129,7 +131,7 @@ class ContextAgent(Agent):
         def list_clusters() -> list[dict]:
             return [{"cluster": cid, "n_cells": c.get("n_cells"), "pct_cells": c.get("pct_cells"),
                      "consensus_label": (c.get("consensus") or {}).get("label_fine"),
-                     "top_markers": list(c.get("top_markers") or [])[:8]} for cid, c in clusters.items()]
+                     "top_markers": marker_names(c.get("top_markers"), 8)} for cid, c in clusters.items()]
 
         def get_cluster_evidence(cluster: str) -> dict:
             cid = str(cluster)

@@ -49,6 +49,17 @@ _IMMUNE_SETS = {"T", "CD4", "CD8", "NK", "B", "plasma", "mono_CD14", "mono_CD16"
 _TISSUE_SETS = {"epithelial", "endothelial", "fibroblast", "hepatocyte", "neuron", "glia"}
 
 
+
+def marker_names(markers: Any, n: int | None = None) -> list[str]:
+    """Gene names from a ``top_markers`` list: S3 writes ``[{"gene": ..., "avg_log2fc": ...}, ...]``,
+    hand-made bundles may hold plain strings; both are accepted."""
+    out: list[str] = []
+    for m in markers or []:
+        name = m.get("gene") if isinstance(m, Mapping) else m
+        if name:
+            out.append(str(name))
+    return out[:n] if n is not None else out
+
 def _load_json(path: Path) -> Any:
     with path.open(encoding="utf-8") as fh:
         return json.load(fh)
@@ -106,7 +117,7 @@ def cluster_table(evidence: Mapping[str, Any], consensus: list[Mapping[str, Any]
             "median_genes": c.get("median_genes"),
             "median_umis": c.get("median_umis"),
             "median_pct_mito": c.get("median_pct_mito"),
-            "top_markers": list(c.get("top_markers") or [])[:20],
+            "top_markers": marker_names(c.get("top_markers"), 20),
             "signatures": dict(c.get("signatures") or {}),
             "celltypist": dict(c.get("celltypist") or {}),
         }
@@ -258,7 +269,7 @@ def report_sections(bundle: Mapping[str, Any], proposal: Mapping[str, Any], revi
              for c in content.get("disease_candidates") or [] if isinstance(c, Mapping)]
     clusters = [{"cluster": c["cluster"], "n_cells": c.get("n_cells"), "pct_cells": c.get("pct_cells"),
                  "consensus": (c.get("consensus") or {}).get("label_fine"),
-                 "top_markers": ", ".join(list(c.get("top_markers") or [])[:8])} for c in bundle.get("clusters") or []]
+                 "top_markers": ", ".join(marker_names(c.get("top_markers"), 8))} for c in bundle.get("clusters") or []]
     hints = bundle.get("sample_metadata_hint") or []
     hint_html = "<ul>" + "".join(f"<li><code>{esc(h)}</code></li>" for h in hints) + "</ul>" if hints else "<p><em>none</em></p>"
     return [("Tissue", tissue_html), ("Disease candidates", table(cands)), ("Clusters", table(clusters)),

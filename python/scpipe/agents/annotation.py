@@ -25,6 +25,8 @@ from scpipe.agents.context import render_bundle_message, tool
 from scpipe.gates import g3_annotation as G3
 
 
+from scpipe.gates.g2_context import marker_names  # noqa: E402
+
 def lookup_cell_type(label: str, table: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Look a label up in the label table; case-insensitive, with suggestions when absent."""
     if not isinstance(label, str) or not label.strip():
@@ -60,7 +62,7 @@ class AnnotationAgent(Agent):
             return [{"cluster": cid, "status": by_id[cid]["consensus"].get("status"),
                      "consensus": {k: by_id[cid]["consensus"].get(k) for k in ("label_broad", "label_fine", "cl_id", "confidence")},
                      "votes": by_id[cid]["consensus"].get("votes", {}),
-                     "top_markers": list(by_id[cid].get("top_markers") or [])[:10]} for cid in unresolved]
+                     "top_markers": marker_names(by_id[cid].get("top_markers"), 10)} for cid in unresolved]
 
         def get_cluster_evidence(cluster: str) -> dict:
             cid = str(cluster)
