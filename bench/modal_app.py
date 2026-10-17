@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 GPU = os.environ.get("SCFAST_GPU", "L4")
 CPUS = int(os.environ.get("SCFAST_CPUS", "8"))
 MEM_GB = int(os.environ.get("SCFAST_MEM_GB", "48"))
-RAPIDS = "26.2.*"
+RAPIDS = "26.10.*"
+RSC = "0.18.1"  # rapids-singlecell-cu12: prebuilt CUDA kernels, no CMake build
 
 app = modal.App("scfast-bench")
 bench_vol = modal.Volume.from_name("scfast-bench", create_if_missing=True)
@@ -43,15 +44,10 @@ image = (
           "CARGO_HOME": "/cache/cargo", "CARGO_TARGET_DIR": "/cache/target", "PYTHONUNBUFFERED": "1"})
     .pip_install(
         "scanpy", "anndata", "scikit-misc", "leidenalg", "python-igraph", "h5py", "scikit-learn", "matplotlib",
-        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", "cupy-cuda12x[ctk]",
+        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", f"rapids-singlecell-cu12[rapids]=={RSC}",
         f"cudf-cu12=={RAPIDS}", f"cuml-cu12=={RAPIDS}", f"cugraph-cu12=={RAPIDS}", f"cuvs-cu12=={RAPIDS}",
         f"libcugraph-cu12=={RAPIDS}",
         extra_index_url="https://pypi.nvidia.com",
-    )
-    .env({"CC": "gcc", "CXX": "g++", "SKBUILD_CMAKE_DEFINE_CMAKE_CUDA_ARCHITECTURES": "86;89;90"})
-    .run_commands(
-        "pip install rapids-singlecell --no-deps && pip install docrep natsort scikit-image statsmodels tqdm "
-        "'scverse-misc[settings]'",
     )
     .add_local_dir(ROOT, "/work", ignore=["**/.git", "**/target", "**/__pycache__", "bench/results", "data",
                                           "plots", "plots_scanpy", "R", "tests", "docker", "containers"])
