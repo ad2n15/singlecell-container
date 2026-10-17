@@ -1,6 +1,6 @@
 # scpipe exchange format — specification v1.0
 
-_Revision 1.0.2: settles explicit zeros, encodings of scalars and missing values, results-mode `var`, timestamp format, merge into reordered objects, and `|` in gene names. No breaking changes._
+_Revision 1.0.3: validators also check the `created_utc` format and reject non-integer `n_cells`/`n_genes`; readers reject out-of-range categorical codes; R declares UTF-8 strings instead of re-encoding them (safe under a C locale). Revision 1.0.2: settles explicit zeros, encodings of scalars and missing values, results-mode `var`, timestamp format, merge into reordered objects, and `|` in gene names. No breaking changes._
 
 The contract for moving data between **Seurat (R, CPU)** and **AnnData / rapids-singlecell (Python, GPU)** inside one pipeline run. Both the R and Python implementations must follow this document exactly; the cross-language tests in `tests/integration/` enforce it.
 

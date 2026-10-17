@@ -12,6 +12,7 @@ Run everything from the repository root.
 | Python unit tests | `tests/python/` | `python/scpipe/` on its own |
 | Round-trip | `tests/integration/run_roundtrip.sh` | R and Python reading each other's files, end to end |
 | Stages S0–S2 | `tests/integration/run_stages.sh` | `scpipe run` through S2 on the CPU and GPU paths, compared with each other and with the planted truth |
+| Full pipeline | `tests/integration/run_full.sh` | `scpipe run` through S5 with a mock LLM and offline Open Targets: gate files, S3/S4 outputs, `report.html` and `explorer.html` |
 
 ## Requirements
 
@@ -167,6 +168,34 @@ and 800 genes, so the step prints the rate it measured rather than pretending it
 A full run takes a few minutes on a laptop. Like the round-trip, it prints a PASS/FAIL table
 with timings and exits non-zero if any step fails or is skipped.
 
+## Full pipeline (S0–S5)
+
+```bash
+tests/integration/run_full.sh                    # temp workdir, removed if everything passes
+tests/integration/run_full.sh /tmp/full          # keep the run directory and logs
+```
+
+Same fixture and `cpu.yaml` as the stage test, plus `llm.default.provider: mock`,
+`opentargets.offline: true`, every gate `auto`, and no DGE contrasts (both fixture samples are
+controls). It runs S0–S2 and then `scpipe resume --until <stage>` for every later stage in the
+runner's registry: G1, S3, G2, G3, S4, G4, S5. A gate that stops for a human (exit 3) is
+approved with `scpipe approve --by run_full` and the run resumed. A stage that is not registered
+yet is reported as SKIP and does not fail the script.
+
+| Step | What it checks |
+|---|---|
+| T0, T1 | inputs reproducible; `scpipe doctor` with the mock LLM and offline Open Targets |
+| F1–F4 | S0–S2 as in the stage test (state, QC decisions vs truth, S2 object and purity) |
+| G1–G4 | each gate's `bundle.json`, `proposal.json`, `review.json`, `decision.json` (shapes of agents-spec section 2) and `report.html` |
+| S3 | `markers.tsv.gz` columns, `cluster_summary.json`, `signatures.tsv.gz`, `evidence_bundle.json` without per-cell data, `annotation_consensus.tsv` |
+| S4 | `dge_summary.json` (every listed DGE table exists) and `opentargets_summary.json` (offline) |
+| S5 | `S5/umap.tsv.gz` has one row per S2 cell and a `cell_type_broad` column; `report.html` parses (balanced tags), has no external resources and every section; `explorer.html` embeds the JSON for the same cells |
+| R0, R1 | `scpipe status` lists S5; rerunning the same config skips every stage |
+
+Python unit tests for the report (`tests/python/test_report.py`) and portability
+(`tests/python/test_site.py`) run on synthetic run directories and a fake `sbatch`/`bsub` on
+`PATH`; no R, scheduler or network is needed.
+
 ## Where the tests run
 
 There is no hosted CI: we decided not to use GitHub Actions. Run the tests locally before
@@ -179,6 +208,7 @@ Rscript -e 'testthat::test_dir("tests/R")'
 PYTHONPATH=python python -m pytest -q tests/python
 tests/integration/run_roundtrip.sh
 tests/integration/run_stages.sh
+tests/integration/run_full.sh
 ```
 
 ## Benchmarks (development)

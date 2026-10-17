@@ -66,6 +66,7 @@ canvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; 
   function setColours() {
     var v = sel.value; hidden = {}; order = null;
     legend.innerHTML = ''; scale.style.display = 'none';
+    if (!v) { mode = null; key = null; legendTitle.textContent = 'no colour options in this export'; for (var i = 0; i < N; i++) colours[i] = D.na_colour; draw(); return; }
     if (v.indexOf('cat:') === 0) {
       mode = 'cat'; key = v.slice(4); var c = D.cats[key];
       legendTitle.textContent = key + ' (' + c.levels.length + ')';
@@ -134,8 +135,9 @@ canvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; 
   document.getElementById('reset').onclick = function () { fit(); draw(); };
   document.getElementById('png').onclick = function () { var a = document.createElement('a'); a.download = 'umap_' + (key || 'plot') + '.png'; a.href = canvas.toDataURL('image/png'); a.click(); };
   sel.onchange = setColours; sizeIn.oninput = draw;
-  geneIn.addEventListener('change', function () { if (geneIn.value.trim()) { sel.value = 'gene'; } setColours(); });
-  geneIn.addEventListener('keyup', function (e) { if (e.key === 'Enter') { sel.value = 'gene'; setColours(); } });
+  function pickGene() { if (geneNames.length && geneIn.value.trim()) { sel.value = 'gene'; } setColours(); }
+  geneIn.addEventListener('change', pickGene);
+  geneIn.addEventListener('keyup', function (e) { if (e.key === 'Enter') pickGene(); });
   window.addEventListener('resize', resize);
   resize(); setColours();
 })();

@@ -40,10 +40,13 @@ Flow of :func:`run_gate`
    reviewer looks again; a second ``request_changes`` counts as ``escalate``.
 5. Mode from ``gates: {G1: auto|review|escalate}`` (defaults G1 auto, G2
    review, G3 auto, G4 review): ``auto`` + ``approve`` continues
-   (``decided_by: agent``); ``review`` always waits; ``escalate`` waits only
-   when the reviewer escalates or the gate fell back. Waiting means
-   ``report.html`` plus ``pending.json`` and **no** ``decision.json``; the
-   stage exits 3 and the runner prints the ``scpipe approve`` command.
+   (``decided_by: agent``), anything else waits; ``review`` runs the agents
+   and always waits (the human sees their advice); ``escalate`` goes straight
+   to the human with the rules baseline and never calls a model (spec step 5
+   says only "auto + approve continues", so this is how the third mode
+   differs from ``review``). Waiting means ``report.html`` plus
+   ``pending.json`` and **no** ``decision.json``; the stage exits 3 and the
+   runner prints the ``scpipe approve`` command.
 6. :func:`approve` (``scpipe approve --run-dir D --stage G1 [--from-file F]
    [--by NAME]``) validates the (edited) decision content against the policy
    and writes ``decision.json`` with ``decided_by: human:<name>`` and
@@ -69,7 +72,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..config import ConfigError, canonical_json, load_resolved
+from ..config import ConfigError, canonical_json, llm_settings, load_resolved
 from ..llm import AgentLog, BudgetExceeded, Ledger, ProviderError, get_provider, sha256_text
 
 __all__ = ["GATE_MODULES", "DEFAULT_MODES", "MODES", "GateError", "GateResult", "ModuleGate", "load_gate",
@@ -299,17 +302,20 @@ def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResu
             return GateResult(gate_id, mode, "continue", prev, proposal, review, files, notes)
 
     # 2-4. Rules, worker, reviewer.
-    llm = cfg.get("llm")
+    llm = llm_settings(cfg)
     proposal: dict[str, Any]
     review: dict[str, Any]
     fallback = False
     ledger_status: dict[str, Any] | None = None
-    if not llm:
-        proposal = _fallback_proposal(gate_id, g.worker_role, base, "llm not configured")
-        review = _rules_review("approve", "rules baseline used: no llm section in the config")
+    if not llm or mode == "escalate":
+        why = "llm not configured" if not llm else "gate mode escalate: straight to a human, agents not consulted"
+        proposal = _fallback_proposal(gate_id, g.worker_role, base, why)
+        review = _rules_review("approve" if not llm else "escalate", f"rules baseline used: {why}")
         decided_by = "rules"
-        wait = mode == "review"
-        notes.append("LLM agents disabled (no llm section): rules-only decision")
+        wait = mode != "auto"
+        notes.append("LLM agents disabled (no llm section): rules-only decision" if not llm else why)
+        if llm:
+            ledger_status = _ledger_status(run_dir, cfg)
     else:
         ledger = Ledger(run_dir / "llm" / "ledger.json", run_id=str(cfg.get("run_id") or "run"),
                         budget=llm.get("budget") or {}, total_path=(llm.get("budget") or {}).get("ledger_path") or llm.get("ledger_path"))
@@ -437,7 +443,7 @@ def _recheck(g, proposal: dict[str, Any], bundle: Mapping[str, Any]) -> dict[str
 
 
 def _ledger_status(run_dir: Path, cfg: Mapping[str, Any]) -> dict[str, Any] | None:
-    llm = cfg.get("llm")
+    llm = llm_settings(cfg)
     if not llm:
         return None
     ledger = Ledger(run_dir / "llm" / "ledger.json", run_id=str(cfg.get("run_id") or "run"),

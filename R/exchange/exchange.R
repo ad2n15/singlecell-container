@@ -87,8 +87,20 @@ suppressPackageStartupMessages({
 
 .scx_sha256_raw <- function(r) digest::digest(r, algo = "sha256", serialize = FALSE)
 
+# Declare or convert strings to UTF-8 without mangling. enc2utf8() on strings marked
+# "unknown" in a non-UTF-8 locale (e.g. LC_CTYPE=C under a bare Rscript) escapes
+# bytes > 127 as literal "<c3><ab>" text; bytes that are already valid UTF-8 only
+# need their encoding declared.
+.scx_utf8 <- function(x) {
+  x <- as.character(x)
+  ok <- !is.na(x) & validUTF8(x)
+  if (any(ok)) Encoding(x[ok]) <- "UTF-8"
+  if (any(!ok & !is.na(x))) x[!ok & !is.na(x)] <- enc2utf8(x[!ok & !is.na(x)])
+  x
+}
+
 .scx_names_sha256 <- function(x) {
-  s <- enc2utf8(paste(as.character(x), collapse = "\n"))
+  s <- .scx_utf8(paste(as.character(x), collapse = "\n"))
   .scx_sha256_raw(charToRaw(s))
 }
 
@@ -146,13 +158,13 @@ sc_counts_checksum <- function(m) {
 }
 
 .scx_attr_str <- function(node, name, value) {
-  node$create_attr(name, enc2utf8(as.character(value)), dtype = .scx_str_type(),
+  node$create_attr(name, .scx_utf8(value), dtype = .scx_str_type(),
                    space = H5S$new("scalar"))
   invisible(NULL)
 }
 
 .scx_attr_str_vec <- function(node, name, values) {
-  values <- enc2utf8(as.character(values))
+  values <- .scx_utf8(values)
   if (length(values) == 0) {
     node$create_attr(name, dtype = .scx_str_type(), space = H5S$new(dims = 0, maxdims = 0))
   } else {
@@ -194,7 +206,7 @@ sc_counts_checksum <- function(m) {
 }
 
 .scx_write_string_array <- function(parent, name, x) {
-  x <- enc2utf8(as.character(x))
+  x <- .scx_utf8(x)
   d <- .scx_dataset(parent, name, x, .scx_str_type())
   .scx_enc(d, "string-array", "0.2.0")
   invisible(d)
@@ -318,7 +330,7 @@ sc_counts_checksum <- function(m) {
   if (is.factor(x)) x <- as.character(x)
   if (is.character(x)) {
     if (length(x) == 1 && is.null(dim(x))) {
-      d <- parent$create_dataset(name, enc2utf8(x), dtype = .scx_str_type(),
+      d <- parent$create_dataset(name, .scx_utf8(x), dtype = .scx_str_type(),
                                  space = H5S$new("scalar"), chunk_dims = NULL)
       return(invisible(.scx_enc(d, "string", "0.2.0")))
     }
@@ -637,6 +649,8 @@ write_exchange <- function(obj, path, mode = c("full", "slim"), run_id = "none",
       codes <- as.integer(.scx_read_dataset(node[["codes"]]))
       cats <- as.character(.scx_read_elem(node[["categories"]]))
       ord <- isTRUE(as.logical(.scx_attr(node, "ordered", FALSE)))
+      if (any(codes < -1L | codes >= length(cats), na.rm = TRUE))
+        stop("categorical codes must be between -1 and length(categories) - 1")
       codes[codes < 0] <- NA
       factor(cats[codes + 1L], levels = cats, ordered = ord)
     },
@@ -901,6 +915,8 @@ validate_exchange <- function(path) {
   mode <- ex$mode
   mode_ok <- is.character(mode) && length(mode) == 1 && mode %in% .SCX_MODES
   if (!mode_ok) add("uns['exchange']['mode'] is '", paste(mode, collapse = ","), "', expected one of full/slim/results")
+  if (!is.null(ex$created_utc) && !grepl("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$", ex$created_utc[1]))
+    add("uns['exchange']['created_utc'] must be YYYY-MM-DDTHH:MM:SSZ")
   required <- c(.SCX_COMMON_KEYS, if (mode_ok) .SCX_MODE_KEYS[[mode]])
   miss <- setdiff(required, names(ex))
   if (length(miss)) add("uns['exchange'] missing required keys: ", paste(miss, collapse = ", "))
@@ -924,7 +940,9 @@ validate_exchange <- function(path) {
   for (k in c("n_cells", "n_genes")) {
     if (is.null(ex[[k]])) next
     v <- ex[[k]]; actual <- if (k == "n_cells") n else g
-    if (!is.numeric(v) || length(v) != 1 || is.na(v) || v != round(v) || is.logical(v))
+    if (!is.integer(v) && !(is.numeric(v) && inherits(v, "integer64")))
+      add("uns['exchange']['", k, "'] must be an integer")
+    else if (length(v) != 1 || is.na(v))
       add("uns['exchange']['", k, "'] must be an integer")
     else if (v != actual) add("uns['exchange']['", k, "'] = ", v, " but file has ", actual)
   }

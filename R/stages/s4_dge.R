@@ -436,7 +436,7 @@ run_s4 <- function(cfg, repo) {
       n_num <- sum(ug$condition == ct$numerator); n_den <- sum(ug$condition == ct$denominator)
       cells <- list(numerator = sum(ug$n_cells[ug$condition == ct$numerator]), denominator = sum(ug$n_cells[ug$condition == ct$denominator]))
       entry <- list(group = g, file = NULL, n_samples = list(numerator = n_num, denominator = n_den), n_cells = cells,
-                    covariates_used = ct$covariates, method_used = NULL, n_tested = 0L, n_up = 0L, n_down = 0L,
+                    covariates_used = as.list(ct$covariates), method_used = NULL, n_tested = 0L, n_up = 0L, n_down = 0L,
                     skipped_reason = NULL, notes = list(), top_up = list(), top_down = list())
       if (n_num < d$min_replicates || n_den < d$min_replicates) {
         entry$skipped_reason <- sprintf("%d %s and %d %s pseudobulk sample(s) with >= %d cells; min_replicates is %d per side",
@@ -448,7 +448,7 @@ run_s4 <- function(cfg, repo) {
       colnames(coldata)[2] <- d$condition_col
       r <- s4_dge_group(pb$counts[, ug$pb_id, drop = FALSE], coldata, d$condition_col, ct$numerator, ct$denominator,
                         ct$covariates, d$method, d$padj, d$lfc, d$min_replicates)
-      entry$notes <- as.list(r$notes); entry$covariates_used <- r$covariates_used; entry$n_tested <- as.integer(r$n_tested)
+      entry$notes <- as.list(r$notes); entry$covariates_used <- as.list(r$covariates_used); entry$n_tested <- as.integer(r$n_tested)
       if (is.null(r$table)) {
         entry$skipped_reason <- r$skipped_reason
         scp_log("  group ", g, ": skipped (", r$skipped_reason, ")")

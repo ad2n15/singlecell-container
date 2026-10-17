@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.metadata
+import re
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -179,6 +180,13 @@ def _normalise_frame(df: pd.DataFrame, what: str) -> pd.DataFrame:
             continue
         if pd.api.types.is_bool_dtype(s.dtype) and not s.isna().any():
             df[col] = s.astype(bool)
+        elif str(s.dtype) in ("boolean", "Int8", "Int16", "Int32", "Int64") and s.isna().any():
+            warnings.warn(
+                f"{what} column {col!r} has missing values; writing it as nullable "
+                f"({'boolean' if str(s.dtype) == 'boolean' else 'integer'})",
+                UserWarning,
+                stacklevel=3,
+            )
         elif pd.api.types.is_string_dtype(s.dtype) or s.dtype == object:
             if s.isna().any():
                 warnings.warn(
@@ -391,6 +399,10 @@ def _validate(adata: ad.AnnData, f: h5py.File | None) -> list[str]:
         problems.append(f"uns['exchange']['writer'] is {ex.get('writer')!r}, expected 'R' or 'python'")
     if "packages" in ex and not isinstance(ex["packages"], dict):
         problems.append("uns['exchange']['packages'] must be a mapping")
+    if "created_utc" in ex and not re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", str(ex["created_utc"])
+    ):
+        problems.append("uns['exchange']['created_utc'] must be YYYY-MM-DDTHH:MM:SSZ")
 
     for k, actual in (("n_cells", adata.n_obs), ("n_genes", adata.n_vars)):
         if k in ex:

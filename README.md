@@ -145,6 +145,14 @@ The example config keeps to 8 threads, 64 GB of RAM and 20 GB of GPU memory, and
 before running on a login node such as Iridis X, and confirm with your HPC team that it is
 allowed. Use `--detach` so the run survives a dropped SSH session, and put `run_dir` on scratch.
 
+### Report, gates, other sites
+
+After S5 the run directory holds `S5/report.html` (one self-contained page: QC, clusters and
+annotation, markers, DGE, Open Targets evidence, gate decisions, LLM cost) and
+`S5/explorer.html` (interactive UMAP). Gates, LLM settings, the `execution` modes (`direct`,
+`slurm`/`pbs`/`lsf`/`sge`, `split`), site files (`conf/sites/`, drafted by `scpipe init-site`)
+and the container recipes are described in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
+
 ### Tests
 
 See [`tests/README.md`](tests/README.md). There is no hosted CI; the tests run locally or on the HPC.

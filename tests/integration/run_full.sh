@@ -118,9 +118,10 @@ show_logs() {
   [[ -f "$RUN/state.json" ]] && { echo "----- state.json"; cat "$RUN/state.json"; }
 }
 
-first_run() {   # S0-S2
+first_run() {   # S0-S2 (G1 sits before S2: a gate that stops for a human is approved and the run resumed)
   scpipe run --config "$CONF/full.yaml" --run-dir "$RUN" --until S2
   local rc=$?
+  [[ $rc -eq 3 ]] && { resume_until S2; return $?; }
   [[ $rc -eq 0 ]] || { echo "scpipe run exited $rc"; show_logs; }
   return $rc
 }
