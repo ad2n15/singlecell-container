@@ -1,5 +1,7 @@
 # scpipe exchange format — specification v1.0
 
+_Revision 1.0.1: settles explicit zeros, encodings of scalars and missing strings, results-mode `var`, and timestamp format. No breaking changes._
+
 The contract for moving data between **Seurat (R, CPU)** and **AnnData / rapids-singlecell (Python, GPU)** inside one pipeline run. Both the R and Python implementations must follow this document exactly; the cross-language tests in `tests/integration/` enforce it.
 
 ## 1. File format
@@ -13,6 +15,10 @@ The contract for moving data between **Seurat (R, CPU)** and **AnnData / rapids-
   - String array: `encoding-type="string-array"`, `encoding-version="0.2.0"`, variable-length UTF-8.
   - Mapping (`uns` and nested dicts): `encoding-type="dict"`, `encoding-version="0.1.0"`.
   - Root group: `encoding-type="anndata"`, `encoding-version="0.1.0"`.
+  - Scalars in `uns`: integers as `encoding-type="numeric-scalar"` (int64), strings as `encoding-type="string"`.
+  - `_index` and string columns use `string-array`, never `nullable-string-array`.
+  - Categorical `codes` use the smallest integer type that fits (int8 where possible); readers must accept any integer width.
+  - **String columns with missing values** have no non-nullable encoding, so writers store them as categoricals with code −1 for missing, and emit a warning.
 - **Orientation:** AnnData is cells × genes. Seurat is genes × cells, so matrices are transposed on write and read.
 - **Sparse matrices** are stored as CSR (cells × genes). The R side writes a Seurat genes × cells `dgCMatrix` (CSC) directly as cells × genes CSR without densifying: the CSC arrays of a genes × cells matrix are exactly the CSR arrays of its transpose.
 - **Integer counts** are stored as `int32` when all values fit, otherwise `int64`. Normalised data is `float32`.
@@ -23,7 +29,12 @@ The contract for moving data between **Seurat (R, CPU)** and **AnnData / rapids-
 |---|---|---|---|
 | `full` | log-normalised data, all genes | raw counts, all genes | Moving a whole stage between CPU and GPU |
 | `slim` | log-normalised data, **highly variable genes only** | omitted | Sending only what a GPU step needs (scale, PCA, Harmony, neighbours, Leiden, UMAP) |
-| `results` | empty (shape cells × 0) | omitted | What the GPU side sends back: embeddings, graphs, cluster labels |
+| `results` | empty float32 CSR (shape cells × 0) | omitted | What the GPU side sends back: embeddings, graphs, cluster labels |
+
+Mode details:
+
+- **slim** keeps `var["highly_variable"]` (all true) and never includes `varm["PCs"]`, because the gene set differs from the source object.
+- **results** has an empty `var` (0 genes). `obs` carries all columns of the slim file plus the cluster column.
 
 ## 3. Slot mapping
 
@@ -52,7 +63,7 @@ Every exchange file carries this mapping. Readers must reject files whose `schem
 | `run_id` | string | Pipeline run identifier |
 | `stage` | string | Stage that wrote the file, e.g. `S2_gpu_core` |
 | `writer` | string | `"R"` or `"python"` |
-| `created_utc` | string | ISO 8601 timestamp |
+| `created_utc` | string | UTC timestamp, exactly `YYYY-MM-DDTHH:MM:SSZ` |
 | `config_hash` | string | SHA-256 of the run config, or `"none"` |
 | `n_cells`, `n_genes` | int | Shape of the file |
 | `cells_sha256` | string | SHA-256 of the cell barcodes joined with `\n` in file order |
@@ -72,7 +83,7 @@ Seurat replaces `_` with `-` in feature names. To round-trip exactly:
 
 ## 6. Counts checksum
 
-A deterministic, language-independent fingerprint of a counts matrix, computed on the **cells × genes CSR** form after sorting column indices within each row:
+A deterministic, language-independent fingerprint of a counts matrix, computed on the **canonical cells × genes CSR** form: duplicate entries summed, column indices sorted within each row, and **explicit zeros removed**. In R, `Matrix::drop0()` on the genes × cells `dgCMatrix` gives exactly these arrays as `@p`, `@i` and `@x`.
 
 ```
 SHA-256 over, in order:
@@ -82,7 +93,7 @@ SHA-256 over, in order:
   data    as little-endian float64
 ```
 
-R and Python must produce the same hex string for the same matrix. A shared fixture in `tests/fixtures/` pins expected values.
+The shape is written as `(n_cells, n_genes)`. Name hashes (`cells_sha256`, `genes_sha256`) use UTF-8 with names joined by `\n` and no trailing newline. R and Python must produce the same hex string for the same matrix. A shared fixture in `tests/fixtures/` pins expected values.
 
 ## 7. Merge-back rules (results → Seurat)
 

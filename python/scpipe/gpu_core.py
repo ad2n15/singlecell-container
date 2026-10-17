@@ -1,0 +1,290 @@
+"""GPU core step: scale -> PCA -> (Harmony) -> neighbours -> Leiden -> UMAP.
+
+Reads a ``slim`` exchange file and writes a ``results`` exchange file
+(docs/exchange-spec.md). Runs on the GPU with rapids-singlecell when it is
+installed and a CUDA device is visible; otherwise on CPU with scanpy. Both
+branches perform the same steps with the same parameters.
+
+CLI::
+
+    python -m scpipe.gpu_core --in slim.h5ad --out results.h5ad \
+        [--n-pcs 30 --n-neighbors 15 --resolution 0.5 --batch-key batch \
+         --seed 0 --device auto --max-value 10 --run-id RUN]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import resource
+import sys
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from .exchange import ExchangeError, read_exchange, write_exchange
+
+__all__ = ["run", "gpu_available", "main"]
+
+STAGE = "S2_gpu_core"
+CLUSTER_KEY = "leiden"
+
+
+class DeviceError(RuntimeError):
+    """The requested device is not available."""
+
+
+def gpu_available() -> tuple[bool, str]:
+    """Return (available, reason). Available = rapids_singlecell imports and a CUDA device exists."""
+    try:
+        import rapids_singlecell  # noqa: F401
+        import cupy as cp
+    except Exception as e:  # ImportError, or CUDA library load failures
+        return False, f"rapids_singlecell/cupy not importable ({type(e).__name__}: {e})"
+    try:
+        n = cp.cuda.runtime.getDeviceCount()
+    except Exception as e:
+        return False, f"no usable CUDA device ({type(e).__name__}: {e})"
+    if n < 1:
+        return False, "no CUDA device found"
+    return True, f"{n} CUDA device(s)"
+
+
+def _resolve_device(device: str) -> str:
+    if device not in ("auto", "gpu", "cpu"):
+        raise ValueError(f"device must be 'auto', 'gpu' or 'cpu', got {device!r}")
+    if device == "cpu":
+        return "cpu"
+    ok, reason = gpu_available()
+    if device == "gpu" and not ok:
+        raise DeviceError(f"device='gpu' requested but the GPU path is unavailable: {reason}")
+    return "gpu" if ok else "cpu"
+
+
+def _check_harmony_cpu() -> None:
+    try:
+        import harmonypy  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(
+            "batch_key was given but harmonypy is not installed; "
+            "install it (pip install harmonypy) or omit batch_key"
+        ) from e
+
+
+def _harmony_cpu(adata, batch_key: str, seed: int) -> np.ndarray:
+    """Harmony on X_pca via harmonypy directly.
+
+    scanpy.external.pp.harmony_integrate (scanpy 1.12) transposes ``Z_corr``,
+    which harmonypy >= 2 already returns as cells x dims; calling harmonypy
+    here and fixing the orientation by shape works with both generations.
+    """
+    import logging
+
+    import harmonypy
+
+    logging.getLogger("harmonypy").setLevel(logging.WARNING)
+    pcs = np.asarray(adata.obsm["X_pca"], dtype=np.float64)
+    ho = harmonypy.run_harmony(pcs, adata.obs[[batch_key]], batch_key, random_state=seed, verbose=False)
+    z = np.asarray(ho.Z_corr)
+    if z.shape != pcs.shape:
+        z = z.T
+    return z.astype(np.float32)
+
+
+def _peak_rss_bytes() -> int:
+    # ru_maxrss is KiB on Linux, bytes on macOS.
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return int(r if sys.platform == "darwin" else r * 1024)
+
+
+def run(
+    slim_path: str | Path,
+    results_path: str | Path,
+    *,
+    n_pcs: int = 30,
+    n_neighbors: int = 15,
+    resolution: float = 0.5,
+    batch_key: str | None = None,
+    seed: int = 0,
+    device: str = "auto",
+    max_value: float | None = 10.0,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Run the core embedding/clustering steps on a slim exchange file.
+
+    Returns a summary dict: device, n_cells, n_genes, n_pcs (used), n_clusters,
+    timings_s (per step), peak_host_rss_bytes and, on GPU, peak_gpu_pool_bytes.
+    """
+    used = _resolve_device(device)
+    timings: dict[str, float] = {}
+
+    @contextmanager
+    def timed(name: str):
+        t0 = time.perf_counter()
+        yield
+        timings[name] = round(time.perf_counter() - t0, 4)
+
+    with timed("read"):
+        adata = read_exchange(slim_path)
+    ex = dict(adata.uns["exchange"])
+    if ex.get("mode") != "slim":
+        raise ExchangeError(f"gpu_core.run expects a slim exchange file, got mode {ex.get('mode')!r}")
+    source_checksum = ex["source_counts_checksum"]
+    if run_id is None:
+        run_id = ex.get("run_id", "none")
+    config_hash = ex.get("config_hash", "none")
+
+    if batch_key is not None:
+        if batch_key not in adata.obs.columns:
+            raise ValueError(f"batch_key {batch_key!r} is not an obs column")
+        if used == "cpu":
+            _check_harmony_cpu()
+
+    n_comps = int(min(n_pcs, min(adata.n_vars, adata.n_obs) - 1))
+    if n_comps < 2:
+        raise ValueError(f"too few genes/cells for PCA: {adata.n_obs} cells x {adata.n_vars} genes")
+    rep = "X_harmony" if batch_key is not None else "X_pca"
+    # Scaling with zero-centering densifies anyway (DESIGN 5.1: ~8 KB/cell at
+    # 2,000 HVGs); do it explicitly so both branches start from dense float32.
+    if hasattr(adata.X, "toarray"):
+        adata.X = adata.X.toarray()
+    adata.X = np.asarray(adata.X, dtype=np.float32)
+    gpu_pool_peak = None
+
+    if used == "gpu":
+        import cupy as cp
+        import rapids_singlecell as rsc
+
+        pool = cp.get_default_memory_pool()
+        with timed("to_gpu"):
+            rsc.get.anndata_to_GPU(adata)
+        with timed("scale"):
+            rsc.pp.scale(adata, max_value=max_value)
+        with timed("pca"):
+            rsc.pp.pca(adata, n_comps=n_comps, random_state=seed)
+        if batch_key is not None:
+            with timed("harmony"):
+                rsc.pp.harmony_integrate(adata, key=batch_key, basis="X_pca", adjusted_basis="X_harmony")
+        with timed("neighbors"):
+            rsc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=rep, random_state=seed)
+        with timed("leiden"):
+            rsc.tl.leiden(
+                adata, resolution=resolution, random_state=seed, n_iterations=2, key_added=CLUSTER_KEY
+            )
+        with timed("umap"):
+            rsc.tl.umap(adata, random_state=seed)
+        gpu_pool_peak = int(pool.total_bytes())
+        with timed("to_cpu"):
+            rsc.get.anndata_to_CPU(adata, convert_all=True)
+    else:
+        import scanpy as sc
+
+        with timed("scale"):
+            sc.pp.scale(adata, max_value=max_value)
+        with timed("pca"):
+            sc.pp.pca(adata, n_comps=n_comps, random_state=seed, mask_var=None)
+        if batch_key is not None:
+            with timed("harmony"):
+                adata.obsm["X_harmony"] = _harmony_cpu(adata, batch_key, seed)
+        with timed("neighbors"):
+            sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=rep, random_state=seed)
+        with timed("leiden"):
+            sc.tl.leiden(
+                adata,
+                resolution=resolution,
+                random_state=seed,
+                flavor="igraph",
+                n_iterations=2,
+                directed=False,
+                key_added=CLUSTER_KEY,
+            )
+        with timed("umap"):
+            sc.tl.umap(adata, random_state=seed)
+
+    with timed("write"):
+        import anndata as ad
+
+        keep_obsm = {k: np.asarray(adata.obsm[k], dtype=np.float32) for k in ("X_pca", "X_harmony", "X_umap") if k in adata.obsm}
+        res = ad.AnnData(
+            obs=adata.obs.copy(),
+            obsm=keep_obsm,
+            obsp={k: adata.obsp[k] for k in ("connectivities", "distances")},
+        )
+        res.obs[CLUSTER_KEY] = res.obs[CLUSTER_KEY].astype("category")
+        res.uns["gpu_core"] = {
+            "device": used,
+            "n_pcs": n_comps,
+            "n_neighbors": int(n_neighbors),
+            "resolution": float(resolution),
+            "batch_key": batch_key or "",
+            "seed": int(seed),
+            "max_value": float(max_value) if max_value is not None else -1.0,
+            "use_rep": rep,
+        }
+        write_exchange(
+            res,
+            results_path,
+            "results",
+            run_id=str(run_id),
+            stage=STAGE,
+            config_hash=str(config_hash),
+            source_counts_checksum=source_checksum,
+            cluster_key=CLUSTER_KEY,
+        )
+
+    summary: dict[str, Any] = {
+        "device": used,
+        "n_cells": int(res.n_obs),
+        "n_genes": int(adata.n_vars),
+        "n_pcs": n_comps,
+        "n_clusters": int(res.obs[CLUSTER_KEY].nunique()),
+        "harmony": batch_key is not None,
+        "timings_s": timings,
+        "total_s": round(sum(timings.values()), 4),
+        "peak_host_rss_bytes": _peak_rss_bytes(),
+        "results_path": str(results_path),
+        "source_counts_checksum": source_checksum,
+    }
+    if gpu_pool_peak is not None:
+        summary["peak_gpu_pool_bytes"] = gpu_pool_peak
+    return summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="python -m scpipe.gpu_core", description=__doc__.split("\n")[0])
+    p.add_argument("--in", dest="slim_path", required=True, help="slim exchange .h5ad")
+    p.add_argument("--out", dest="results_path", required=True, help="results exchange .h5ad to write")
+    p.add_argument("--n-pcs", type=int, default=30)
+    p.add_argument("--n-neighbors", type=int, default=15)
+    p.add_argument("--resolution", type=float, default=0.5)
+    p.add_argument("--batch-key", default=None)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto")
+    p.add_argument("--max-value", type=float, default=10.0)
+    p.add_argument("--run-id", default=None)
+    a = p.parse_args(argv)
+    try:
+        summary = run(
+            a.slim_path,
+            a.results_path,
+            n_pcs=a.n_pcs,
+            n_neighbors=a.n_neighbors,
+            resolution=a.resolution,
+            batch_key=a.batch_key,
+            seed=a.seed,
+            device=a.device,
+            max_value=a.max_value,
+            run_id=a.run_id,
+        )
+    except (DeviceError, ExchangeError, ValueError, RuntimeError) as e:
+        print(json.dumps({"error": type(e).__name__, "message": str(e)}), file=sys.stderr)
+        return 2
+    print(json.dumps(summary, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
