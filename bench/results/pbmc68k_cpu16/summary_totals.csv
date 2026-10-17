@@ -1,3 +1,4 @@
 engine,cells,compute_s,transfer_s,read_s,total_s,peak_rss_gb,peak_gpu_gb,complete,speedup,mem_ratio
 seurat,68260,121.36599999999999,0.0,4.638,126.004,,,True,1.0,
 scanpy,68260,57.180882,0.0,2.002023,59.182905,6.407,,True,2.1224926191239932,
+scfast-cpu,68260,5.764215999999999,0.0,0.112217,5.876433,1.1156,,True,21.055074965962415,

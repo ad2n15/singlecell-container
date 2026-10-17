@@ -1,8 +1,9 @@
-"""Real datasets and CPU baselines (Seurat, Scanpy) on Modal, for comparison with scfast.
+"""Real datasets and CPU runs (Seurat, Scanpy, scfast-cpu) on Modal, on identical machines.
 
     uvx modal run bench/modal_baselines.py::download                  # raw data -> volume scfast-data
     uvx modal run bench/modal_baselines.py::prepare --dataset pbmc68k  # QC + nested subsamples
     uvx modal run bench/modal_baselines.py::baselines --dataset brain --sizes 100000 --engines seurat,scanpy
+    uvx modal run bench/modal_baselines.py::baselines --dataset brain --sizes 100000 --engines scfast-cpu
     uvx modal run bench/modal_baselines.py::pull --dataset brain --name brain_cpu16
 
 Volume `scfast-data` layout:
@@ -70,8 +71,14 @@ bench_image = (
     .apt_install("r-cran-seurat", "r-cran-hdf5r", "r-cran-leidenbase", "r-cran-uwot", "r-cran-jsonlite",
                  "libopenblas0-pthread")
     .run_commands("Rscript -e 'stopifnot(packageVersion(\"Seurat\") >= \"5.1.0\"); sessionInfo()'")
-    .pip_install("scanpy", "anndata", "scikit-misc", "leidenalg", "igraph", "h5py", "scikit-learn", "matplotlib")
-    .env({"PYTHONUNBUFFERED": "1"})
+    .pip_install("scanpy", "anndata", "scikit-misc", "leidenalg", "igraph", "h5py", "scikit-learn", "matplotlib",
+                 "maturin>=1.9.4,<2")
+    .apt_install("build-essential", "curl")
+    .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable")
+    .env({"PYTHONUNBUFFERED": "1", "PATH": "/root/.cargo/bin:$PATH", "RUSTFLAGS": "-C target-cpu=x86-64-v3"})
+    .add_local_dir(ROOT / "rust", "/work/rust", copy=True, ignore=["**/target"])
+    .run_commands("cd /work && maturin build --release -m rust/scfast-py/Cargo.toml -o /tmp/wheels "
+                  "&& pip install /tmp/wheels/*.whl && python -c 'import scfast; print(scfast.__version__)'")
     .add_local_dir(ROOT / "bench", "/work/bench", **BENCH)
 )
 

@@ -12,6 +12,7 @@ Compute = normalise → UMAP (median of measured repeats, summed). Read and CPU�
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 68,260 | seurat | 121.37 | 4.64 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 68,260 | scanpy | 57.18 | 2.00 | 0.00 | 6.41 | – | 2.12× | –× | 1.000 | 0.974 | 0.559 | fails parity |
+| 68,260 | scfast-cpu | 5.76 | 0.11 | 0.00 | 1.12 | – | 21.06× | –× | 1.000 | 0.994 | 0.840 | fails parity |
 
 Parity thresholds: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9. Adoption: parity passes and, at ≥ 100,000 cells, ≥ 1.5× faster or ≥ 2.0× less peak memory. Scanpy and rapids run their own pipelines (different HVG, graph and Leiden implementations), so their parity is informative only; the rule is meant for scfast.
 
@@ -20,6 +21,7 @@ Parity thresholds: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9. Ado
 | Cells | Engine | ARI vs truth | Reference ARI vs truth |
 |---:|---|---:|---:|
 | 68,260 | scanpy | 0.258 | 0.283 |
+| 68,260 | scfast-cpu | 0.274 | 0.283 |
 
 ## Per step
 
@@ -43,10 +45,19 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 68,260 | scanpy | neighbors | 5.392 | 5.140–5.428 | 3 | 6.41 | process |
 | 68,260 | scanpy | cluster | 2.949 | 2.820–3.621 | 3 | 6.41 | process |
 | 68,260 | scanpy | umap | 34.455 | 34.336–34.984 | 3 | 6.41 | process |
+| 68,260 | scfast-cpu | read | 0.112 | 0.102–0.135 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | normalize | 0.140 | 0.131–0.152 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | scale | 0.002 | 0.002–0.002 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | pca | 0.700 | 0.668–0.716 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | neighbors | 0.338 | 0.337–0.361 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | cluster | 1.014 | 0.962–1.036 | 3 | 1.12 | process |
+| 68,260 | scfast-cpu | umap | 3.570 | 3.125–3.730 | 3 | 1.12 | process |
 
 ## Start-up (cold)
 
 | Engine | Cells | Start-up s |
 |---|---:|---:|
+| scfast-cpu | 68,260 | 0.00 |
 | seurat | 68,260 | 5.65 |
 | scanpy | 68,260 | 5.38 |
