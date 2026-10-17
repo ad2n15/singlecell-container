@@ -111,7 +111,8 @@ class OpenAICompatibleProvider(Provider):
                     except ValueError as e:
                         raise ProviderError(f"openai_compatible: response is not JSON: {e}") from e
                 try:
-                    detail = (r.json().get("error") or {}).get("message", "")
+                    j = r.json()
+                    detail = str((j.get("error") or {}).get("message", "")) if isinstance(j, dict) else str(j)[:200]
                 except ValueError:
                     detail = r.text[:200]
                 last = f"HTTP {r.status_code}: {detail}"
