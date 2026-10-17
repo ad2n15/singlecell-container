@@ -63,7 +63,8 @@ def main(argv=None) -> int:
     counts, barcodes, ids, names = read_counts(a.input)
     n0, g0 = counts.shape
     # Seurat CreateSeuratObject(min.cells, min.features)
-    genes_keep = np.flatnonzero(np.diff((counts > 0).tocsc().indptr) >= a.min_cells)
+    counts.eliminate_zeros()  # stored entries are then exactly the detected genes, without a bool copy
+    genes_keep = np.flatnonzero(counts.getnnz(axis=0) >= a.min_cells)
     counts = counts[:, genes_keep]
     ids = [ids[i] for i in genes_keep]
     names = make_unique([names[i] for i in genes_keep])
@@ -73,6 +74,9 @@ def main(argv=None) -> int:
     mt_counts = np.asarray(counts[:, np.flatnonzero(mt)].sum(axis=1)).ravel() if mt.any() else np.zeros(len(total))
     pct_mt = np.divide(100 * mt_counts, total, out=np.zeros_like(total, dtype=float), where=total > 0)
     # seurat_pbmc3k.R: min.features = 200 at creation, then subset nFeature > 200 & < 2500 & mt < 5
+    q = [0.5, 0.9, 0.99]
+    print(f"genes per cell p50/p90/p99: {np.quantile(n_genes, q).round().tolist()}; "
+          f"% mitochondrial p50/p90/p99: {np.quantile(pct_mt, q).round(2).tolist()}")
     keep = (n_genes > a.min_genes) & (n_genes < a.max_genes) & (pct_mt < a.max_mt)
     cells = np.flatnonzero(keep)
     print(f"QC: {n0} -> {len(cells)} cells; {g0} -> {len(ids)} genes ({int(mt.sum())} mitochondrial)")
