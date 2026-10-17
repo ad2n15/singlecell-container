@@ -1,6 +1,6 @@
 # scpipe exchange format — specification v1.0
 
-_Revision 1.0.1: settles explicit zeros, encodings of scalars and missing strings, results-mode `var`, and timestamp format. No breaking changes._
+_Revision 1.0.2: settles explicit zeros, encodings of scalars and missing values, results-mode `var`, timestamp format, merge into reordered objects, and `|` in gene names. No breaking changes._
 
 The contract for moving data between **Seurat (R, CPU)** and **AnnData / rapids-singlecell (Python, GPU)** inside one pipeline run. Both the R and Python implementations must follow this document exactly; the cross-language tests in `tests/integration/` enforce it.
 
@@ -45,7 +45,7 @@ Mode details:
 | `counts` layer | `layers["counts"]` | `full` mode only |
 | `data` layer | `X` | `full` and `slim` |
 | `scale.data` | — | Never transferred; recomputed on the receiving side |
-| `meta.data` columns | `obs` columns | factor → categorical (levels and order kept); character → string array; logical → bool; integer → int32/int64; numeric → float64 |
+| `meta.data` columns | `obs` columns | factor → categorical (levels and order kept); character → string array; logical → bool; integer → int32 (R integers are 32-bit; Python may write int64); numeric → float64. Integer or logical columns with NA → `nullable-integer` / `nullable-boolean`, with a warning |
 | `VariableFeatures()` | `var["highly_variable"]` (bool) | |
 | reductions `pca`, `harmony`, `umap` | `obsm["X_pca"]`, `obsm["X_harmony"]`, `obsm["X_umap"]` | dense float32, cells × dims; other reductions as `obsm["X_<name>"]` |
 | PCA feature loadings | `varm["PCs"]` | `full` mode only; genes × dims |
@@ -71,11 +71,12 @@ Every exchange file carries this mapping. Readers must reject files whose `schem
 | `counts_checksum` | string | `full` mode only: see section 6 |
 | `source_counts_checksum` | string | `slim`/`results` modes: the counts checksum of the object they came from |
 | `cluster_key` | string | `results` mode: name of the cluster column in `obs` |
-| `packages` | mapping string → string | Versions of the writer's key packages |
+| `packages` | mapping string → string | Versions of the writer's key packages; a missing optional package is recorded as `not-installed` |
+| `notes` | string (optional) | Free-text notes from the writer, e.g. that `X` holds counts because no normalised layer existed |
 
 ## 5. Gene-name protection
 
-Seurat replaces `_` with `-` in feature names. To round-trip exactly:
+Seurat replaces `_` and `|` with `-` in feature names. To round-trip exactly:
 
 - `var["gene_symbol_original"]` always holds the original names as received by the pipeline.
 - `var["gene_id"]` holds Ensembl IDs when known, else empty strings.
@@ -99,8 +100,10 @@ The shape is written as `(n_cells, n_genes)`. Name hashes (`cells_sha256`, `gene
 
 1. `schema_version` major is supported, and `mode` is `results`.
 2. `source_counts_checksum` equals the counts checksum of the Seurat object being updated. Otherwise the results belong to a different object, and the merge is refused.
-3. The results' cells must be a subset of, or equal to, the Seurat object's cells, matched **by barcode, never by position**. Missing cells are an error unless the caller allows subsets.
-4. Embeddings are added as Seurat `DimReduc` objects (keys `PC_`, `harmony_`, `UMAP_`), graphs as `Graph` objects, and the cluster column as a factor in `meta.data` and as `Idents()`.
+3. The results' cells must be a subset of, or equal to, the Seurat object's cells, matched **by barcode, never by position**. Barcodes in the results that aren't in the object are always an error.
+   - Missing cells are an error unless the caller passes `allow_subset = TRUE`. Those cells then get a missing cluster label and are left out of the new reductions and graphs, with a warning.
+   - The checksum depends on cell order. If the object holds the same cells in a different order, the checksum is compared after reordering the object to the results' order. A true mismatch is always refused, whatever flags are passed.
+4. Embeddings are added as Seurat `DimReduc` objects (keys `PC_`, `harmony_`, `UMAP_`; any other `X_<name>` gets `<NAME>_`), graphs as `Graph` objects, and the cluster column as a factor in `meta.data` under its own name and as `seurat_clusters`, and as `Idents()`. Each merge is recorded in `obj@misc$scpipe_exchange_merges`.
 5. Existing slots with the same names are replaced only when the caller passes `overwrite = TRUE`.
 
 ## 8. Validation
