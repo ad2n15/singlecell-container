@@ -2,6 +2,7 @@
 
     uvx modal run bench/modal_app.py::build                              # wheel + Rust test binaries (CPU box)
     uvx modal run bench/modal_app.py::rust_tests                         # cargo test --features cuda,cugraph on a GPU
+    uvx modal run bench/modal_app.py::script --path my_profile.py --args "..."   # any script, GPU box
     uvx modal run bench/modal_app.py::gen --tag synth_500k --sizes 100000,500000
     uvx modal run bench/modal_app.py::bench --tag synth_500k --name l4 --sizes 100000 \
         --engines scanpy,rapids,scfast-cpu,scfast-gpu
@@ -177,6 +178,16 @@ def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, e
     return f"results/{name}"
 
 
+@app.function(image=image, gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800, volumes={"/vol": bench_vol})
+def script_remote(code: str, args: str = "") -> str:
+    """Run a local Python script on the GPU box (wheel installed, data under /vol/data)."""
+    install_wheel()
+    Path("/tmp/script.py").write_text(code)
+    env = {**gpu_libs(), "NUMBA_CACHE_DIR": "/tmp/numba", "MPLCONFIGDIR": "/tmp/mpl"}
+    sh([sys.executable, "/tmp/script.py", *args.split()], env=env, check=False)
+    return "done"
+
+
 def pull(name: str) -> Path:
     out = ROOT / "bench" / "results" / name
     shutil.rmtree(out, ignore_errors=True)
@@ -199,6 +210,11 @@ def build(tests: bool = True):
 @app.local_entrypoint()
 def rust_tests(args: str = ""):
     print(rust_tests_remote.remote(args)[:200])
+
+
+@app.local_entrypoint()
+def script(path: str, args: str = ""):
+    print(script_remote.remote(Path(path).read_text(), args))
 
 
 @app.local_entrypoint()
