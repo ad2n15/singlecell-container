@@ -53,3 +53,61 @@ S1b becomes a pass-through (`method` recorded, nothing to do) and no `.h5ad` is 
 - Integration (skip cleanly when `scfastR` is absent): `run_stages.sh` variant with `engine: scfast`
   asserts no `*.h5ad` under the run dir, clusters vs planted types ARI >= the Seurat path - 0.05,
   doublet recall on planted doublets, and the full `run_full.sh` passes with `engine: scfast`.
+
+## Phases 6–9 (GPU backend, scale runs, fused preprocessing)
+
+Constraint: the development workspace has no GPU and no CUDA toolkit. Everything below must
+**compile without CUDA installed** and be **verifiable on the Iridis X L4**; GPU parity tests are
+`#[ignore]` locally and run on the node with `cargo test --features cuda -- --ignored`.
+
+### Phase 6: `scfast-core` feature `cuda` (cudarc, dynamic loading)
+
+- `scfast-core/src/device.rs`: `enum Device { Cpu, Cuda(usize) }`, `Device::auto()` = CUDA if the
+  driver loads and a device is visible, else CPU; `device_info()` for R/Python (`scfast_info()` gains
+  `cuda_built`, `cuda_available`, `device_name`, `free_gb`).
+- `scfast-core/src/cuda/`: `cudarc` with `dynamic-loading` (no link-time dependency on libcuda).
+  Kernels as CUDA C strings compiled with NVRTC at first use: CSR SpMM (`X·V` and `Xᵀ·U` for the
+  implicit scaled operator, with the mean/inv-sd correction applied on device), top-k row selection
+  for kNN; cuBLAS GEMM for the dense products. Randomised SVD's small dense steps (QR, SVD of the
+  k×k core) stay on CPU via faer.
+- `pca::implicit_scaled_pca` and `knn::knn` take `device: Device`; CUDA results must match CPU to
+  the Phase 3/4 thresholds (subspace similarity > 0.99, kNN overlap ≥ 90%). Out-of-memory → clear
+  `Error::Gpu`, callers fall back to CPU and say so.
+- R `RunPCAFast/FindNeighborsFast(device="auto"|"cpu"|"cuda")`, Python `scfast.pca/knn(device=)`.
+
+### Phase 7: GPU Leiden via cuGraph C API (feature `cugraph`)
+
+- `scfast-core/src/cuda/cugraph.rs`: `libloading` of `libcugraph_c.so` at runtime; hand-written
+  `extern "C"` declarations for `cugraph_create_resource_handle`, `cugraph_sg_graph_create` (COO
+  src/dst/weights), `cugraph_leiden`, result accessors, `cugraph_free_*`. `CugraphLeiden`
+  implements `Clusterer`; resolution, theta=1.0, seed → RNG state, `max_level = n_iterations`.
+- ARI vs CPU Leiden ≥ 0.9 on the same graph (test ignored locally).
+- `FindClustersFast(device=)`, `scfast.leiden(device=)`.
+
+### Pipeline wiring
+
+- `engine: auto` on a GPU plan: `gpu_scfast` (S2 in R, in process, device cuda) when `scfastR` was
+  built with `cuda` **and** a device is visible; else `gpu_exchange` (rapids) as now. New config
+  `engine_gpu: auto|scfast|rapids` (default `auto`) to force either. `S2/summary.json` records
+  `path: gpu_scfast`, `device: gpu`, `gpu_core_device: cuda`, `scfast_device`.
+- S1a doublets: same device choice. UMAP stays on CPU (uwot) on the scfast GPU path.
+- `gpu_core --engine rust --device gpu` uses scfast CUDA when available.
+- `scpipe doctor`: `scfastR cuda built / device visible` lines.
+
+### Phase 8: scale runs on the L4
+
+`bench/hpc/`: `make_scale_inputs.py` (50k, 100k, 200k, 500k synthetic, refused outside HPC unless
+`SCPIPE_ALLOW_LARGE=1`), `run_scale.sh` (Seurat CPU, scfast CPU, scfast CUDA, rapids exchange; each
+S0–S2 with `scpipe run --until S2`), `slurm_scale.sh`, `summarise.py` → `bench/results/scale/`
+table (time, peak RSS, peak GPU memory, ARI vs Seurat) and the adoption verdict per size against
+the rule in RUST_ENGINE.md §8.2. Not run here.
+
+### Phase 9: fused preprocessing (CPU, testable here)
+
+`scfast-core/src/preprocess.rs`: one pass over CSR counts per chunk of cells computing library
+size, log1p-normalised values on the fly, and vst HVG statistics (mean, variance, standardised
+variance with the loess fit done on the per-gene summaries), returning HVG indices and per-gene
+mean/sd for the implicit PCA so `NormalizeData + FindVariableFeatures + ScaleData` become one call.
+R `PreprocessFast(object, n_hvg)` / Python `scfast.preprocess(X_counts, n_hvg)`. Done when HVG
+overlap with Seurat `FindVariableFeatures(selection.method="vst")` ≥ 95% on the fixture and PBMC-like
+data, and the S2 scfast path uses it (`timings_s.preprocess` replaces normalize+hvg+scale).

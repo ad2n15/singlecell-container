@@ -27,11 +27,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use rayon::prelude::*;
 
-use scfast_core::cluster::{self as core_cluster, ClusterParams};
+use scfast_core::cluster::{self as core_cluster, ClusterParams, LeidenDevice};
 use scfast_core::knn::{self as core_knn, KnnMethod, KnnParams};
 use scfast_core::pca::{self as core_pca, PcaParams, PcaResult};
+use scfast_core::preprocess::{self as core_preprocess, PreprocessParams, PreprocessResult};
 use scfast_core::snn::{self as core_snn, SnnParams};
-use scfast_core::{CsrView, Error, Idx, Knn, Real, RowMajor, SparseGraph};
+use scfast_core::{CsrView, Device, Error, Idx, Knn, Real, RowMajor, SparseGraph};
 
 // ------------------------------------------------------------------ errors and panics
 
@@ -41,6 +42,8 @@ fn core_err(e: Error) -> PyErr {
     match e {
         Error::InvalidInput(_) | Error::InvalidParameter(_) => PyValueError::new_err(e.to_string()),
         Error::Backend { .. } => PyRuntimeError::new_err(e.to_string()),
+        // "GPU: ..." prefix: the Python layer retries on the CPU for device="auto".
+        Error::Gpu(_) => PyRuntimeError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),
     }
 }
@@ -214,9 +217,42 @@ fn check_n_fits_i32(n: usize, what: &str) -> PyResult<()> {
 
 // ------------------------------------------------------------------ PCA
 
+/// PCA / kNN device string -> core enum (Phase 6). A bad string is ValueError; "cuda" without
+/// a usable device is RuntimeError("GPU: ...").
+fn parse_device(device: &str) -> PyResult<Device> {
+    Device::parse(device).map_err(core_err)
+}
+
+/// CUDA state of this build: {"cuda_built", "cuda_available", "device_count", "device_name",
+/// "free_gb", "total_gb", "compute_capability", "cuda_error", "auto_device"}. Never raises.
+#[pyfunction]
+#[pyo3(name = "device_info")]
+fn device_info_py(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let info = py.detach(scfast_core::device_info);
+    let d = PyDict::new(py);
+    d.set_item("cuda_built", info.cuda_built)?;
+    d.set_item("cuda_available", info.cuda_available)?;
+    d.set_item("device_count", info.device_count)?;
+    d.set_item("device_name", info.device_name.clone())?;
+    d.set_item("free_gb", info.free_gb())?;
+    d.set_item("total_gb", info.total_bytes.map(|b| b as f64 / (1u64 << 30) as f64))?;
+    d.set_item("compute_capability", info.compute_capability)?;
+    d.set_item("cuda_error", info.cuda_error.clone())?;
+    d.set_item("auto_device", Device::auto().name())?;
+    Ok(d)
+}
+
+/// Resolve a device string the way pca / knn do: "cpu" or "cuda:<i>". ValueError for an
+/// unknown string, RuntimeError("GPU: ...") for an unusable CUDA request.
+#[pyfunction]
+#[pyo3(name = "device")]
+fn device_py(device: &str) -> PyResult<String> {
+    Ok(parse_device(device)?.name())
+}
+
 /// Low-level PCA on borrowed CSR arrays (cells x genes). See scfast.pca.
 #[pyfunction]
-#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters))]
+#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, device = "cpu"))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn pca_csr<'py>(
     py: Python<'py>,
@@ -230,14 +266,16 @@ fn pca_csr<'py>(
     scale: bool,
     oversample: usize,
     power_iters: usize,
+    device: &str,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
     let params = PcaParams { n_comps, oversample, power_iters, seed, scale, ..PcaParams::default() };
+    let device = parse_device(device)?;
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;
     let res: PcaResult = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "pca", || {
         let x = CsrView::new(n_rows, n_cols, ip, ix, dx)?;
         check_canonical(&x, "X")?;
-        let r = core_pca::implicit_scaled_pca(x, &params)?;
+        let r = core_pca::implicit_scaled_pca_on(x, &params, device)?;
         let k = r.stdev.len();
         if r.embeddings.n_rows != n_rows || r.loadings.n_rows != n_cols || r.embeddings.n_cols != k || r.loadings.n_cols != k {
             return Err(backend("pca", format!(
@@ -289,7 +327,7 @@ fn csr_view_info<'py>(
 
 /// Low-level kNN on a C-contiguous float32 (n, d) array. See scfast.knn.
 #[pyfunction]
-#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search))]
+#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu"))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn knn_dense<'py>(
     py: Python<'py>,
@@ -301,9 +339,11 @@ fn knn_dense<'py>(
     m: usize,
     ef_construction: usize,
     ef_search: usize,
+    device: &str,
 ) -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>)> {
     let (n, d) = (x.shape()[0], x.shape()[1]);
     check_n_fits_i32(n, "knn")?;
+    let device = parse_device(device)?;
     let hnsw = KnnMethod::Hnsw { m, ef_construction, ef_search };
     // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW
     // parameters apply in auto mode too (the core's Auto uses fixed ones).
@@ -321,7 +361,7 @@ fn knn_dense<'py>(
             return Err(Error::InvalidInput(format!("X has a non-finite value at row {}, column {}", p / d.max(1), p % d.max(1))));
         }
         let rm = RowMajor::from_vec(n, d, xs.to_vec())?;
-        let r = core_knn::knn(&rm, &params)?;
+        let r = core_knn::knn_on(&rm, &params, device)?;
         if r.n != n || r.k != k || r.indices.len() != n * k || r.distances.len() != n * k {
             return Err(backend("knn", format!("kernel returned n={}, k={} ({} indices, {} distances) for n={n}, k={k}", r.n, r.k, r.indices.len(), r.distances.len())));
         }
@@ -437,9 +477,32 @@ fn graph_from_csr<I: Idx, T: Real>(x: &CsrView<'_, I, T>) -> SparseGraph {
     }
 }
 
-/// Low-level Leiden on a square, symmetric, canonical CSR graph. Returns int32 labels.
+/// Leiden device string ("auto", "cpu", "cuda", "cuda:<i>") -> core enum; a bad string is a
+/// ValueError.
+fn parse_leiden_device(device: &str) -> PyResult<LeidenDevice> {
+    LeidenDevice::parse(device).map_err(core_err)
+}
+
+/// Resolves a Leiden device string to what `leiden_csr` would run on. Returns
+/// {"requested", "resolved" ("cpu" or "cuda:<i>"), "cugraph_compiled"}. "auto" resolves to
+/// "cuda:0" only when scfast was built with the `cugraph` feature, libcugraph_c.so loads and
+/// a CUDA device is usable; an explicit "cuda" that is not usable raises RuntimeError.
 #[pyfunction]
-#[pyo3(name = "leiden_csr", signature = (n, indptr, indices, data, resolution, seed, n_iterations))]
+#[pyo3(name = "leiden_device")]
+fn leiden_device<'py>(py: Python<'py>, device: &str) -> PyResult<Bound<'py, PyDict>> {
+    let requested = parse_leiden_device(device)?;
+    let resolved = run_kernel(py, "leiden", move || core_cluster::resolve_leiden_device(requested))?;
+    let d = PyDict::new(py);
+    d.set_item("requested", requested.as_string())?;
+    d.set_item("resolved", resolved.as_string())?;
+    d.set_item("cugraph_compiled", core_cluster::cugraph_compiled())?;
+    Ok(d)
+}
+
+/// Low-level Leiden on a square, symmetric, canonical CSR graph. Returns int32 labels.
+/// `device` is "cpu" (default), "auto", "cuda" or "cuda:<index>" (Phase 7: cuGraph).
+#[pyfunction]
+#[pyo3(name = "leiden_csr", signature = (n, indptr, indices, data, resolution, seed, n_iterations, device = "cpu"))]
 #[allow(clippy::too_many_arguments)]
 fn leiden_csr<'py>(
     py: Python<'py>,
@@ -450,8 +513,10 @@ fn leiden_csr<'py>(
     resolution: f64,
     seed: u64,
     n_iterations: usize,
+    device: &str,
 ) -> PyResult<Bound<'py, PyArray1<i32>>> {
     check_n_fits_i32(n, "leiden")?;
+    let device = parse_leiden_device(device)?;
     let params = ClusterParams { resolution, seed, n_iterations };
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;
@@ -459,13 +524,63 @@ fn leiden_csr<'py>(
         let x = CsrView::new(n, n, ip, ix, dx)?;
         check_canonical(&x, "graph")?;
         let g = graph_from_csr(&x);
-        let labels = core_cluster::leiden(&g, &params)?;
+        let labels = core_cluster::leiden_on(&g, &params, device)?;
         if labels.len() != n {
             return Err(backend("leiden", format!("kernel returned {} labels for {n} nodes", labels.len())));
         }
         Ok(labels)
     }))?;
     Ok(PyArray1::from_vec(py, to_i32(labels)))
+}
+
+// ------------------------------------------------------------------ preprocessing (Phase 9)
+
+/// Low-level fused preprocessing on borrowed CSR counts (cells x genes). See scfast.preprocess.
+/// Returns (data float32 (nnz,), library_size float64 (n_rows,), mean, variance,
+/// variance_expected, variance_standardized (float64 (n_cols,) each), hvg int32 (n_hvg,),
+/// hvg_mean float64, hvg_sd float64, clip).
+#[pyfunction]
+#[pyo3(name = "preprocess_csr", signature = (n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn preprocess_csr<'py>(
+    py: Python<'py>,
+    n_rows: usize,
+    n_cols: usize,
+    indptr: &Bound<'py, PyAny>,
+    indices: &Bound<'py, PyAny>,
+    data: &Bound<'py, PyAny>,
+    n_hvg: usize,
+    scale_factor: f64,
+    span: f64,
+    clip: Option<f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let params = PreprocessParams { n_hvg, scale_factor, span, clip };
+    let ind = IndexArrays::extract(indptr, indices)?;
+    let val = ValueArray::extract(data)?;
+    let res: PreprocessResult<f32> = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
+        let x = CsrView::new(n_rows, n_cols, ip, ix, dx)?;
+        check_canonical(&x, "X")?;
+        let r = core_preprocess::preprocess::<_, _, f32>(x, &params)?;
+        if r.data.len() != x.nnz() || r.library_size.len() != n_rows || r.mean.len() != n_cols || r.hvg.len() != r.hvg_mean.len() {
+            return Err(backend("preprocess", format!(
+                "kernel returned {} values, {} library sizes, {} gene means for {} non-zeros, {n_rows} cells, {n_cols} genes",
+                r.data.len(), r.library_size.len(), r.mean.len(), x.nnz()
+            )));
+        }
+        Ok(r)
+    }))?;
+    let d = PyDict::new(py);
+    d.set_item("data", PyArray1::from_vec(py, res.data))?;
+    d.set_item("library_size", PyArray1::from_vec(py, res.library_size))?;
+    d.set_item("mean", PyArray1::from_vec(py, res.mean))?;
+    d.set_item("variance", PyArray1::from_vec(py, res.variance))?;
+    d.set_item("variance_expected", PyArray1::from_vec(py, res.variance_expected))?;
+    d.set_item("variance_standardized", PyArray1::from_vec(py, res.variance_standardized))?;
+    d.set_item("hvg", PyArray1::from_vec(py, to_i32(res.hvg)))?;
+    d.set_item("hvg_mean", PyArray1::from_vec(py, res.hvg_mean))?;
+    d.set_item("hvg_sd", PyArray1::from_vec(py, res.hvg_sd))?;
+    d.set_item("clip", res.clip)?;
+    Ok(d)
 }
 
 // ------------------------------------------------------------------ test probes
@@ -531,7 +646,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, knn_dense, leiden_csr, pca_csr, probe_detach, probe_error, probe_panic, snn_from_indices};
+    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

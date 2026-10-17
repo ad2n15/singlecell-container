@@ -7,7 +7,17 @@ test_that("the package loads and reports the engine", {
   expect_identical(info$package, as.character(utils::packageVersion("scfastR")))
   expect_true(is.character(info$version) && nzchar(info$version))
   expect_true(is.integer(info$threads) && info$threads >= 1L)
-  expect_false(info$cuda)
+  # default build: no CUDA feature, so "auto" resolves to the CPU
+  expect_identical(info$cuda, info$cuda_built)
+  expect_true(is.logical(info$cuda_built) && is.logical(info$cuda_available))
+  if (!info$cuda_built) {
+    expect_false(info$cuda_available)
+    expect_true(is.character(info$cuda_error))
+    expect_null(info$device_name)
+  }
+  expect_identical(as.character(scfastR:::.check_device("auto")), if (info$cuda_available) "cuda:0" else "cpu")
+  expect_identical(as.character(scfastR:::.check_device("cpu")), "cpu")
+  expect_identical(attr(scfastR:::.check_device("auto"), "requested"), "auto")
 })
 
 test_that("a Rust panic becomes an R error and R keeps running", {
@@ -50,22 +60,56 @@ test_that("the CSR view rejects malformed sparse arrays before any kernel runs",
   expect_error(f(x = m@x[-1]), "differ in length")
   expect_error(f(ng = -1L), ">= 0")
   # the same checks guard the PCA entry point
-  expect_error(scfastR:::rs_pca_csc(m@p[-1], m@i, m@x, 4L, 3L, 2L, 0, -1L, -1L), "indptr has")
-  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 0L, 0, -1L, -1L), "npcs must be >= 1")
-  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, -1, -1L, -1L), "seed")
-  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, 0.5, -1L, -1L), "seed")
+  expect_error(scfastR:::rs_pca_csc(m@p[-1], m@i, m@x, 4L, 3L, 2L, 0, -1L, -1L, "cpu"), "indptr has")
+  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 0L, 0, -1L, -1L, "cpu"), "npcs must be >= 1")
+  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, -1, -1L, -1L, "cpu"), "seed")
+  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, 0.5, -1L, -1L, "cpu"), "seed")
+  # device strings are validated in Rust too
+  expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, 0, -1L, -1L, "tpu"), "device")
+  expect_error(scfastR:::rs_device("npu"), "device")
+  expect_identical(scfastR:::rs_device("cpu"), "cpu")
+  expect_identical(scfastR:::rs_device("CPU"), "cpu")
+  if (!isTRUE(scfast_info()$cuda_available)) {
+    expect_error(scfastR:::rs_device("cuda"), "GPU")
+    expect_identical(scfastR:::rs_device("auto"), "cpu")
+    # the kernels refuse an unusable CUDA device before touching the data
+    expect_error(scfastR:::rs_pca_csc(m@p, m@i, m@x, 4L, 3L, 2L, 0, -1L, -1L, "cuda"), "GPU")
+    expect_error(scfastR:::rs_knn(matrix(rnorm(40), 20, 2), 20L, 2L, 5L, "exact", 0, 16L, 200L, 100L, -1, "cuda:0"), "GPU")
+  }
+})
+
+test_that("auto falls back to the CPU on a GPU error, an explicit device does not", {
+  calls <- character()
+  fn <- function(dev) {
+    calls <<- c(calls, dev)
+    if (dev != "cpu") stop(structure(class = c("scfast_error", "error", "condition"),
+                                     list(message = "scfast pca: GPU: out of device memory (alloc)", call = NULL)))
+    "ok"
+  }
+  auto <- structure("cuda:0", requested = "auto")
+  expect_warning(r <- scfastR:::.with_cpu_fallback(auto, fn), "falling back to the CPU")
+  expect_identical(r, "ok")
+  expect_identical(calls, c("cuda:0", "cpu"))
+  calls <- character()
+  explicit <- structure("cuda:0", requested = "cuda")
+  expect_error(scfastR:::.with_cpu_fallback(explicit, fn), "GPU: out of device memory")
+  expect_identical(calls, "cuda:0")
+  # a non-GPU error is never retried
+  fn2 <- function(dev) stop(structure(class = c("scfast_error", "error", "condition"),
+                                      list(message = "scfast pca: invalid input: x", call = NULL)))
+  expect_error(scfastR:::.with_cpu_fallback(auto, fn2), "invalid input")
 })
 
 test_that("kNN, SNN and Leiden validate their inputs in Rust", {
   x <- matrix(rnorm(40), 20, 2)
-  expect_error(scfastR:::rs_knn(x, 20L, 3L, 5L, "exact", 0, 16L, 200L, 100L, -1), "expected 20 x 3")
-  expect_error(scfastR:::rs_knn(x, 20L, 2L, 21L, "exact", 0, 16L, 200L, 100L, -1), "k must be between")
-  expect_error(scfastR:::rs_knn(x, 20L, 2L, 1L, "exact", 0, 16L, 200L, 100L, -1), "k must be between")
-  expect_error(scfastR:::rs_knn(x, 20L, 2L, 5L, "kd", 0, 16L, 200L, 100L, -1), "method must be one of")
-  expect_error(scfastR:::rs_knn(x, 20L, 2L, 5L, "hnsw", 0, 0L, 200L, 100L, -1), "hnsw parameters")
+  expect_error(scfastR:::rs_knn(x, 20L, 3L, 5L, "exact", 0, 16L, 200L, 100L, -1, "cpu"), "expected 20 x 3")
+  expect_error(scfastR:::rs_knn(x, 20L, 2L, 21L, "exact", 0, 16L, 200L, 100L, -1, "cpu"), "k must be between")
+  expect_error(scfastR:::rs_knn(x, 20L, 2L, 1L, "exact", 0, 16L, 200L, 100L, -1, "cpu"), "k must be between")
+  expect_error(scfastR:::rs_knn(x, 20L, 2L, 5L, "kd", 0, 16L, 200L, 100L, -1, "cpu"), "method must be one of")
+  expect_error(scfastR:::rs_knn(x, 20L, 2L, 5L, "hnsw", 0, 0L, 200L, 100L, -1, "cpu"), "hnsw parameters")
   y <- x
   y[3, 1] <- NaN
-  expect_error(scfastR:::rs_knn(y, 20L, 2L, 5L, "exact", 0, 16L, 200L, 100L, -1), "non-finite")
+  expect_error(scfastR:::rs_knn(y, 20L, 2L, 5L, "exact", 0, 16L, 200L, 100L, -1, "cpu"), "non-finite")
 
   idx <- matrix(c(1:4, 2L, 1L, 4L, 3L), 4, 2)
   expect_error(scfastR:::rs_snn(idx, 4L, 3L, 1 / 15), "expected 4 x 3")

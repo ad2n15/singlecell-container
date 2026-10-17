@@ -85,6 +85,9 @@ DEFAULTS: dict[str, Any] = {
     "normalization": "lognorm",
     "n_hvg": 2000,
     "engine": "auto",
+    # GPU-plan engine (docs/scfast-integration.md "Pipeline wiring"): auto = scfast in process on CUDA
+    # when scfastR was built with cuda and a device is visible, else rapids through the exchange.
+    "engine_gpu": "auto",
     "device": "auto",
     "integration": {"method": "none", "batch_key": "sample_id"},
     "pcs": "auto",
@@ -162,6 +165,7 @@ ALLOWED = {
     "normalization": ("lognorm", "sct"),
     "device": ("auto", "cpu", "gpu"),
     "engine": ("auto", "scfast", "seurat"),
+    "engine_gpu": ("auto", "scfast", "rapids"),
     "integration.method": ("none", "harmony"),
     "annotation.celltypist": ("auto", "off"),
     "dge.method": ("deseq2", "limma_voom"),
@@ -357,9 +361,11 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
     need(_is_num(res) and res > 0, f"clustering.resolution must be a positive number, got {res!r}")
     bk = cfg["integration"]["batch_key"]
     need(isinstance(bk, str) and bool(bk.strip()), f"integration.batch_key must be a non-empty string, got {bk!r}")
-    if cfg["engine"] == "scfast" and cfg["device"] == "gpu":
+    if cfg["engine"] == "scfast" and cfg["device"] == "gpu" and cfg["engine_gpu"] != "scfast":
         problems.append("engine: scfast has no GPU backend; use device: cpu or auto with engine: scfast "
-                        "(or engine: seurat / auto for device: gpu)")
+                        "(or engine: seurat / auto for device: gpu; engine_gpu: scfast forces scfast on CUDA)")
+    if cfg["engine"] == "seurat" and cfg["engine_gpu"] == "scfast":
+        problems.append("engine_gpu: scfast needs engine: auto or scfast (engine: seurat keeps the rapids exchange on GPU)")
     if cfg["normalization"] == "sct" and cfg["device"] == "gpu":
         problems.append("normalization: sct runs on CPU only; use device: cpu or auto with sct")
     for g, m in (cfg.get("gates") or {}).items():

@@ -20,8 +20,11 @@ CLI::
 
 Engines: ``rapids`` (GPU, rapids-singlecell) and ``scanpy`` (CPU) are the two classic branches; with no
 ``--engine`` the device picks one as before (gpu -> rapids, cpu -> scanpy). ``rust`` uses the Python module
-``scfast`` (rust/scfast-py) for PCA, kNN, SNN and Leiden; UMAP still comes from umap-learn. It is CPU
-only (``--device gpu`` is an error) and does not apply ``--max-value`` clipping. ``distances`` in the
+``scfast`` (rust/scfast-py) for PCA, kNN, SNN and Leiden; UMAP still comes from umap-learn and Harmony
+from harmonypy (both CPU). PCA and kNN run on CUDA (``device='cuda'``, reported as device ``gpu`` and
+``scfast_device: cuda``) when ``scfast.device_info()`` reports ``cuda_built`` and ``cuda_available``;
+otherwise ``--device auto`` stays on the CPU and ``--device gpu`` is a clear error. It does not apply
+``--max-value`` clipping. ``distances`` in the
 results are the kNN distances and ``connectivities`` the SNN (Jaccard) graph, not Scanpy's fuzzy weights.
 """
 
@@ -96,6 +99,28 @@ def _import_scfast():
     return scfast
 
 
+def scfast_cuda_available(scfast) -> tuple[bool, str]:
+    """Whether the Python module scfast can run on CUDA, as ``(ok, reason)``.
+
+    Asks ``scfast.device_info()`` (added with the CUDA backend; a build without it has no such
+    function, which counts as unavailable) for ``cuda_built`` / ``cuda_available``; a missing
+    field is False.
+    """
+    info_fn = getattr(scfast, "device_info", None)
+    if info_fn is None:
+        return False, "this build of scfast has no device_info() (CPU-only build)"
+    try:
+        info = info_fn()
+    except Exception as e:  # a broken CUDA runtime must give a clear error, not a traceback
+        return False, f"scfast.device_info() failed ({type(e).__name__}: {e})"
+    get = info.get if isinstance(info, dict) else (lambda k, d=None: getattr(info, k, d))
+    if not bool(get("cuda_built", False)):
+        return False, "scfast was built without the cuda feature"
+    if not bool(get("cuda_available", False)):
+        return False, "scfast was built with cuda but no CUDA device is visible"
+    return True, str(get("device_name", None) or "CUDA device visible")
+
+
 def _check_harmony_cpu() -> None:
     try:
         import harmonypy  # noqa: F401
@@ -153,11 +178,21 @@ def run(
     """
     if engine is not None and engine not in ENGINES:
         raise ValueError(f"engine must be one of {list(ENGINES)}, got {engine!r}")
+    scfast_device = "cpu"
     if engine == "rust":
-        if device == "gpu":
-            raise DeviceError("engine 'rust' (scfast) has no GPU backend; use --device cpu or auto")
+        if device not in ("auto", "gpu", "cpu"):
+            raise ValueError(f"device must be 'auto', 'gpu' or 'cpu', got {device!r}")
         scfast = _import_scfast()  # fail before reading anything
         used = "cpu"
+        if device in ("gpu", "auto"):
+            # scfast on CUDA when this build has it and a device is visible (docs/scfast-integration.md,
+            # "Pipeline wiring"); --device auto quietly stays on the CPU otherwise.
+            cuda_ok, cuda_why = scfast_cuda_available(scfast)
+            if cuda_ok:
+                used, scfast_device = "gpu", "cuda"
+            elif device == "gpu":
+                raise DeviceError(f"engine 'rust' (scfast) has no GPU backend here ({cuda_why}); "
+                                  "use --device cpu or auto, or --engine rapids")
     else:
         used = _resolve_device(device)
         if engine == "rapids" and used not in ("gpu", "cpu-as-gpu"):
@@ -189,8 +224,8 @@ def run(
     if batch_key is not None:
         if batch_key not in adata.obs.columns:
             raise ValueError(f"batch_key {batch_key!r} is not an obs column")
-        if used != "gpu":
-            _check_harmony_cpu()
+        if used != "gpu" or engine == "rust":
+            _check_harmony_cpu()  # the rust path runs Harmony with harmonypy on the CPU, whatever the device
 
     n_comps = int(min(n_pcs, min(adata.n_vars, adata.n_obs) - 1))
     if n_comps < 2:
@@ -212,7 +247,7 @@ def run(
         X.sum_duplicates()
         X.sort_indices()
         with timed("pca"):
-            pcs, _loadings, _sdev = scfast.pca(X, n_comps=n_comps, seed=seed)
+            pcs, _loadings, _sdev = scfast.pca(X, n_comps=n_comps, seed=seed, device=scfast_device)
         adata.obsm["X_pca"] = np.asarray(pcs, dtype=np.float32)
         if batch_key is not None:
             with timed("harmony"):
@@ -220,7 +255,7 @@ def run(
         emb = np.ascontiguousarray(adata.obsm[rep], dtype=np.float32)
         k = int(min(n_neighbors, adata.n_obs))
         with timed("neighbors"):
-            knn_idx, knn_dist = scfast.knn(emb, k=k, seed=seed)
+            knn_idx, knn_dist = scfast.knn(emb, k=k, seed=seed, device=scfast_device)
             snn = scfast.snn(knn_idx)
             n = adata.n_obs
             rows = np.repeat(np.arange(n), k - 1)
@@ -310,6 +345,7 @@ def run(
             "max_value": float(max_value) if max_value is not None else -1.0,
             "use_rep": rep,
             "engine": engine,
+            "scfast_device": scfast_device if engine == "rust" else "",
         }
         write_exchange(
             res,
@@ -331,6 +367,7 @@ def run(
         "n_clusters": int(res.obs[CLUSTER_KEY].nunique()),
         "harmony": batch_key is not None,
         "timings_s": timings,
+        "scfast_device": scfast_device if engine == "rust" else None,
         "total_s": round(sum(timings.values()), 4),
         "peak_host_rss_bytes": _peak_rss_bytes(),
         "results_path": str(results_path),

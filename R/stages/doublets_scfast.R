@@ -110,7 +110,7 @@ SCP_PRECLUSTER <- list(n_hvg = 2000L, n_pcs = 20L, k = 15L, resolution = 0.3, pr
 #' Scrublet-style scores for one sample.
 #' @param counts genes x cells dgCMatrix of raw counts.
 #' @return list(score, call, threshold, n_sim, k, notes)
-scp_dbl_one_sample <- function(counts, seed, n_hvg = SCP_DBL_N_HVG, n_pcs = SCP_DBL_N_PCS,
+scp_dbl_one_sample <- function(counts, seed, n_hvg = SCP_DBL_N_HVG, n_pcs = SCP_DBL_N_PCS, device = "cpu",
                                sim_ratio = SCP_DBL_SIM_RATIO, expected_rate = SCP_DBL_EXPECTED_RATE) {
   notes <- character()
   n <- ncol(counts)
@@ -134,7 +134,7 @@ scp_dbl_one_sample <- function(counts, seed, n_hvg = SCP_DBL_N_HVG, n_pcs = SCP_
   sim_log <- sim_log[hv, , drop = FALSE]
 
   npcs <- as.integer(min(n_pcs, length(hv) - 1L, n - 1L))
-  pca <- scfastR::scfast_pca(obs_log, npcs = npcs, seed = seed)
+  pca <- scfastR::scfast_pca(obs_log, npcs = npcs, seed = seed, device = device)
   sd_g <- ifelse(pca$gene_sd > 0, pca$gene_sd, 1)
   vs <- pca$loadings / sd_g
   off <- as.numeric(crossprod(pca$gene_mean / sd_g, pca$loadings))
@@ -145,7 +145,7 @@ scp_dbl_one_sample <- function(counts, seed, n_hvg = SCP_DBL_N_HVG, n_pcs = SCP_
   k <- max(5L, as.integer(round(0.5 * sqrt(n))))
   k_adj <- as.integer(round(k * (1 + n_sim / n)))
   k_adj <- min(k_adj, nrow(emb) - 2L)
-  knn <- scfastR::scfast_knn(emb, k = k_adj + 1L, method = "auto", seed = seed)
+  knn <- scfastR::scfast_knn(emb, k = k_adj + 1L, method = "auto", seed = seed, device = device)
   nn <- .dbl_drop_self(knn$idx)
   score_all <- .dbl_adjust(rowSums(nn > n), ncol(nn), n_sim / n, expected_rate)
   score <- score_all[seq_len(n)]
@@ -174,17 +174,17 @@ scp_dbl_one_sample <- function(counts, seed, n_hvg = SCP_DBL_N_HVG, n_pcs = SCP_
 #' Coarse clusters of all cells (PCA -> kNN -> SNN -> Leiden).
 #' @param counts genes x cells dgCMatrix of raw counts.
 #' @return character vector of labels ("0", "1", ...; largest cluster first), one per cell.
-scp_dbl_precluster <- function(counts, seed, p = SCP_PRECLUSTER) {
+scp_dbl_precluster <- function(counts, seed, p = SCP_PRECLUSTER, device = "cpu") {
   n <- ncol(counts)
   logm <- .dbl_lognorm(counts, 1e4)
   hv <- .dbl_hvg(logm, p$n_hvg)
   npcs <- as.integer(min(p$n_pcs, length(hv) - 1L, n - 1L))
   if (length(hv) < 3 || npcs < 2L || n < 10L) return(rep("0", n))
-  pca <- scfastR::scfast_pca(logm[hv, , drop = FALSE], npcs = npcs, seed = seed)
+  pca <- scfastR::scfast_pca(logm[hv, , drop = FALSE], npcs = npcs, seed = seed, device = device)
   emb <- pca$embeddings
-  knn <- scfastR::scfast_knn(emb, k = min(p$k, n), method = "auto", seed = seed)
+  knn <- scfastR::scfast_knn(emb, k = min(p$k, n), method = "auto", seed = seed, device = device)
   g <- scfastR::scfast_snn(knn$idx, prune = p$prune)
-  lab <- scfastR::scfast_leiden(g, resolution = p$resolution, seed = seed)
+  lab <- scfastR::scfast_leiden(g, resolution = p$resolution, seed = seed, device = device)
   as.character(as.integer(lab))
 }
 
@@ -194,7 +194,8 @@ scp_dbl_precluster <- function(counts, seed, p = SCP_PRECLUSTER) {
 #' @return list(table = data.frame(cell_id, doublet_score, doublet_call, pre_cluster)
 #'   with score numeric (NA if skipped), call logical, pre_cluster character;
 #'   thresholds = named numeric per sample; notes = character).
-scp_doublets_scfast <- function(counts, sample_id, seed) {
+# device: "cpu" or "cuda" (S1a passes "cuda" on a GPU plan when the engine is scfast).
+scp_doublets_scfast <- function(counts, sample_id, seed, device = "cpu") {
   if (!scp_has_pkg("scfastR")) scp_stop("scfastR is not installed")
   counts <- scp_as_dgc(counts)
   n <- ncol(counts)
@@ -209,7 +210,7 @@ scp_doublets_scfast <- function(counts, sample_id, seed) {
                                 s, length(idx), SCP_DBL_MIN_CELLS))
       next
     }
-    r <- tryCatch(scp_dbl_one_sample(counts[, idx, drop = FALSE], seed),
+    r <- tryCatch(scp_dbl_one_sample(counts[, idx, drop = FALSE], seed, device = device),
                   error = function(e) conditionMessage(e))
     if (is.character(r)) {
       notes <- c(notes, sprintf("sample %s: doublet detection failed (%s); score NA, call FALSE", s, r))
@@ -222,7 +223,7 @@ scp_doublets_scfast <- function(counts, sample_id, seed) {
                               s, length(idx), r$n_sim, r$k, r$threshold, sum(r$call), 100 * mean(r$call)),
                if (length(r$notes)) paste0("sample ", s, ": ", r$notes))
   }
-  pre <- scp_dbl_precluster(counts, seed)
+  pre <- scp_dbl_precluster(counts, seed, device = device)
   list(table = data.frame(cell_id = colnames(counts), doublet_score = score, doublet_call = call,
                           pre_cluster = pre, stringsAsFactors = FALSE),
        thresholds = thr, notes = notes)

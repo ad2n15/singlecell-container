@@ -29,9 +29,13 @@ def pca_csr(
     scale: bool,
     oversample: int,
     power_iters: int,
+    device: str = "cpu",
     /,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """Implicitly scaled PCA of a CSR matrix (cells x genes) given as raw arrays.
+
+    device is "cpu", "auto", "cuda" or "cuda:<index>" (Phase 6); an unusable CUDA request
+    raises RuntimeError("GPU: ...").
 
     The three arrays are borrowed without copying: indptr and indices must share one dtype
     (int32 or int64), data is float32 or float64, all C-contiguous. Rows must be canonical
@@ -64,9 +68,12 @@ def knn(
     m: int,
     ef_construction: int,
     ef_search: int,
+    device: str = "cpu",
     /,
 ) -> tuple[npt.NDArray[np.int32], npt.NDArray[np.float32]]:
     """k nearest neighbours of each row of a C-contiguous float32 (n, d) array.
+
+    device is "cpu", "auto", "cuda" or "cuda:<index>"; on CUDA method is ignored.
 
     method is "exact", "hnsw" or "auto" (exact below auto_threshold rows, else HNSW with
     m / ef_construction / ef_search). Non-finite values raise ValueError.
@@ -95,12 +102,51 @@ def leiden_csr(
     seed: int,
     n_iterations: int,
     /,
+    device: str = "cpu",
 ) -> npt.NDArray[np.int32]:
     """Leiden (RB objective) on a square, symmetric, canonical CSR graph given as raw arrays.
 
     The graph is copied once into the clustering library's own buffers. Returns int32
-    labels numbered by decreasing cluster size.
+    labels numbered by decreasing cluster size. device: "cpu", "auto", "cuda" or
+    "cuda:<index>" (cuGraph, feature `cugraph`); an unusable explicit CUDA device raises
+    RuntimeError.
     """
+
+def leiden_device(device: str, /) -> dict[str, Any]:
+    """Resolve a Leiden device string.
+
+    Returns {"requested", "resolved" ("cpu" or "cuda:<index>"), "cugraph_compiled": bool}.
+    "auto" resolves to "cuda:0" only when the cugraph feature is built, libcugraph_c.so
+    loads and a CUDA device is usable; an unusable explicit "cuda" raises RuntimeError.
+    """
+
+def preprocess_csr(
+    n_rows: int,
+    n_cols: int,
+    indptr: npt.NDArray[np.int32] | npt.NDArray[np.int64],
+    indices: npt.NDArray[np.int32] | npt.NDArray[np.int64],
+    data: npt.NDArray[np.float32] | npt.NDArray[np.float64],
+    n_hvg: int,
+    scale_factor: float,
+    span: float,
+    clip: float | None,
+    /,
+) -> dict[str, Any]:
+    """Fused normalisation + vst HVG statistics of a CSR counts matrix (cells x genes).
+
+    The arrays are borrowed as in pca_csr. Returns {"data": float32 (nnz,) log-normalised
+    values in input order, "library_size": float64 (n_rows,), "mean", "variance",
+    "variance_expected", "variance_standardized": float64 (n_cols,), "hvg": int32 (n_hvg,)
+    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float}.
+    """
+
+def device_info() -> dict[str, Any]:
+    """CUDA state of this build: cuda_built, cuda_available, device_count, device_name,
+    free_gb, total_gb, compute_capability, cuda_error, auto_device. Never raises."""
+
+def device(device: str, /) -> str:
+    """Resolve a PCA / kNN device string to "cpu" or "cuda:<index>". ValueError for an
+    unknown string, RuntimeError("GPU: ...") for an unusable CUDA request."""
 
 def _probe_detach(seconds: float, /) -> float:
     """Busy-wait for `seconds` with the GIL released, through the kernels' own wrapper.

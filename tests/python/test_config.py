@@ -307,3 +307,34 @@ def test_engine_in_stage_fingerprints_and_example():
     for st in ("S1a", "S1b", "S2"):
         assert "engine" in R.STAGE_CONFIG_KEYS[st]
     assert yaml.safe_load((REPO / "config" / "examples" / "config.yaml").read_text())["engine"] == "auto"
+
+
+# engine_gpu (docs/scfast-integration.md "Pipeline wiring")
+
+
+def test_engine_gpu_default_values_and_fingerprints(tmp_path):
+    from scpipe import runner as R
+
+    proj = make_project(tmp_path)
+    assert C.load_config(proj / "config.yaml")["engine_gpu"] == "auto"
+    for v in ("auto", "scfast", "rapids"):
+        p = make_project(tmp_path / v, {"engine_gpu": v, "device": "gpu"})
+        assert C.load_config(p / "config.yaml")["engine_gpu"] == v
+    proj = make_project(tmp_path / "bad", {"engine_gpu": "cuda"})
+    with pytest.raises(C.ConfigError, match="engine_gpu must be one of"):
+        C.load_config(proj / "config.yaml")
+    for st in ("S1a", "S1b", "S2"):
+        assert "engine_gpu" in R.STAGE_CONFIG_KEYS[st]
+    assert yaml.safe_load((REPO / "config" / "examples" / "config.yaml").read_text())["engine_gpu"] == "auto"
+
+
+def test_engine_gpu_conflicts(tmp_path):
+    # engine_gpu: scfast lifts the scfast + device: gpu error (scfast then runs on CUDA)
+    p = make_project(tmp_path / "ok", {"engine": "scfast", "device": "gpu", "engine_gpu": "scfast"})
+    C.load_config(p / "config.yaml")
+    p = make_project(tmp_path / "rapids", {"engine": "scfast", "device": "gpu", "engine_gpu": "rapids"})
+    with pytest.raises(C.ConfigError, match="engine: scfast has no GPU backend"):
+        C.load_config(p / "config.yaml")
+    p = make_project(tmp_path / "seurat", {"engine": "seurat", "engine_gpu": "scfast"})
+    with pytest.raises(C.ConfigError, match="engine_gpu: scfast needs engine: auto or scfast"):
+        C.load_config(p / "config.yaml")

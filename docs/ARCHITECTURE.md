@@ -75,13 +75,21 @@ and the gate files.
 
 `engine` (`auto`, `scfast`, `seurat`) and `device` together choose the path. The Rust engine
 (`scfast`, [`RUST_ENGINE.md`](RUST_ENGINE.md), wiring in [`scfast-integration.md`](scfast-integration.md))
-is CPU-only today, so:
+has a CUDA backend that is not yet validated on hardware, so:
 
-| plan | `engine: auto` picks | path in `S2/summary.json` | exchange files |
+| plan | `engine: auto` (+ `engine_gpu: auto`) picks | path in `S2/summary.json` | exchange files |
 |---|---|---|---|
 | CPU, `scfastR` installed | scfast | `cpu_scfast` | none |
 | CPU, no `scfastR` | seurat | `cpu_seurat` | none |
-| GPU fits | seurat | `gpu_exchange` (rapids-singlecell) | yes, as below |
+| GPU fits, `scfastR` built with CUDA and a device visible | scfast (CUDA) | `gpu_scfast` | none |
+| GPU fits, otherwise | seurat + rapids | `gpu_exchange` (rapids-singlecell) | yes, as below |
+
+The Rust engine (`rust/`): `scfast-core` (fused preprocessing, implicit-scaled randomised-SVD PCA,
+exact kNN, SNN, Leiden via single-clustering), optional feature `cuda` (cudarc, NVRTC kernels for
+the sparse products and top-k, cuBLAS; loaded at runtime so the crate builds without the toolkit)
+and feature `cugraph` (cuGraph Leiden through its C API, also loaded at runtime), with the R
+package `scfastR` (extendr) and the Python module `scfast` (PyO3). The CUDA and cuGraph paths are
+compiled and unit-tested without hardware; their parity tests are `#[ignore]` and run on the L4.
 
 On the Rust path S1a computes doublet scores and pre-clusters in R (`R/stages/doublets_scfast.R`),
 S2 runs `RunPCAFast`, `FindNeighborsFast`, `FindClustersFast` and `uwot` UMAP in process, and
@@ -189,12 +197,13 @@ doublets and platelets (`tests/README.md`):
 
 | Suite | Covers |
 |---|---|
-| R testthat (≈1,080 expectations) | exchange format, S0 every input format, S1a metrics by hand, S2 CPU and GPU paths, S3 markers and signatures, S4 planted DE genes recovered by DESeq2 and limma |
-| Python pytest (≈470 tests) | exchange, gpu_core, config validation, runner fingerprints and resume, QC rules, S1b/S1c, consensus annotation, Open Targets client with recorded responses, LLM providers and ledger, every gate and agent with a scripted mock LLM, report, site tooling |
+| R testthat (≈1,120 expectations) + scfastR package tests (≈390) | exchange format, S0 every input format, S1a metrics by hand, S2 CPU and GPU paths, S3 markers and signatures, S4 planted DE genes recovered by DESeq2 and limma |
+| Python pytest (≈500 tests) | exchange, gpu_core, config validation, runner fingerprints and resume, QC rules, S1b/S1c, consensus annotation, Open Targets client with recorded responses, LLM providers and ledger, every gate and agent with a scripted mock LLM, report, site tooling |
 | `run_roundtrip.sh` | R ↔ Python exchange, merge-back and every refusal case |
 | `run_stages.sh` | S0–S2 on CPU and GPU paths; QC decisions vs planted truth; clusters vs planted types (ARI) |
 | `run_full.sh` | the whole pipeline S0 → S5 through all four gates with a mock LLM and offline Open Targets; uses the Rust engine when `scfastR` is installed |
 
-Not yet exercised anywhere but the HPC: a real GPU, the live Claude API, the live Open Targets
+Not yet exercised anywhere but the HPC: a real GPU (including the scfast CUDA/cuGraph backend,
+whose parity tests wait for the L4: `bench/hpc/`), the live Claude API, the live Open Targets
 API (both were unreachable from the development workspace). `scpipe doctor` on the login node
 checks all three before a run.

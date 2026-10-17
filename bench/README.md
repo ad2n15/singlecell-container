@@ -35,6 +35,41 @@ Synthetic data is fine for timing and for testing the harness; use real data for
 
 The report ends up in `bench/results/<name>/report.md`.
 
+## Running in a container (100k and larger)
+
+`docker/` builds an image with a current Seurat (5.1 or later, so Leiden runs through
+`leidenbase` and does not build a dense cells x cells matrix), Scanpy and the scfast wheel,
+then generates a synthetic dataset and runs the harness. It has not been built in CI yet, so
+the first build may need small fixes.
+
+```bash
+CELLS=100000 THREADS=8 MEM=48g bash docker/run.sh                # full pipeline
+CELLS=100000 THREADS=8 MEM=48g SKIP_UMAP=1 bash docker/run.sh    # without UMAP
+```
+
+Variables: `CELLS`, `GENES`, `TYPES`, `THREADS`, `REPS`, `ENGINES`
+(default `seurat,scanpy,scfast-cpu`), `NAME`, `TIMEOUT`, `SKIP_UMAP`, and for the container
+`MEM` and `CPUS`. Results land in `bench/results/<name>/` on the host (`report.md`,
+`results.jsonl`, plots). Give the container real resources and nothing else to compete with:
+timings and peak memory are only comparable when `THREADS` matches the CPUs it can use.
+
+## Your own data, with every step's output
+
+`pipeline_steps.py` runs the workflow once and keeps each step's tables and plots in its own
+folder (`01_qc` ... `07_umap`), plus `summary.md`, `timings.json`, `cluster_marker_means.csv`
+and `final.h5ad`. It takes a 10x folder, `.h5` or `.h5ad`; in a multiplexed or hashing `.h5`
+only the Gene Expression features are used (Antibody Capture / hashtag features are dropped).
+Its QC defaults suit modern GEM-X data (no upper gene cut-off, 20% mitochondrial); change them
+with `--max-genes` and `--max-mt`.
+
+```bash
+python bench/pipeline_steps.py --input sample_filtered_feature_bc_matrix.h5 --out results/run --engine scfast-cpu
+INPUT=~/Downloads/sample_filtered_feature_bc_matrix.h5 MEM=16g bash docker/run.sh pipeline   # in the container
+```
+
+Use the `filtered_feature_bc_matrix.h5` (cells only). A `.cloupe` file is a Loupe Browser
+file and cannot be read here.
+
 ## `run_bench.sh` options
 
 | Option | Default | Meaning |

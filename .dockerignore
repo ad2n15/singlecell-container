@@ -1,2 +1,8 @@
+.git
 rust/target
+rust/scfast-r/src/rust/target
+bench/results
+data
 **/__pycache__
+**/.pytest_cache
+*.so

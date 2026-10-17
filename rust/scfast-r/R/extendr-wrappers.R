@@ -8,15 +8,17 @@
 NULL
 
 #' Implicitly scaled PCA of a genes x cells dgCMatrix, read in place as cells x genes CSR.
-#' `oversample` / `power_iters` < 0 keep the scfast-core defaults.
+#' `oversample` / `power_iters` < 0 keep the scfast-core defaults. `device` is "cpu",
+#' "cuda" / "cuda:<i>" or "auto" (see `rs_device`); the device used is returned as `device`.
 #' @keywords internal
-rs_pca_csc <- function(p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters) .Call(wrap__rs_pca_csc, p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters)
+rs_pca_csc <- function(p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters, device) .Call(wrap__rs_pca_csc, p, i, x, n_genes, n_cells, npcs, seed, oversample, power_iters, device)
 
 #' Exact / HNSW k nearest neighbours (self included) of every row of a double matrix
-#' (cells x dims). Returns 1-based indices and Euclidean distances, both n x k.
-#' `auto_threshold` < 0 keeps the scfast-core default.
+#' (cells x dims). Returns 1-based indices and Euclidean distances, both n x k, and the
+#' `device` used. `auto_threshold` < 0 keeps the scfast-core default. On a CUDA device
+#' `method` is ignored (brute force GEMM + top-k).
 #' @keywords internal
-rs_knn <- function(mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold) .Call(wrap__rs_knn, mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold)
+rs_knn <- function(mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold, device) .Call(wrap__rs_knn, mat, n, d, k, method, seed, hnsw_m, ef_construction, ef_search, auto_threshold, device)
 
 #' SNN (Jaccard) graph from an n x k matrix of 1-based neighbour indices (self first).
 #' Returns the full symmetric adjacency as CSR parts (0-based), which are also its CSC parts.
@@ -28,15 +30,36 @@ rs_snn <- function(idx, n, k, prune) .Call(wrap__rs_snn, idx, n, k, prune)
 #' @keywords internal
 rs_leiden <- function(p, i, x, n, resolution, seed, n_iter) .Call(wrap__rs_leiden, p, i, x, n, resolution, seed, n_iter)
 
+#' `rs_leiden` with a device: "cpu", "auto" (cuGraph when built with the `cugraph` feature,
+#' loadable and a CUDA device is usable, else CPU), "cuda" or "cuda:<index>" (an error when
+#' cuGraph is not available). Phase 7, docs/scfast-integration.md.
+#' @keywords internal
+rs_leiden_on <- function(p, i, x, n, resolution, seed, n_iter, device) .Call(wrap__rs_leiden_on, p, i, x, n, resolution, seed, n_iter, device)
+
+#' Resolves a Leiden device string to the device `rs_leiden_on` would run on: "cpu" or
+#' "cuda:<index>". "auto" becomes "cuda:0" only when cuGraph is usable; an explicit "cuda"
+#' that is not usable is an error naming the reason. Third element: whether the `cugraph`
+#' feature was compiled in at all.
+#' @keywords internal
+rs_leiden_device <- function(device) .Call(wrap__rs_leiden_device, device)
+
 #' Is the n x n dgCMatrix (`@p`, `@i`, `@x`, row indices sorted within columns, as in any
 #' valid dgCMatrix) symmetric to a relative tolerance? O(nnz log degree), no allocation,
 #' unlike `isSymmetric()` in R, which builds the transpose.
 #' @keywords internal
 rs_is_symmetric <- function(p, i, x, n, tol) .Call(wrap__rs_is_symmetric, p, i, x, n, tol)
 
-#' Build information: crate version, rayon thread count, compiled backends.
+#' Build information: crate version, rayon thread count, compiled backends and the CUDA
+#' device state (`cuda` = `cuda_built`, kept for older callers).
 #' @keywords internal
 rs_info <- function() .Call(wrap__rs_info)
+
+#' Resolves a PCA / kNN device string ("auto", "cpu", "cuda", "cuda:<i>") to the device the
+#' kernels would run on: "cpu" or "cuda:<i>". "auto" is "cuda:0" only when scfastR was
+#' built with the `cuda` feature and a device is usable; an explicit "cuda" that is not
+#' usable is an error naming the reason.
+#' @keywords internal
+rs_device <- function(device) .Call(wrap__rs_device, device)
 
 #' Address of an R vector's data, as a hex string (zero-copy checks).
 #' @keywords internal
@@ -51,3 +74,16 @@ rs_csr_view_ptrs <- function(p, i, x, n_genes, n_cells) .Call(wrap__rs_csr_view_
 #' @keywords internal
 rs_debug_panic <- function(msg) .Call(wrap__rs_debug_panic, msg)
 
+
+#' Fused NormalizeData + FindVariableFeatures(vst) + ScaleData statistics of a genes x cells
+#' counts dgCMatrix, read in place as cells x genes CSR. Returns the log-normalised `@x`
+#' (same `@p`/`@i` as the counts), per-cell library sizes, the per-gene vst columns, and the
+#' HVGs (1-based, most variable first) with the mean / sd of their log-normalised values.
+#' `clip` <= 0 means sqrt(n_cells).
+#' @keywords internal
+rs_preprocess_csc <- function(p, i, x, n_genes, n_cells, n_hvg, scale_factor, span, clip) .Call(wrap__rs_preprocess_csc, p, i, x, n_genes, n_cells, n_hvg, scale_factor, span, clip)
+
+#' Local quadratic loess of y on x evaluated at every x (R's loess with surface = "direct").
+#' For the parity tests of the loess used by rs_preprocess_csc.
+#' @keywords internal
+rs_loess_direct <- function(x, y, span) .Call(wrap__rs_loess_direct, x, y, span)

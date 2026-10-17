@@ -116,8 +116,8 @@ SAMPLE_BYTES = 1024**2
 
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "S0": ("object_format", "samples_resolved", "sample_columns"),
-    "S1a": ("object_format", "doublets.method", "engine", "policy.protected_populations"),
-    "S1b": ("doublets.method", "engine", "seed", "device", "resources.gpu_mem_cap_gb"),
+    "S1a": ("object_format", "doublets.method", "engine", "engine_gpu", "policy.protected_populations"),
+    "S1b": ("doublets.method", "engine", "engine_gpu", "seed", "device", "resources.gpu_mem_cap_gb"),
     "S1c": ("policy",),
     # G1 = the QC gate (scpipe.gates.g1_qc): rules baseline, optional LLM worker + reviewer, human approval.
     "G1": ("policy", "gates.G1", "llm"),
@@ -126,6 +126,7 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
         "normalization",
         "n_hvg",
         "engine",
+        "engine_gpu",
         "device",
         "integration",
         "pcs",

@@ -382,6 +382,16 @@ run_s4 <- function(cfg, repo) {
   all_covs <- unique(unlist(lapply(d$contrasts, function(ct) ct$covariates)))
   need_cols <- unique(c(d$sample_col, d$condition_col, all_covs))
   miss <- setdiff(need_cols, colnames(md))
+  if (length(miss) && !length(d$contrasts) && !(d$sample_col %in% miss)) {
+    # No contrasts: the condition / covariate columns are not needed. Pseudobulk still runs;
+    # record the absence instead of failing the run (one-sample or no-condition studies).
+    cond_note <- sprintf("dge: column(s) %s not in the cell metadata and dge.contrasts is empty: pseudobulk only, no DGE",
+                         paste(miss, collapse = ", "))
+    scp_warn_log(cond_note); notes <- c(notes, cond_note)
+    need_cols <- setdiff(need_cols, miss)
+    if (!(d$condition_col %in% colnames(md))) { md[[d$condition_col]] <- "unspecified"; need_cols <- c(need_cols, d$condition_col) }
+    miss <- character()
+  }
   if (length(miss)) scp_stop("dge: column(s) not in the cell metadata (sample sheet columns become cell metadata in S0): ",
                              paste(miss, collapse = ", "), "; available: ", paste(colnames(md), collapse = ", "))
   sample_v <- as.character(md[[d$sample_col]])

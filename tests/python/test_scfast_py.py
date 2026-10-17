@@ -162,7 +162,7 @@ def test_version_matches_cargo_workspace():
 
 
 def test_public_api():
-    assert set(scfast.__all__) == {"__version__", "pca", "knn", "snn", "leiden"}
+    assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess"}
     for name in ("pca", "knn", "snn", "leiden"):
         assert getattr(scfast, name).__doc__
 
@@ -471,6 +471,75 @@ def test_knn_parameter_errors(kwargs, exc):
     x = np.random.default_rng(0).normal(size=(10, 3)).astype(np.float32)
     with pytest.raises(exc):
         scfast.knn(x, **{"k": 3, **kwargs})
+
+
+# ---------------------------------------------------------------- device (Phase 6)
+
+def test_device_info_shape():
+    info = scfast.device_info()
+    assert set(info) == {"cuda_built", "cuda_available", "device_count", "device_name", "free_gb",
+                         "total_gb", "compute_capability", "cuda_error", "auto_device"}
+    assert isinstance(info["cuda_built"], bool) and isinstance(info["cuda_available"], bool)
+    if not info["cuda_built"]:
+        assert not info["cuda_available"] and info["device_count"] == 0
+        assert "cuda" in info["cuda_error"]
+    if not info["cuda_available"]:
+        assert info["auto_device"] == "cpu"
+        assert info["device_name"] is None
+        assert isinstance(info["cuda_error"], str)
+    else:
+        assert info["auto_device"] == "cuda:0" and info["device_count"] >= 1
+
+
+def test_device_strings_resolve():
+    assert _scfast.device("cpu") == "cpu"
+    assert _scfast.device("CPU") == "cpu"
+    assert _scfast.device("auto") == scfast.device_info()["auto_device"]
+    with pytest.raises(ValueError, match="device"):
+        _scfast.device("tpu")
+    if not scfast.device_info()["cuda_available"]:
+        with pytest.raises(RuntimeError, match="GPU"):
+            _scfast.device("cuda:0")
+        X, _ = expr_csr(40, 20)
+        with pytest.raises(RuntimeError, match="GPU"):
+            scfast.pca(X, n_comps=5, device="cuda")
+        with pytest.raises(RuntimeError, match="GPU"):
+            scfast.knn(np.zeros((10, 3), np.float32), k=3, device="gpu")
+
+
+def test_auto_falls_back_to_cpu_on_gpu_error_only():
+    from scfast import _with_cpu_fallback
+
+    calls = []
+
+    def call(dev):
+        calls.append(dev)
+        if dev != "cpu":
+            raise RuntimeError("scfast.pca: GPU: out of device memory (alloc)")
+        return "ok"
+
+    with pytest.warns(RuntimeWarning, match="falling back to the CPU"):
+        assert _with_cpu_fallback("auto", "cuda:0", call) == "ok"
+    assert calls == ["cuda:0", "cpu"]
+    calls.clear()
+    with pytest.raises(RuntimeError, match="GPU"):
+        _with_cpu_fallback("cuda", "cuda:0", call)
+    assert calls == ["cuda:0"]
+
+    def other(dev):
+        raise RuntimeError("scfast.pca: faer thin SVD: boom")
+
+    with pytest.raises(RuntimeError, match="faer"):
+        _with_cpu_fallback("auto", "cuda:0", other)
+
+
+def test_cpu_and_auto_agree_here():
+    X, _ = expr_csr(60, 30)
+    a = scfast.pca(X, n_comps=5, device="cpu")
+    b = scfast.pca(X, n_comps=5, device="auto")
+    if not scfast.device_info()["cuda_available"]:
+        for u, v in zip(a, b):
+            assert np.array_equal(u, v)
 
 
 def test_knn_rejects_non_finite_values():
