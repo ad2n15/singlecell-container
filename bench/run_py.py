@@ -173,6 +173,8 @@ class ScfastEngine(ScanpyEngine):
     'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. Leiden
     clusters Seurat's SNN graph; UMAP lays out the kNN graph (umap-learn's fuzzy set) from
     a PCA start. The kNN distances go to obsp["distances"] so the parity outputs line up.
+    kNN is scfast's "auto": exact below 50k cells, the eps = 0.7 k-d tree above (about 0.95
+    of the exact neighbours; scfast.knn).
     """
 
     device = "cpu"
@@ -202,7 +204,7 @@ class ScfastEngine(ScanpyEngine):
         import numpy as np
         import scipy.sparse as sp
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact")
+        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="auto")
         n = idx.shape[0]
         rows = np.repeat(np.arange(n), cfg.k - 1)
         a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
