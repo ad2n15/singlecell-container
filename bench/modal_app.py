@@ -29,24 +29,29 @@ ROOT = Path(__file__).resolve().parent.parent
 GPU = os.environ.get("SCFAST_GPU", "L4")
 CPUS = int(os.environ.get("SCFAST_CPUS", "8"))
 MEM_GB = int(os.environ.get("SCFAST_MEM_GB", "48"))
-RAPIDS = "25.8.*"
+RAPIDS = "26.2.*"
 
 app = modal.App("scfast-bench")
 bench_vol = modal.Volume.from_name("scfast-bench", create_if_missing=True)
 cargo_vol = modal.Volume.from_name("scfast-cargo", create_if_missing=True)
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.4.1-devel-ubuntu22.04", add_python="3.12")
+    modal.Image.from_registry("nvidia/cuda:12.9.1-devel-ubuntu22.04", add_python="3.12")
     .apt_install("build-essential", "curl", "git", "pkg-config")
     .run_commands("curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable")
     .env({"PATH": "/root/.cargo/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
           "CARGO_HOME": "/cache/cargo", "CARGO_TARGET_DIR": "/cache/target", "PYTHONUNBUFFERED": "1"})
     .pip_install(
         "scanpy", "anndata", "scikit-misc", "leidenalg", "python-igraph", "h5py", "scikit-learn", "matplotlib",
-        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", "rapids-singlecell",
-        f"cudf-cu12=={RAPIDS}", f"cuml-cu12=={RAPIDS}", f"cugraph-cu12=={RAPIDS}", f"libcugraph-cu12=={RAPIDS}",
-        "cupy-cuda12x",
+        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", "cupy-cuda12x[ctk]",
+        f"cudf-cu12=={RAPIDS}", f"cuml-cu12=={RAPIDS}", f"cugraph-cu12=={RAPIDS}", f"cuvs-cu12=={RAPIDS}",
+        f"libcugraph-cu12=={RAPIDS}",
         extra_index_url="https://pypi.nvidia.com",
+    )
+    .env({"CC": "gcc", "CXX": "g++", "SKBUILD_CMAKE_DEFINE_CMAKE_CUDA_ARCHITECTURES": "86;89;90"})
+    .run_commands(
+        "pip install rapids-singlecell --no-deps && pip install docrep natsort scikit-image statsmodels tqdm "
+        "'scverse-misc[settings]'",
     )
     .add_local_dir(ROOT, "/work", ignore=["**/.git", "**/target", "**/__pycache__", "bench/results", "data",
                                           "plots", "plots_scanpy", "R", "tests", "docker", "containers"])
