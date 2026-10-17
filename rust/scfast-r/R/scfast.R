@@ -708,10 +708,9 @@ FindClustersFast <- function(object, graph.name = NULL, resolution = 0.5, random
 #' The `@p`, `@i` and `@x` arrays of `counts` (genes x cells) are read in place; the
 #' returned `data` matrix shares `@p` and `@i` with `counts`.
 #'
-#' The loess (local quadratic, tricube, span `loess.span`) is R's
-#' `loess(log10(variance) ~ log10(mean), surface = "direct")`; Seurat uses the default
-#' interpolated surface, so expected variances differ slightly (HVG overlap > 99% on the
-#' test data).
+#' The loess (local quadratic, tricube, span `loess.span`) is R's default
+#' `loess(log10(variance) ~ log10(mean))` (`surface = "interpolate"`) that Seurat calls,
+#' so the expected variances match Seurat's to ~1e-11 (log10).
 #'
 #' @param counts A genes x cells `dgCMatrix` of raw counts (other matrix classes are
 #'   converted, which copies).

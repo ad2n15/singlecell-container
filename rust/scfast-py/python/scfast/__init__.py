@@ -459,9 +459,9 @@ def preprocess(
 
     Notes
     -----
-    The loess is R's ``loess(..., surface = "direct")`` (exact local quadratic fit at
-    every gene); Seurat uses R's interpolated surface, so the expected variances differ
-    slightly and the HVG sets overlap by > 99% rather than exactly.
+    The loess is R's default ``loess(..., span, degree = 2)`` (``surface =
+    "interpolate"``) that Seurat calls; expected variances match R to ~1e-11 (log10), so
+    the HVG set is Seurat's.
     """
     import scipy.sparse as sp
 
