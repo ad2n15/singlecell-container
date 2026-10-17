@@ -142,8 +142,9 @@ class RapidsEngine(ScanpyEngine):
         self.rsc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.dims, random_state=cfg.seed)
 
     def cluster(self, a, cfg):
-        self.rsc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, n_iterations=2,
-                           key_added="cluster")
+        # rsc passes n_iterations to cuGraph as max_level (aggregation depth), not leidenalg's
+        # repeat count: 2 stops the merge early, so keep its default of 100.
+        self.rsc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, key_added="cluster")
 
     def umap(self, a, cfg):
         self.rsc.tl.umap(a, random_state=cfg.seed)

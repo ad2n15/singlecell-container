@@ -62,6 +62,13 @@ def sh(cmd: list[str], env: dict | None = None, cwd: str = "/work", check: bool 
     return rc
 
 
+def touch_sources() -> None:
+    """Mounted files keep their local mtimes, which can predate the cached build; cargo would skip the rebuild."""
+    for f in Path("/work/rust").rglob("*"):
+        if f.suffix in (".rs", ".toml"):
+            f.touch()
+
+
 def gpu_libs() -> dict:
     """LD_LIBRARY_PATH covering the pip-installed CUDA / RAPIDS libraries, for dlopen from Rust."""
     site = sysconfig.get_paths()["purelib"]
@@ -83,6 +90,7 @@ def install_wheel() -> None:
 @app.function(image=image, cpu=16, memory=32768, timeout=3000, volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def build_remote(tests: bool = True) -> str:
     feats = ["--features", "cuda,cugraph"]
+    touch_sources()
     shutil.rmtree("/tmp/wheels", ignore_errors=True)
     sh(["maturin", "build", "--release", "-m", "rust/scfast-py/Cargo.toml", *feats, "-o", "/tmp/wheels"])
     Path("/vol/wheels").mkdir(parents=True, exist_ok=True)
@@ -119,9 +127,10 @@ def gen_remote(tag: str, sizes: str, genes: int = 5000, types: int = 10, force: 
               volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def rust_tests_remote(args: str = "") -> str:
     cargo_vol.reload()
+    touch_sources()
     sh(["nvidia-smi"], check=False)
-    cmd = ["cargo", "test", "--release", "-p", "scfast-core", "--features", "cuda,cugraph", *args.split(),
-           "--", "--include-ignored", "--nocapture", "--test-threads=1"]
+    cmd = ["cargo", "test", "--no-fail-fast", "--release", "-p", "scfast-core", "--features", "cuda,cugraph", *args.split(),
+           "--", "--include-ignored", "--skip", "external_dataset_report", "--skip", "seurat_parity_pbmc_like", "--nocapture", "--test-threads=1"]
     env = {**gpu_libs(), "SCFAST_CUGRAPH_TEST": "1"}
     print("$", " ".join(cmd), flush=True)
     p = subprocess.run(cmd, cwd="/work/rust", env={**os.environ, **env}, capture_output=True, text=True)

@@ -14,7 +14,7 @@
 //! |-----------------|---------------------------|
 //! | `resolution`    | `resolution`              |
 //! | `seed`          | `cugraph_rng_state_create(handle, seed)` |
-//! | `n_iterations`  | `max_level`               |
+//! | `n_iterations`  | — (`max_level = 100`, see [`MAX_LEVEL`]) |
 //! | —               | `theta = 1.0`             |
 //!
 //! # Graph hand-off
@@ -71,11 +71,17 @@ const CUGRAPH_SUCCESS: ErrCode = 0;
 type Bool = c_int;
 const FALSE: Bool = 0;
 const TRUE: Bool = 1;
-/// `cugraph_data_type_id_t`: `INT32 = 0, INT64 = 1, FLOAT32 = 2, FLOAT64 = 3, SIZE_T = 4`.
+/// `max_level` for `cugraph_leiden` (cuGraph's default). It caps the aggregation depth, which
+/// is not leidenalg's `n_iterations` (full passes): mapping 2 iterations to 2 levels stops the
+/// merge early and returns hundreds of fragments on a graph with 8 planted clusters.
+const MAX_LEVEL: usize = 100;
+
+/// `cugraph_data_type_id_t` (types.h): `INT8 = 0, INT16, INT32, INT64, UINT8, UINT16, UINT32,
+/// UINT64, FLOAT32, FLOAT64, SIZE_T, BOOL`.
 type DType = c_int;
-const DTYPE_INT32: DType = 0;
-const DTYPE_INT64: DType = 1;
-const DTYPE_FLOAT32: DType = 2;
+const DTYPE_INT32: DType = 2;
+const DTYPE_INT64: DType = 3;
+const DTYPE_FLOAT32: DType = 8;
 
 /// `cugraph_graph_properties_t { bool_t is_symmetric; bool_t is_multigraph; }`.
 #[repr(C)]
@@ -641,7 +647,7 @@ impl CugraphLeiden {
         let mut result: Opaque = std::ptr::null_mut();
         let mut err: Opaque = std::ptr::null_mut();
         let rc = unsafe {
-            (api.leiden)(h.ptr, rng.ptr, g.ptr, params.n_iterations, params.resolution, 1.0, FALSE, &mut result, &mut err)
+            (api.leiden)(h.ptr, rng.ptr, g.ptr, MAX_LEVEL, params.resolution, 1.0, FALSE, &mut result, &mut err)
         };
         api.check(rc, err, "cugraph_leiden")?;
         if result.is_null() {
