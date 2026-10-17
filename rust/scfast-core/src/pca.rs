@@ -43,9 +43,11 @@ use operator::{Blocks, ScaledOp};
 pub struct PcaParams {
     /// Number of components (Seurat `npcs`; pipeline default 30).
     pub n_comps: usize,
-    /// Extra random directions for the range finder (Halko et al.); 10 is standard.
+    /// Extra random directions for the range finder (Halko et al.). Default 30: scRNA-seq
+    /// spectra flatten into a noise bulk after the cell-type components, and the extra
+    /// directions are what lets PCs 10-30 converge (see `Default`).
     pub oversample: usize,
-    /// Power iterations; more improves accuracy when the spectrum decays slowly.
+    /// Power iterations; more improves accuracy when the spectrum decays slowly. Default 10.
     pub power_iters: usize,
     /// RNG seed (Seurat `seed.use`; pipeline default 0). Same seed, same result.
     pub seed: u64,
@@ -56,9 +58,15 @@ pub struct PcaParams {
     pub clip: Option<f64>,
 }
 
+/// Defaults chosen on the parity runs (Seurat 5.0.1, top-10 PC subspace similarity against
+/// unclipped `RunPCA`): `oversample = 10, power_iters = 4` gives 0.936 on the pbmc_like
+/// fixture and 0.88-0.94 on 2k/5k synthetic PBMC-like data, because PCs past the cell-type
+/// signal sit in a flat noise bulk; `oversample = 30, power_iters = 10` gives 0.9998,
+/// 0.994 and 0.986 (signal PCs exact) for about 2.7x the time, still >25x faster than
+/// `ScaleData` + `RunPCA`.
 impl Default for PcaParams {
     fn default() -> Self {
-        Self { n_comps: 30, oversample: 10, power_iters: 4, seed: 0, scale: true, clip: Some(10.0) }
+        Self { n_comps: 30, oversample: 30, power_iters: 10, seed: 0, scale: true, clip: Some(10.0) }
     }
 }
 
