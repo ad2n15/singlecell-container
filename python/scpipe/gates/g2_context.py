@@ -166,7 +166,8 @@ def baseline(bundle: Mapping[str, Any], cfg: Mapping[str, Any] | None = None) ->
     immune = tissue = 0.0
     for cid, scores in sig.items():
         w = float(comp.get(cid) or 0.0) / 100.0
-        best = max(scores.items(), key=lambda kv: kv[1])[0] if scores else None
+        valid = {k: float(v) for k, v in scores.items() if v is not None}  # NA when a set has no genes in the data
+        best = max(valid.items(), key=lambda kv: kv[1])[0] if valid else None
         if best in _IMMUNE_SETS or best == "platelet" or best == "erythrocyte":
             immune += w
         elif best in _TISSUE_SETS:
