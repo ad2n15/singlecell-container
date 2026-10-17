@@ -166,11 +166,12 @@ def make_engine(name: str):
 
 
 class ScfastEngine(ScanpyEngine):
-    """Scanpy for I/O, normalisation and HVGs; scfast for scale+PCA, kNN+SNN, Leiden and UMAP.
+    """Scanpy for I/O; scfast for everything else.
 
-    'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. Leiden
-    clusters Seurat's SNN graph; UMAP lays out the kNN graph (umap-learn's fuzzy set) from
-    a PCA start. The kNN distances go to obsp["distances"] so the parity outputs line up.
+    `normalize` runs scfast's fused log-normalisation + Seurat vst statistics (the HVGs are
+    Seurat's, not scanpy's seurat_v3), `hvg` only records them, and `scale` is a no-op:
+    scfast's PCA scales and clips implicitly. Leiden clusters Seurat's SNN graph; UMAP lays
+    out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN distances go to obsp["distances"] so the parity outputs line up.
     """
 
     device = "cpu"
@@ -185,10 +186,18 @@ class ScfastEngine(ScanpyEngine):
         versions["scfast"] = scfast.__version__
         return versions
 
+    def normalize(self, a, cfg):
+        self.pre = self.scfast.preprocess(a.X, n_hvg=cfg.n_hvg)
+        a.X = self.pre["data"]
+
+    def hvg(self, a, cfg):
+        a.var["highly_variable"] = False
+        a.var.iloc[self.pre["hvg"], a.var.columns.get_loc("highly_variable")] = True
+
     def scale(self, a, cfg):
-        b = a[:, a.var.highly_variable].copy()
-        del b.layers["counts"]
-        return b
+        import anndata
+
+        return anndata.AnnData(self.pre.pop("X_hvg"), obs=a.obs[[]])
 
     def pca(self, a, cfg):
         import scipy.sparse as sp
@@ -234,7 +243,12 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
 
     device = "gpu"
     scfast_device = "cuda"
-    umap = RapidsEngine.umap
+    normalize, hvg, umap = RapidsEngine.normalize, RapidsEngine.hvg, RapidsEngine.umap
+
+    def scale(self, a, cfg):
+        b = a[:, a.var.highly_variable].copy()
+        del b.layers["counts"]
+        return b
 
     def startup(self):
         versions = super().startup()
