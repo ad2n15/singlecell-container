@@ -58,6 +58,14 @@ n_hvg: 2000                     # number of highly variable genes
 #   gpu:  rapids-singlecell through the exchange format; fails if no GPU
 device: auto                    # auto | cpu | gpu
 
+# Which implementation runs normalisation-to-clustering (docs/scfast-integration.md).
+#   scfast: the in-process Rust engine (R package scfastR); no Seurat <-> AnnData
+#           exchange and no scrublet on this path. CPU only: an error with device: gpu.
+#   seurat: previous behaviour (Seurat on CPU; exchange + rapids/scanpy on GPU)
+#   auto:   scfast if scfastR is installed and the device plan is CPU, else seurat
+#           (`scpipe doctor` shows what auto would pick here)
+engine: auto                    # auto | scfast | seurat
+
 integration:
   method: none                  # none | harmony
   batch_key: sample_id          # a samples.csv column (or sample_id)

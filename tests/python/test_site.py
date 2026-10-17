@@ -408,3 +408,48 @@ def test_doctor_cli_includes_portability_checks(project, tmp_path, monkeypatch):
     out = io.StringIO()
     R._print_doctor(rep, out)
     assert "site:" in out.getvalue() and "llm:" in out.getvalue()
+
+
+# --------------------------------------------------------------------------
+# scfast engine checks
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cfg,scfastr,gpu,expect",
+    [
+        ({}, "0.1.0", False, "scfast"),
+        ({}, None, False, "seurat"),
+        ({}, "0.1.0", True, "seurat"),
+        ({"device": "gpu"}, "0.1.0", False, "seurat"),
+        ({"device": "cpu"}, "0.1.0", True, "scfast"),
+        ({"engine": "seurat"}, "0.1.0", False, "seurat"),
+        ({"engine": "scfast", "device": "auto"}, "0.1.0", True, "scfast"),
+    ],
+)
+def test_resolve_engine(cfg, scfastr, gpu, expect):
+    assert S.resolve_engine(cfg, scfastr=scfastr, gpu_available=gpu)[0] == expect
+
+
+def test_resolve_engine_scfast_errors():
+    with pytest.raises(RuntimeError, match="R CMD INSTALL rust/scfast-r"):
+        S.resolve_engine({"engine": "scfast"}, scfastr=None, gpu_available=False)
+    with pytest.raises(RuntimeError, match="GPU"):
+        S.resolve_engine({"engine": "scfast", "device": "gpu"}, scfastr="0.1.0", gpu_available=False)
+
+
+def test_doctor_checks_engine(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    monkeypatch.setattr(S, "scfastr_version", lambda: "0.1.0")
+    monkeypatch.setattr(S, "scfast_py_version", lambda: None)
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "cpu"}))
+    assert ch[("engine", "scfastR")]["ok"] and ch[("engine", "scfastR")]["detail"] == "0.1.0"
+    assert not ch[("engine", "scfast (python)")]["ok"] and not ch[("engine", "scfast (python)")]["required"]
+    assert ch[("engine", "engine (resolved)")]["detail"].startswith("scfast")
+    monkeypatch.setattr(S, "scfastr_version", lambda: None)
+    ch = by_name(S.doctor_checks({"engine": "scfast", "device": "cpu"}))
+    r = ch[("engine", "engine (resolved)")]
+    assert not r["ok"] and r["required"] and "scfastR" in r["detail"]
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "cpu"}))
+    assert ch[("engine", "engine (resolved)")]["detail"].startswith("seurat")
+    assert not any(c["required"] for k, c in ch.items() if k[0] == "engine")

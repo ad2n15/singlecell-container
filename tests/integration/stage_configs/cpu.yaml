@@ -20,6 +20,8 @@ qc:
   review_action: keep
 normalization: lognorm
 n_hvg: 500                               # the fixture has only 808 genes
+# This script compares the Seurat and exchange (rapids/scanpy) paths; scfast is covered by run_full.sh.
+engine: seurat
 device: cpu
 integration:
   method: none

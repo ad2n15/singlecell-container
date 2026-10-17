@@ -169,3 +169,66 @@ def test_cli(slim, tmp_path):
         )
         assert proc.returncode == 2
         assert "DeviceError" in proc.stderr
+
+
+# --------------------------------------------------------------------------
+# --engine
+# --------------------------------------------------------------------------
+
+
+def test_engine_default_unchanged(slim, tmp_path):
+    s = gpu_core.run(slim[0], tmp_path / "d.h5ad", device="cpu")
+    assert s["engine"] == "scanpy"
+    s = gpu_core.run(slim[0], tmp_path / "e.h5ad", device="cpu", engine="scanpy")
+    assert s["engine"] == "scanpy" and s["device"] == "cpu"
+
+
+def test_engine_invalid_and_rapids_without_gpu(slim, tmp_path):
+    with pytest.raises(ValueError, match="engine"):
+        gpu_core.run(slim[0], tmp_path / "x.h5ad", device="cpu", engine="nope")
+    if gpu_core.gpu_available()[0]:
+        pytest.skip("a GPU is available here")
+    with pytest.raises(gpu_core.DeviceError):
+        gpu_core.run(slim[0], tmp_path / "x.h5ad", device="cpu", engine="rapids")
+
+
+def test_engine_rust_missing_scfast_gives_clear_error(slim, tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "scfast", None)  # makes `import scfast` raise ImportError
+    with pytest.raises(RuntimeError, match="maturin develop"):
+        gpu_core.run(slim[0], tmp_path / "r.h5ad", engine="rust")
+    assert not (tmp_path / "r.h5ad").exists()
+    # and through the CLI: exit code 2 with a JSON error
+    assert gpu_core.main(["--in", str(slim[0]), "--out", str(tmp_path / "r.h5ad"), "--engine", "rust"]) == 2
+
+
+def test_engine_rust_rejects_gpu_device(slim, tmp_path):
+    pytest.importorskip("scfast")
+    with pytest.raises(gpu_core.DeviceError, match="no GPU backend"):
+        gpu_core.run(slim[0], tmp_path / "r.h5ad", device="gpu", engine="rust")
+
+
+def test_engine_rust_run(slim, tmp_path):
+    pytest.importorskip("scfast")
+    p, checksum, a = slim
+    out = tmp_path / "rust.h5ad"
+    s = gpu_core.run(p, out, n_pcs=30, device="auto", seed=0, engine="rust")
+    assert s["engine"] == "rust" and s["device"] == "cpu" and s["n_clusters"] >= 2
+    assert validate_exchange(out) == []
+    r = read_exchange(out)
+    assert r.obsm["X_pca"].shape == (600, 30) and r.obsm["X_umap"].shape == (600, 2)
+    assert r.obsp["connectivities"].shape == (600, 600) and r.obsp["distances"].shape == (600, 600)
+    assert r.uns["exchange"]["source_counts_checksum"] == checksum
+    assert r.uns["gpu_core"]["engine"] == "rust"
+    ct = pd.crosstab(r.obs["leiden"], a.obs["truth"])
+    assert ct.max(axis=1).sum() / ct.to_numpy().sum() > 0.9
+    s2 = gpu_core.run(p, tmp_path / "rust2.h5ad", seed=0, engine="rust")
+    assert list(read_exchange(tmp_path / "rust2.h5ad").obs["leiden"]) == list(r.obs["leiden"])
+    assert s2["n_clusters"] == s["n_clusters"]
+
+
+def test_engine_rust_harmony(slim, tmp_path):
+    pytest.importorskip("scfast")
+    pytest.importorskip("harmonypy")
+    s = gpu_core.run(slim[0], tmp_path / "h.h5ad", batch_key="batch", engine="rust")
+    assert s["harmony"] and "harmony" in s["timings_s"]
+    assert read_exchange(tmp_path / "h.h5ad").obsm["X_harmony"].shape == (600, 30)

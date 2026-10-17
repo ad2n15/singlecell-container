@@ -50,6 +50,15 @@ python tests/fixtures/make_fixture.py --verify  # recompute expected.json from t
 The committed files are what the tests use. If you change the generator, regenerate the files
 and commit them together with it.
 
+## Rust engine tests
+
+The `scfast` tests skip cleanly when `scfastR` / `scfast` are not installed. To run them, build
+and install the packages first (`R CMD INSTALL rust/scfast-r`, `maturin develop --release -m
+rust/scfast-py/Cargo.toml`; see [`docs/INSTALL.md`](../docs/INSTALL.md)). With `scfastR` installed,
+`engine: auto` selects the Rust path, so `run_full.sh` exercises it; `run_stages.sh` pins
+`engine: seurat` because it compares the Seurat and exchange paths with each other. To use a
+private R library, set `R_LIBS`.
+
 ## R unit tests
 
 ```bash

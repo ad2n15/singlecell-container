@@ -51,6 +51,36 @@ scp_pkg_version <- function(p) tryCatch(as.character(utils::packageVersion(p)), 
 scp_has_pkg <- function(p) requireNamespace(p, quietly = TRUE)
 
 # --------------------------------------------------------------------------
+# Engine resolution (docs/scfast-integration.md, "Config")
+# --------------------------------------------------------------------------
+
+#' Resolve the top-level `engine` setting to "scfast" or "seurat".
+#'
+#' @param cfg  resolved config; a missing `engine` is treated as "auto".
+#' @param device  device the stage will run on, "cpu" or "gpu" (the device plan,
+#'   not the config value "auto"). Any other value is treated as "cpu".
+#' `scfast` needs scfastR (error with an install hint if missing) and a CPU plan
+#' (error with `device = "gpu"`: scfast has no CUDA backend yet). `seurat` is
+#' always "seurat". `auto` is "scfast" when scfastR is installed and the plan is
+#' not GPU, else "seurat".
+scp_resolve_engine <- function(cfg, device = "cpu") {
+  eng <- cfg$engine
+  if (is.null(eng)) eng <- "auto"
+  if (!(is.character(eng) && length(eng) == 1 && !is.na(eng) && eng %in% c("auto", "scfast", "seurat")))
+    scp_stop("engine must be one of auto/scfast/seurat (got '", paste(eng, collapse = ","), "')")
+  gpu <- is.character(device) && length(device) == 1 && identical(device, "gpu")
+  if (eng == "seurat") return("seurat")
+  if (eng == "scfast") {
+    if (gpu) scp_stop("engine: scfast has no GPU backend; use device: cpu (or engine: auto/seurat)")
+    if (!scp_has_pkg("scfastR"))
+      scp_stop("engine: scfast needs the R package scfastR, which is not installed; ",
+               "install it with `R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80) or set engine: seurat")
+    return("scfast")
+  }
+  if (!gpu && scp_has_pkg("scfastR")) "scfast" else "seurat"
+}
+
+# --------------------------------------------------------------------------
 # Config
 # --------------------------------------------------------------------------
 

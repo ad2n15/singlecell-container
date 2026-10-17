@@ -128,7 +128,7 @@ rerun_same() {   # same config again: every stage must be skipped
 
 resume_noop() {  # resume on a finished run: exits 0, reruns nothing
   "${CHECK[@]}" snapshot "$CPU" "$WORK/state_before_resume.json" || return 1
-  scpipe resume --run-dir "$CPU" || { echo "scpipe resume exited $?"; return 1; }
+  scpipe resume --run-dir "$CPU" --until S2 || { echo "scpipe resume exited $?"; return 1; }
   "${CHECK[@]}" skipped "$WORK/state_before_resume.json" "$CPU"
 }
 
