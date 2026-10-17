@@ -156,12 +156,65 @@ def make_engine(name: str):
         return ScanpyEngine()
     if name == "rapids":
         return RapidsEngine()
-    # scfast engines: the Python module arrives in Phase 1 (rust/scfast-py).
     try:
         import scfast  # noqa: F401
     except ImportError as e:
-        raise Unavailable(f"scfast is not built yet ({e})") from e
-    raise Unavailable("scfast is importable but its bench adapter is not implemented yet (Phase 5)")
+        raise Unavailable(f"scfast is not built ({e}); see rust/scfast-py") from e
+    if name == "scfast-gpu":
+        raise Unavailable("scfast CUDA backend is not implemented yet (Phase 6)")
+    return ScfastEngine()
+
+
+class ScfastEngine(ScanpyEngine):
+    """Scanpy for I/O, normalisation and HVGs; scfast for scale+PCA, kNN+SNN and Leiden.
+
+    'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. The
+    SNN graph is stored in obsp["connectivities"] so UMAP runs on the same graph Seurat
+    would use, and the kNN distances in obsp["distances"] so the parity outputs line up.
+    """
+
+    device = "cpu"
+
+    def startup(self):
+        versions = super().startup()
+        import scfast
+
+        self.scfast = scfast
+        versions["scfast"] = scfast.__version__
+        return versions
+
+    def scale(self, a, cfg):
+        b = a[:, a.var.highly_variable].copy()
+        del b.layers["counts"]
+        return b
+
+    def pca(self, a, cfg):
+        import scipy.sparse as sp
+
+        emb, load, sdev = self.scfast.pca(sp.csr_matrix(a.X), n_comps=cfg.n_pcs, seed=cfg.seed)
+        a.obsm["X_pca"] = emb
+        a.varm["PCs"] = load
+        a.uns["pca"] = {"variance": (sdev.astype("float64") ** 2)}
+
+    def neighbors(self, a, cfg):
+        import numpy as np
+        import scipy.sparse as sp
+
+        idx, dist = self.scfast.knn(a.obsm["X_pca"][:, : cfg.n_pcs], k=cfg.k, method="exact")
+        n = idx.shape[0]
+        rows = np.repeat(np.arange(n), cfg.k - 1)
+        d = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
+        a.obsp["distances"] = d
+        a.obsp["connectivities"] = self.scfast.snn(idx)  # Seurat's SNN, Jaccard-weighted
+        a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
+                              "params": {"n_neighbors": cfg.k, "method": "scfast-exact+snn"}}
+
+    def cluster(self, a, cfg):
+        import pandas as pd
+
+        labels = self.scfast.leiden(a.obsp["connectivities"], resolution=cfg.resolution, seed=cfg.seed,
+                                    n_iterations=2)
+        a.obs["cluster"] = pd.Categorical(labels.astype(str))
 
 
 # ---------------------------------------------------------------- main
