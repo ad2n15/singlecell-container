@@ -171,10 +171,11 @@ def pca(
     n_comps: int = 30,
     seed: int = 0,
     scale: bool = True,
-    oversample: int = 10,
-    power_iters: int = 4,
+    oversample: int = 30,
+    power_iters: int = 10,
     *,
     device: Literal["auto", "cpu", "cuda"] = "auto",
+    clip: float | None = 10.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Implicitly scaled PCA, replacing Seurat's ``ScaleData`` + ``RunPCA``.
 
@@ -195,9 +196,10 @@ def pca(
         RNG seed for the randomised SVD; the same seed gives the same result.
     scale
         Divide each gene by its standard deviation (n - 1 denominator), as ``ScaleData``.
-        Seurat's ``scale.max`` clipping is not applied.
     oversample, power_iters
-        Randomised-SVD accuracy settings (extra directions and subspace iterations).
+        Randomised-SVD accuracy settings (extra directions and subspace iterations). The
+        defaults reach Seurat parity (top-10 PC subspace similarity > 0.99) on PBMC 3k;
+        ``oversample=10, power_iters=4`` is ~3x faster but only 0.92 similar there.
     device
         ``"auto"`` (CUDA when this build has the ``cuda`` feature and a device is usable,
         else CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``. With ``"auto"`` a GPU
@@ -205,6 +207,9 @@ def pca(
         an explicit ``"cuda"`` that cannot be used raises ``RuntimeError``. On CUDA the
         sparse products run on the device in single precision, so results match the CPU to
         the parity thresholds rather than bitwise. See :func:`device_info`.
+    clip
+        Seurat's ``ScaleData(scale.max)``: scaled values above it are clipped, exactly, as a
+        sparse correction to the implicit operator. ``None`` leaves them unclipped.
 
     Returns
     -------
@@ -226,6 +231,7 @@ def pca(
     oversample, power_iters = _int("oversample", oversample), _int("power_iters", power_iters)
     return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.pca_csr(
         n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, dev,
+        None if clip is None else _float("clip", clip),
     ))
 
 
