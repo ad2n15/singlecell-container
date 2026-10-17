@@ -39,6 +39,11 @@ last MiB (``sampled:<hex>``), so multi-GB inputs cost milliseconds; touching
 such a file therefore counts as a change. Directories (10x ``mtx`` folders)
 hash the sorted list of relative paths and file checksums.
 
+Peak RSS is the kernel's ``ru_maxrss`` for the stage process and its
+descendants (the largest single process, not a sum), measured through a
+small launcher so the runner's own memory is not counted (see
+``_LAUNCHER``).
+
 A ``done`` stage is skipped only if its fingerprint is unchanged and its
 outputs still exist; otherwise it and every later stage are rerun. If a stage
 that must rerun needs a file that a skipped earlier stage wrote and that is
@@ -463,18 +468,54 @@ def tail(path: Path, n: int = LOG_TAIL) -> list[str]:
     return lines[-n:]
 
 
+# Stages are started through this launcher (``python -S -c``, ~10 MB). Linux
+# carries the parent's high-water RSS into a child across fork + exec, so
+# ru_maxrss measured from the runner (which has numpy/pandas loaded) would
+# never be below the runner's own size. The launcher spawns the stage from a
+# fresh small process, waits for it and writes the stage's rusage as JSON.
+# ru_maxrss covers the stage process and every descendant it waited for (the
+# largest of them, not their sum).
+_LAUNCHER = r"""
+import json, os, signal, sys
+out, argv = sys.argv[1], sys.argv[3:]
+try:
+    pid = os.posix_spawnp(argv[0], argv, os.environ)
+except OSError as e:
+    print("# scpipe: cannot start %s: %s" % (argv[0], e), file=sys.stderr)
+    sys.exit(127)
+for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(s, lambda n, f: os.kill(pid, n))
+while True:
+    try:
+        _, st, ru = os.wait4(pid, 0)
+        break
+    except InterruptedError:
+        continue
+with open(out, "w") as f:
+    json.dump({"ru_maxrss": ru.ru_maxrss, "utime": ru.ru_utime, "stime": ru.ru_stime}, f)
+code = os.waitstatus_to_exitcode(st)
+sys.exit(code if code >= 0 else 128 - code)
+"""
+
+
 def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path) -> tuple[int, int, float]:
     """Run argv with output to log_path; return (exit_code, peak_rss_bytes, wall_s).
 
-    Peak RSS comes from ``os.wait4`` for this child (ru_maxrss: the largest
-    resident set of the child or any of its waited-for descendants).
+    ``argv`` may start with a ``nice -n N`` prefix; the launcher goes after it.
     """
     t0 = time.monotonic()
+    nice: list[str] = []
+    rest = list(argv)
+    if rest[:1] == ["nice"] and len(rest) > 3 and rest[1] == "-n":
+        nice, rest = rest[:3], rest[3:]
+    ru_file = log_path.with_name(f".{log_path.stem}.rusage.json")
+    ru_file.unlink(missing_ok=True)
+    full = nice + [sys.executable, "-S", "-c", _LAUNCHER, str(ru_file), "--"] + rest
     with open(log_path, "a", buffering=1) as log:
         log.write(f"# scpipe: started {_utc()} on {socket.gethostname()}\n# scpipe: command {shlex.join(argv)}\n")
         log.flush()
         try:
-            proc = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(full, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                     env=env, cwd=str(cwd), start_new_session=True)
         except OSError as e:
             log.write(f"# scpipe: could not start: {e}\n")
@@ -487,7 +528,7 @@ def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path
             except ProcessLookupError:
                 pass
             try:
-                _, status, ru = os.wait4(proc.pid, 0)
+                os.wait4(proc.pid, 0)
             except ChildProcessError:
                 pass
             proc.returncode = -1
@@ -495,7 +536,14 @@ def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path
             raise
         code = os.waitstatus_to_exitcode(status)
         proc.returncode = code
-        peak = int(ru.ru_maxrss if sys.platform == "darwin" else ru.ru_maxrss * 1024)
+        kb = None
+        try:
+            kb = int(json.loads(ru_file.read_text())["ru_maxrss"])
+        except (OSError, ValueError, KeyError):
+            kb = ru.ru_maxrss  # launcher died: fall back (includes the runner's own size)
+        finally:
+            ru_file.unlink(missing_ok=True)
+        peak = int(kb if sys.platform == "darwin" else kb * 1024)
         wall = time.monotonic() - t0
         log.write(f"# scpipe: finished {_utc()} exit code {code}, wall {wall:.1f}s, peak RSS {_fmt_bytes(peak)}\n")
     return code, peak, wall
