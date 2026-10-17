@@ -52,10 +52,9 @@ s2_run_python <- function(repo, args, extra_env = character()) {
 # Parse the last JSON object printed on stdout.
 .s2_parse_json_out <- function(lines) {
   txt <- paste(lines, collapse = "\n")
-  start <- regexpr("\\{", txt)
-  if (start < 0) return(NULL)
-  # try progressively later '{' until one parses to the end
   pos <- gregexpr("\\{", txt)[[1]]
+  if (pos[[1]] < 0) return(NULL)
+  # try progressively later '{' until one parses to the end
   for (p in pos) {
     v <- tryCatch(jsonlite::fromJSON(substring(txt, p), simplifyVector = TRUE), error = function(e) NULL)
     if (is.list(v)) return(v)
@@ -105,9 +104,11 @@ s2_choose_plan <- function(cfg, repo, n_cells, n_hvg) {
   p <- if (r$status == 0) .s2_parse_json_out(r$stdout) else NULL
   if (is.null(p)) {
     err <- paste(tail(c(r$stdout, r$stderr), 10), collapse = "\n  ")
-    if (device == "cpu") {
-      scp_warn_log("scpipe.resources choose-plan failed (", r$status, "); device is cpu, continuing on the CPU path:\n  ", err)
-      return(list(device = "cpu", plan = "cpu", reason = "device: cpu in config (choose-plan unavailable)", source = "S2"))
+    if (device %in% c("cpu", "auto")) {
+      scp_warn_log("scpipe.resources choose-plan failed (exit ", r$status, "); device is ", device,
+                   ", continuing on the CPU path:\n  ", err)
+      return(list(device = "cpu", plan = "cpu", source = "S2",
+                  reason = paste0("device: ", device, " in config; choose-plan unavailable, so the CPU path is used")))
     }
     scp_stop("device plan: `", s2_python(), " ", paste(args, collapse = " "), "` failed (exit ", r$status, "):\n  ", err)
   }
@@ -211,16 +212,9 @@ s2_leiden_leidenbase <- function(snn, resolution, seed, n_iter = 10L) {
 
 .s2_run_harmony_r <- function(obj, batch_key, dims, seed) {
   set.seed(seed)
-  fm <- names(formals(harmony::RunHarmony))
-  args <- list(object = obj, group.by.vars = batch_key, verbose = FALSE)
-  if ("reduction.use" %in% fm || "reduction" %in% fm) {
-    args[[if ("reduction.use" %in% fm) "reduction.use" else "reduction"]] <- "pca"
-  }
-  if ("dims.use" %in% fm) args$dims.use <- dims
-  if ("reduction.save" %in% fm) args$reduction.save <- "harmony"
-  # RunHarmony.Seurat may hide its arguments behind '...'; the call still works
-  if (!("reduction.use" %in% fm) && !("reduction" %in% fm)) { args$reduction.use <- "pca"; args$dims.use <- dims; args$reduction.save <- "harmony" }
-  do.call(harmony::RunHarmony, args)
+  # harmony >= 1.0: RunHarmony.Seurat(object, group.by.vars, reduction.use, dims.use, reduction.save, ...)
+  harmony::RunHarmony(obj, group.by.vars = batch_key, reduction.use = "pca", dims.use = dims,
+                      reduction.save = "harmony", verbose = FALSE)
 }
 
 # --------------------------------------------------------------------------
@@ -361,8 +355,11 @@ run_s2 <- function(cfg, repo) {
     obj$seurat_clusters <- cl
     obj[[paste0(snn_name, "_res.", cfg$clustering$resolution)]] <- cl
     SeuratObject::Idents(obj) <- cl
-    obj <- tm("umap", Seurat::RunUMAP(obj, reduction = rep_red, dims = dims, n.neighbors = cfg$n_neighbors,
-                                      umap.method = "uwot", seed.use = seed, verbose = FALSE))
+    # Seurat's one-time notice that uwot became the default is not a problem here
+    obj <- tm("umap", withCallingHandlers(
+      Seurat::RunUMAP(obj, reduction = rep_red, dims = dims, n.neighbors = cfg$n_neighbors,
+                      umap.method = "uwot", seed.use = seed, verbose = FALSE),
+      warning = function(w) if (grepl("default method for RunUMAP has changed", conditionMessage(w))) invokeRestart("muffleWarning")))
     # scale.data is never kept (exchange-spec: recomputed where needed); keeps the object small
     if (assay == "RNA" && "scale.data" %in% SeuratObject::Layers(obj[[assay]]))
       SeuratObject::LayerData(obj, assay = assay, layer = "scale.data") <- NULL
