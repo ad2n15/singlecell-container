@@ -28,7 +28,7 @@ import numpy as np
 from . import _scfast
 from ._scfast import __version__
 
-__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn", "umap"]
+__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "read_10x_h5", "snn", "umap"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -481,12 +481,65 @@ def preprocess(
         if clip <= 0:
             raise ValueError(f"clip must be positive, got {clip}")
     out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
-    norm = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
-    out["data"] = norm
-    x_hvg = norm[:, out["hvg"]]
-    x_hvg.sort_indices()  # column selection in HVG order leaves rows unsorted; pca() needs canonical CSR
-    out["X_hvg"] = x_hvg
+    out["data"] = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
+    hvg_indptr = out.pop("hvg_indptr")
+    if int(hvg_indptr[-1]) <= _I32_MAX:
+        hvg_indptr = hvg_indptr.astype(np.int32)
+    out["X_hvg"] = sp.csr_matrix((out.pop("hvg_data"), out.pop("hvg_indices"), hvg_indptr), shape=(n_rows, n_hvg))
     return out
+
+
+def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:
+    """A 1-D h5py dataset as ``dtype``; plain-gzip chunks are inflated in parallel in Rust."""
+    plain_gzip = (ds.chunks is not None and ds.ndim == 1 and ds.compression == "gzip" and not ds.shuffle
+                  and not ds.fletcher32 and ds.scaleoffset is None and ds.dtype.str[1:] in ("i4", "i8", "f4", "f8")
+                  and ds.dtype.byteorder in "<=|" and hasattr(ds.id, "chunk_iter"))
+    if plain_gzip:
+        chunks: list[tuple[int, int, int]] = []
+        ds.id.chunk_iter(lambda c: chunks.append((c.chunk_offset[0], c.byte_offset, c.size)))
+        chunks.sort()
+        info = np.array(chunks, dtype=np.uint64).reshape(-1, 3)
+        step = ds.chunks[0]
+        if np.array_equal(info[:, 0], np.arange(len(chunks), dtype=np.uint64) * step):
+            return _scfast.inflate_chunks(path, np.ascontiguousarray(info[:, 1]), np.ascontiguousarray(info[:, 2]),
+                                          step, ds.shape[0], ds.dtype.str[1:], dtype == np.float32)
+    return ds[()].astype(dtype, copy=False)
+
+
+def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
+    """Read a Cell Ranger ``.h5`` (v2 or v3) as CSR counts, cells x genes.
+
+    The file's genes x cells CSC arrays are a cells x genes CSR as they are, so nothing is
+    transposed. Plain-gzip chunks (h5py / Cell Ranger without shuffle) are read and inflated
+    in parallel in Rust; other layouts go through h5py.
+
+    Returns
+    -------
+    (X, barcodes, gene_names)
+        X: scipy.sparse.csr_matrix, float32 counts, int32 indices, ready for
+        :func:`preprocess`. barcodes, gene_names: str arrays. Files with features other
+        than Gene Expression raise ``ValueError``.
+    """
+    import h5py
+    import scipy.sparse as sp
+
+    path = str(path)
+    with h5py.File(path, "r") as f:
+        g = f["matrix"] if "matrix" in f else f[next(iter(f))]
+        n_genes, n_cells = (int(s) for s in g["shape"][()])
+        if "features" in g:
+            names = g["features/name"][()].astype(str)
+            if "feature_type" in g["features"] and (g["features/feature_type"][()] != b"Gene Expression").any():
+                raise ValueError(f"{path}: has features other than Gene Expression")
+        else:
+            names = g["gene_names"][()].astype(str)
+        indptr = g["indptr"][()]
+        if int(indptr[-1]) > _I32_MAX:
+            raise ValueError(f"{path}: {int(indptr[-1])} non-zeros do not fit int32 indices")
+        X = sp.csr_matrix((_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], np.int32),
+                           indptr.astype(np.int32)), shape=(n_cells, n_genes))
+        barcodes = g["barcodes"][()].astype(str)
+    return X, barcodes, names
 
 
 def _find_ab(spread: float, min_dist: float) -> tuple[float, float]:

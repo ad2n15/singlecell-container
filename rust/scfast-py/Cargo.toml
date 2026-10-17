@@ -20,6 +20,8 @@ rayon.workspace = true
 # sets automatically (and leaving the feature off keeps `cargo check`/`cargo test` linking).
 pyo3 = { version = "0.30", features = ["abi3-py310"] }
 numpy = "0.30"
+# Chunk decompression for scfast.read_10x_h5 (whole-buffer inflate, no streaming needed).
+libdeflater = "1.26"
 
 [features]
 # GPU Leiden via cuGraph's C API (Phase 7), dlopen'ed at run time; the wheel still imports

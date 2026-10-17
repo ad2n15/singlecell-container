@@ -540,7 +540,8 @@ fn leiden_csr<'py>(
 /// Low-level fused preprocessing on borrowed CSR counts (cells x genes). See scfast.preprocess.
 /// Returns (data float32 (nnz,), library_size float64 (n_rows,), mean, variance,
 /// variance_expected, variance_standardized (float64 (n_cols,) each), hvg int32 (n_hvg,),
-/// hvg_mean float64, hvg_sd float64, clip).
+/// hvg_mean float64, hvg_sd float64, clip) and the HVG columns as a canonical CSR in HVG
+/// order (hvg_indptr int64, hvg_indices int32, hvg_data float32).
 #[pyfunction]
 #[pyo3(name = "preprocess_csr", signature = (n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -559,7 +560,7 @@ fn preprocess_csr<'py>(
     let params = PreprocessParams { n_hvg, scale_factor, span, clip };
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;
-    let res: PreprocessResult<f32> = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
+    let res: (PreprocessResult<f32>, _) = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
         let x = CsrView::new(n_rows, n_cols, ip, ix, dx)?;
         check_canonical(&x, "X")?;
         let r = core_preprocess::preprocess::<_, _, f32>(x, &params)?;
@@ -569,9 +570,14 @@ fn preprocess_csr<'py>(
                 r.data.len(), r.library_size.len(), r.mean.len(), x.nnz()
             )));
         }
-        Ok(r)
+        let hvg = select_columns(ip, ix, &r.data, n_cols, &r.hvg);
+        Ok((r, hvg))
     }))?;
+    let (res, (hvg_indptr, hvg_indices, hvg_data)) = res;
     let d = PyDict::new(py);
+    d.set_item("hvg_indptr", PyArray1::from_vec(py, hvg_indptr))?;
+    d.set_item("hvg_indices", PyArray1::from_vec(py, hvg_indices))?;
+    d.set_item("hvg_data", PyArray1::from_vec(py, hvg_data))?;
     d.set_item("data", PyArray1::from_vec(py, res.data))?;
     d.set_item("library_size", PyArray1::from_vec(py, res.library_size))?;
     d.set_item("mean", PyArray1::from_vec(py, res.mean))?;
@@ -583,6 +589,47 @@ fn preprocess_csr<'py>(
     d.set_item("hvg_sd", PyArray1::from_vec(py, res.hvg_sd))?;
     d.set_item("clip", res.clip)?;
     Ok(d)
+}
+
+/// The columns `cols` of a canonical CSR, renumbered `0..cols.len()` in that order, as a
+/// canonical CSR (indptr, indices, data).
+fn select_columns<I: Idx>(indptr: &[I], indices: &[I], data: &[f32], n_cols: usize, cols: &[u32]) -> (Vec<i64>, Vec<i32>, Vec<f32>) {
+    let mut rank = vec![u32::MAX; n_cols];
+    for (r, &c) in cols.iter().enumerate() {
+        rank[c as usize] = r as u32;
+    }
+    let n = indptr.len() - 1;
+    let range = |i: usize| indptr[i].to_usize()..indptr[i + 1].to_usize();
+    let counts: Vec<usize> = (0..n).into_par_iter().map(|i| indices[range(i)].iter().filter(|j| rank[j.to_usize()] != u32::MAX).count()).collect();
+    let mut out_indptr = Vec::with_capacity(n + 1);
+    out_indptr.push(0i64);
+    for c in &counts {
+        out_indptr.push(out_indptr.last().unwrap() + *c as i64);
+    }
+    let nnz = *out_indptr.last().unwrap() as usize;
+    let (mut out_indices, mut out_data) = (vec![0i32; nnz], vec![0f32; nnz]);
+    let mut rows = Vec::with_capacity(n);
+    let (mut ri, mut rd) = (&mut out_indices[..], &mut out_data[..]);
+    for &c in &counts {
+        let (a, b) = std::mem::take(&mut ri).split_at_mut(c);
+        let (x, y) = std::mem::take(&mut rd).split_at_mut(c);
+        rows.push((a, x));
+        (ri, rd) = (b, y);
+    }
+    rows.into_par_iter().enumerate().for_each_init(Vec::new, |pairs, (i, (oi, od))| {
+        pairs.clear();
+        for k in range(i) {
+            let r = rank[indices[k].to_usize()];
+            if r != u32::MAX {
+                pairs.push((r, data[k]));
+            }
+        }
+        pairs.sort_unstable_by_key(|p| p.0);
+        for ((o, v), &(r, d)) in oi.iter_mut().zip(od.iter_mut()).zip(pairs.iter()) {
+            (*o, *v) = (r as i32, d);
+        }
+    });
+    (out_indptr, out_indices, out_data)
 }
 
 // ------------------------------------------------------------------ test probes
@@ -670,6 +717,87 @@ fn umap_knn<'py>(
     vec2_to_py(py, n, 2, emb)
 }
 
+// ------------------------------------------------------------------ 10x h5 chunks
+
+/// Inflates the zlib-compressed chunks of a 1-D HDF5 dataset (read at `offsets`, `sizes`
+/// bytes each, in element order, `chunk_len` elements per chunk) into `n` values. `src` is
+/// the stored little-endian type ("i4", "i8", "f4", "f8"); the result is float32 if
+/// `to_f32`, else int32 (values outside int32 raise ValueError).
+#[pyfunction]
+#[pyo3(signature = (path, offsets, sizes, chunk_len, n, src, to_f32))]
+#[allow(clippy::too_many_arguments)]
+fn inflate_chunks<'py>(
+    py: Python<'py>,
+    path: std::path::PathBuf,
+    offsets: PyReadonlyArray1<'py, u64>,
+    sizes: PyReadonlyArray1<'py, u64>,
+    chunk_len: usize,
+    n: usize,
+    src: &str,
+    to_f32: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let offsets = contiguous(&offsets, "offsets")?;
+    let sizes = contiguous(&sizes, "sizes")?;
+    let width = match src {
+        "i4" | "f4" => 4,
+        "i8" | "f8" => 8,
+        _ => return Err(PyValueError::new_err(format!("unsupported stored type {src}"))),
+    };
+    if chunk_len == 0 || offsets.len() != sizes.len() || offsets.len() != n.div_ceil(chunk_len) {
+        return Err(PyValueError::new_err(format!("{} chunks of {chunk_len} do not cover {n} values", offsets.len())));
+    }
+    let file = std::fs::File::open(&path).map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+    if to_f32 {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<f32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    } else {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<i32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    }
+}
+
+trait FromStored: Copy + Default + Send + Sync {
+    fn from_f64(v: f64) -> Option<Self>;
+}
+impl FromStored for f32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        Some(v as f32)
+    }
+}
+impl FromStored for i32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (v >= i32::MIN as f64 && v <= i32::MAX as f64).then_some(v as i32)
+    }
+}
+
+fn inflate_into<O: FromStored>(file: &std::fs::File, offsets: &[u64], sizes: &[u64], chunk_len: usize, n: usize, width: usize, src: &str) -> scfast_core::Result<Vec<O>> {
+    use std::os::unix::fs::FileExt;
+    let decode: fn(&[u8]) -> f64 = match src {
+        "i4" => |b| i32::from_le_bytes(b.try_into().unwrap()) as f64,
+        "i8" => |b| i64::from_le_bytes(b.try_into().unwrap()) as f64,
+        "f4" => |b| f32::from_le_bytes(b.try_into().unwrap()) as f64,
+        _ => |b| f64::from_le_bytes(b.try_into().unwrap()),
+    };
+    let mut out = vec![O::default(); n];
+    out.par_chunks_mut(chunk_len).zip(offsets.par_iter().zip(sizes)).try_for_each_init(
+        || (libdeflater::Decompressor::new(), Vec::new(), vec![0u8; chunk_len * width]),
+        |(dec, comp, raw), (out, (&off, &size))| {
+            comp.resize(size as usize, 0);
+            file.read_exact_at(comp, off).map_err(|e| backend("read_10x_h5", format!("read at byte {off}: {e}")))?;
+            let got = dec.zlib_decompress(comp, raw).map_err(|e| Error::InvalidInput(format!("chunk at byte {off}: {e}")))?;
+            if got != raw.len() {
+                return Err(Error::InvalidInput(format!("chunk at byte {off} inflated to {got} bytes, expected {}", raw.len())));
+            }
+            for (o, b) in out.iter_mut().zip(raw.chunks_exact(width)) {
+                let v = decode(b);
+                *o = O::from_f64(v).ok_or_else(|| Error::InvalidInput(format!("value {v} does not fit int32")))?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
 // ------------------------------------------------------------------ module
 
 /// Native core of scfast (Rust). Use the `scfast` package, not this module, directly.
@@ -678,7 +806,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
+    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

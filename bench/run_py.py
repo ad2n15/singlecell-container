@@ -21,6 +21,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 T_PROCESS = time.perf_counter()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -165,13 +166,16 @@ def make_engine(name: str):
     return ScfastGpuEngine() if name == "scfast-gpu" else ScfastEngine()
 
 
-class ScfastEngine(ScanpyEngine):
-    """Scanpy for I/O; scfast for everything else.
+class ScfastEngine:
+    """scfast end to end, without scanpy or AnnData: the run is a SimpleNamespace with
+    AnnData's attribute names.
 
-    `normalize` runs scfast's fused log-normalisation + Seurat vst statistics (the HVGs are
-    Seurat's, not scanpy's seurat_v3), `hvg` only records them, and `scale` is a no-op:
-    scfast's PCA scales and clips implicitly. Leiden clusters Seurat's SNN graph; UMAP lays
-    out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN distances go to obsp["distances"] so the parity outputs line up.
+    'normalize' is scfast.preprocess, one Rust pass that log-normalises, computes Seurat's
+    vst statistics (the HVGs are Seurat's, not scanpy's seurat_v3), selects the HVGs and
+    builds their CSR, so 'hvg' and 'scale' only hand that CSR on (scfast's PCA scales and
+    clips implicitly). Leiden clusters Seurat's SNN graph; UMAP
+    lays out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN distances go
+    to obsp["distances"] so the parity outputs line up.
     """
 
     device = "cpu"
@@ -179,25 +183,24 @@ class ScfastEngine(ScanpyEngine):
     leiden_device = "cpu"
 
     def startup(self):
-        versions = super().startup()
         import scfast
 
         self.scfast = scfast
-        versions["scfast"] = scfast.__version__
-        return versions
+        return {"scfast": scfast.__version__}
+
+    def read(self, path):
+        X, barcodes, _ = self.scfast.read_10x_h5(path)
+        return SimpleNamespace(X=X, obs_names=barcodes, obs={}, obsm={}, obsp={}, varm={}, uns={})
 
     def normalize(self, a, cfg):
-        self.pre = self.scfast.preprocess(a.X, n_hvg=cfg.n_hvg)
-        a.X = self.pre["data"]
+        a.uns["preprocess"] = self.scfast.preprocess(a.X, n_hvg=cfg.n_hvg)
 
     def hvg(self, a, cfg):
-        a.var["highly_variable"] = False
-        a.var.iloc[self.pre["hvg"], a.var.columns.get_loc("highly_variable")] = True
+        a.uns["hvg"] = a.uns["preprocess"]["hvg"]
 
     def scale(self, a, cfg):
-        import anndata
-
-        return anndata.AnnData(self.pre.pop("X_hvg"), obs=a.obs[[]])
+        a.X = a.uns.pop("preprocess")["X_hvg"]
+        return a
 
     def pca(self, a, cfg):
         import scipy.sparse as sp
@@ -222,11 +225,9 @@ class ScfastEngine(ScanpyEngine):
         self.knn = idx, dist
 
     def cluster(self, a, cfg):
-        import pandas as pd
-
         labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
                                     n_iterations=2, device=self.leiden_device)
-        a.obs["cluster"] = pd.Categorical(labels.astype(str))
+        a.obs["cluster"] = labels.astype(str)
 
     def umap(self, a, cfg):
         a.obsm["X_umap"] = self.scfast.umap(*self.knn, a.obsm["X_pca"][:, :2], seed=cfg.seed)
@@ -243,21 +244,21 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
 
     device = "gpu"
     scfast_device = "cuda"
-    normalize, hvg, umap = RapidsEngine.normalize, RapidsEngine.hvg, RapidsEngine.umap
-
-    def scale(self, a, cfg):
-        b = a[:, a.var.highly_variable].copy()
-        del b.layers["counts"]
-        return b
+    read, normalize, hvg, umap = ScanpyEngine.read, RapidsEngine.normalize, RapidsEngine.hvg, RapidsEngine.umap
 
     def startup(self):
-        versions = super().startup()
+        versions = {**RapidsEngine.startup(self), **ScfastEngine.startup(self)}
         info = self.scfast.device_info()
         if not info["cuda_available"]:
             raise RuntimeError(f"scfast CUDA backend unavailable: {info['cuda_error']}")
         self.leiden_device = self.scfast.leiden_device("auto")
         versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
         return versions
+
+    def scale(self, a, cfg):
+        b = a[:, a.var.highly_variable].copy()
+        del b.layers["counts"]
+        return b
 
     def gpu_mem(self):
         free, total = self.cp.cuda.runtime.memGetInfo()

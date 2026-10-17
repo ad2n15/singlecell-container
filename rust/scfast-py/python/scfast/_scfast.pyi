@@ -121,6 +121,18 @@ def leiden_device(device: str, /) -> dict[str, Any]:
     loads and a CUDA device is usable; an unusable explicit "cuda" raises RuntimeError.
     """
 
+def inflate_chunks(
+    path: str,
+    offsets: npt.NDArray[np.uint64],
+    sizes: npt.NDArray[np.uint64],
+    chunk_len: int,
+    n: int,
+    src: str,
+    to_f32: bool,
+    /,
+) -> npt.NDArray[np.float32] | npt.NDArray[np.int32]:
+    """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32 or int32."""
+
 def preprocess_csr(
     n_rows: int,
     n_cols: int,
@@ -138,7 +150,8 @@ def preprocess_csr(
     The arrays are borrowed as in pca_csr. Returns {"data": float32 (nnz,) log-normalised
     values in input order, "library_size": float64 (n_rows,), "mean", "variance",
     "variance_expected", "variance_standardized": float64 (n_cols,), "hvg": int32 (n_hvg,)
-    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float}.
+    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float, "hvg_indptr": int64,
+    "hvg_indices": int32, "hvg_data": float32: the HVG columns as a canonical CSR in HVG order}.
     """
 
 def device_info() -> dict[str, Any]:
