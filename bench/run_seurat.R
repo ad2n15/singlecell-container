@@ -85,7 +85,7 @@ step <- function(name, expr, kind = "compute") {
 
 t0 <- proc.time()[["elapsed"]]
 ok <- tryCatch({
-  suppressPackageStartupMessages({ library(Seurat); library(hdf5r); library(leidenbase); library(jsonlite) })
+  suppressPackageStartupMessages({ library(Seurat); library(hdf5r); library(leidenbase); library(igraph); library(jsonlite) })
   TRUE
 }, error = function(e) { message("seurat: start-up failed: ", conditionMessage(e)); FALSE })
 if (!ok) {
@@ -117,7 +117,7 @@ env <- list(node = Sys.info()[["nodename"]], platform = R.version.string, cpu_mo
             blas = si$BLAS, lapack = si$LAPACK,
             # Seurat >= 5.1 runs Leiden (algorithm = 4) through leidenbase; older 5.0.x calls
             # Python leidenalg via reticulate (set RETICULATE_PYTHON to a Python that has it).
-            leiden_backend = if (packageVersion("Seurat") >= "5.1.0") "leidenbase" else
+            leiden_backend = if (packageVersion("Seurat") >= "5.1.0") "leidenbase" else if (requireNamespace("leidenbase", quietly = TRUE)) "leidenbase (direct)" else
               sprintf("leidenalg via reticulate (%s)", Sys.getenv("RETICULATE_PYTHON", "default python")),
             packages = lapply(c(Seurat = "Seurat", SeuratObject = "SeuratObject", leidenbase = "leidenbase",
                                 uwot = "uwot", Matrix = "Matrix"), function(p) as.character(packageVersion(p))),
@@ -151,6 +151,29 @@ write_outputs <- function(obj, outdir) {
              file.path(outdir, "meta.json"))
 }
 
+# Seurat 5.0.x calls Python leidenalg; with leidenbase installed, cluster via leidenbase instead.
+seurat_find_clusters_leiden <- function(obj, resolution, seed, n.iter) {
+  if (packageVersion("Seurat") >= "5.1.0") {
+    return(FindClusters(obj, algorithm = 4, resolution = resolution, random.seed = seed,
+                        n.iter = n.iter, verbose = FALSE))
+  }
+  if (requireNamespace("leidenbase", quietly = TRUE) && requireNamespace("igraph", quietly = TRUE)) {
+    gname <- paste0(DefaultAssay(obj), "_snn")
+    snn <- obj@graphs[[gname]]
+    g <- igraph::graph_from_adjacency_matrix(as(snn, "CsparseMatrix"), mode = "undirected",
+                                            weighted = TRUE, diag = FALSE)
+    res <- leidenbase::leiden_find_partition(
+      g, partition_type = "RBConfigurationVertexPartition",
+      edge_weights = igraph::E(g)$weight, resolution_parameter = resolution,
+      seed = as.integer(seed), num_iter = as.integer(n.iter)
+    )
+    obj$seurat_clusters <- factor(res$membership)
+    return(obj)
+  }
+  FindClusters(obj, algorithm = 4, resolution = resolution, random.seed = seed,
+               n.iter = n.iter, verbose = FALSE)
+}
+
 # ---------------------------------------------------------------- repeats
 
 dims <- seq_len(opt$dims)  # leading PCs for neighbours and UMAP, as in seurat_pbmc3k.R
@@ -164,8 +187,7 @@ for (rep in 0:opt$reps) {
     obj <- step("scale", ScaleData(obj, features = VariableFeatures(obj), verbose = FALSE))
     obj <- step("pca", RunPCA(obj, npcs = opt$n_pcs, seed.use = opt$seed, verbose = FALSE))
     obj <- step("neighbors", FindNeighbors(obj, dims = dims, k.param = opt$k, verbose = FALSE))
-    obj <- step("cluster", FindClusters(obj, algorithm = 4, resolution = opt$resolution, random.seed = opt$seed,
-                                        n.iter = 2, verbose = FALSE))
+    obj <- step("cluster", seurat_find_clusters_leiden(obj, opt$resolution, opt$seed, 2L))
     if (!opt$skip_umap) obj <- step("umap", RunUMAP(obj, dims = dims, seed.use = opt$seed, verbose = FALSE))
     TRUE
   }, error = function(e) { message("seurat rep ", rep, ": ", conditionMessage(e)); FALSE })

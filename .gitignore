@@ -6,6 +6,8 @@
 *.csv
 cache/
 # environments and logs
+.env
+.venv/
 .venv-scanpy/
 *.log
 .Rhistory

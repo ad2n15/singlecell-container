@@ -13,7 +13,9 @@ scratch: /scratch/$USER/scpipe
 container:
   runtime: apptainer           # apptainer | singularity | docker | none
   image: null                  # e.g. /scratch/$USER/scpipe/scpipe.sif; null = use the host environment
-  options: ["--nv"]
+  # Shared DDnB images (benchmark / one-off): see run_1m_apptainer.sh
+  # image: /iridisfs/ddnb/images/seurat_5.0.0.sif
+  options: ["--nv"]            # add --bind /iridisfs/ddnb:/iridisfs/ddnb via container.options if needed
 # Used only when execution is slurm or split (offline GPU partition for the
 # heavy stages; gates and Open Targets stay on the login node).
 scheduler:

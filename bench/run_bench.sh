@@ -41,9 +41,13 @@ if [[ -n "$THREADS" ]]; then
   RUN_ARGS+=(--threads "$THREADS")
 fi
 
-echo "== prep -> $RUN/data"
-"$PYTHON" "$HERE/prep.py" --input "$INPUT" --out "$RUN/data" --sizes "$SIZES" \
-  ${LABELS:+--labels "$LABELS"} "${PREP_ARGS[@]}"
+if [[ "${SKIP_PREP:-0}" == "1" ]]; then
+  echo "== prep skipped (SKIP_PREP=1; using existing $RUN/data)"
+else
+  echo "== prep -> $RUN/data"
+  "$PYTHON" "$HERE/prep.py" --input "$INPUT" --out "$RUN/data" --sizes "$SIZES" \
+    ${LABELS:+--labels "$LABELS"} "${PREP_ARGS[@]}"
+fi
 
 mapfile -t DATASETS < <(cd "$RUN/data" && ls -d n* | sort -t n -k2 -n)
 IFS=',' read -r -a ENGINE_LIST <<< "$ENGINES"
