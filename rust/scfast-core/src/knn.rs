@@ -103,12 +103,12 @@ pub fn knn(x: &RowMajor, params: &KnnParams) -> Result<Knn> {
 
 /// [`knn`] on a chosen [`Device`] (docs/scfast-integration.md Phase 6).
 ///
-/// `Device::Cpu` is exactly [`knn`]. `Device::Cuda(i)` computes the cross terms with cuBLAS
-/// GEMM and selects candidates with a top-k kernel, then re-ranks them by exact f64
+/// `Device::Cpu` is exactly [`knn`]. `Device::Cuda(i)` runs a fused distance + top-k kernel
+/// (one query per thread), then re-ranks the candidates by exact f64
 /// distances on the host (same output contract: self first, Euclidean distances, ties by
 /// lower index); `params.method` is ignored there (the GPU search is brute force at every
 /// size) and `k` must be at most 129. Needs the `cuda` feature, a visible device and
-/// device memory for the embeddings plus one score block, otherwise [`Error::Gpu`] is
+/// device memory for the embeddings and the candidate lists, otherwise [`Error::Gpu`] is
 /// returned without touching the CPU path.
 pub fn knn_on(x: &RowMajor, params: &KnnParams, device: Device) -> Result<Knn> {
     validate_input(x)?;

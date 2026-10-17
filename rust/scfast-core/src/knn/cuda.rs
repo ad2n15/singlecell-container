@@ -1,35 +1,30 @@
-//! kNN on a CUDA device (feature `cuda`): cuBLAS GEMM for the cross terms and the `topk`
-//! kernel for candidate selection, with the same exact f64 re-ranking and output contract
-//! as the CPU methods.
+//! kNN on a CUDA device (feature `cuda`): the fused `knn` kernel (exact f32 distances and
+//! per-query top-k in one pass, see `cuda/mod.rs`), with the same exact f64 re-ranking and
+//! output contract as the CPU methods.
 //!
-//! Data are centred on the host (f64 mean, rounded to f32) and uploaded once with their
-//! squared norms. For each block of `qb` queries one SGEMM gives the dot products of the
-//! block against every point (an n x qb column-major buffer, bounded by free memory), the
-//! `topk` kernel keeps the `cap = k - 1 + slack` smallest estimates `|r|^2 - 2 q.r` per
-//! query (the per-query `|q|^2` is a constant), and the host re-ranks those candidates by
-//! exact f64 distances (`exact_d2`, as `exact.rs`) and writes the row.
+//! Data are centred on the host (f64 mean, rounded to f32) and uploaded once. Queries go in
+//! blocks of `qb` (bounded by the candidate buffers' memory); per block the kernel keeps the
+//! `cap = k - 1 + slack` smallest f32 squared distances per query, and the host re-ranks
+//! those candidates by exact f64 distances (`exact_d2`, as `exact.rs`) and writes the row.
 //!
 //! The error-bound certificate of the CPU exact search is not applied: the result is exact
-//! whenever the true k - 1 neighbours are among the `cap` best f32 estimates, which holds
+//! whenever the true k - 1 neighbours are among the `cap` best f32 distances, which holds
 //! for all but pathological ties; the parity target for the GPU path is a neighbour
-//! overlap of at least 90% with the CPU result. Values so large that the f32 cross terms
+//! overlap of at least 90% with the CPU result. Values so large that f32 squared distances
 //! could overflow are handed to the CPU exact search.
 
 use std::sync::Arc;
 
-use cudarc::cublas::{Gemm, GemmConfig};
-use cudarc::driver::PushKernelArg;
+use cudarc::driver::{LaunchConfig, PushKernelArg};
 use rayon::prelude::*;
 
 use super::{cmp_neighbour, exact_d2, write_row};
-use crate::cuda::{blas_err, drv_err, guard, Gpu, BLOCK, TOPK_CAP_MAX};
+use crate::cuda::{drv_err, guard, Gpu, BLOCK, KNN_CAP_MAX};
 use crate::error::{Error, Result};
 use crate::types::{Knn, RowMajor};
 
-/// Upper bound on the GEMM score buffer (bytes); also capped at half the free memory.
-const SCORE_BUDGET: usize = 512 << 20;
-/// Queries per GEMM block, at most.
-const MAX_QB: usize = 4096;
+/// Queries per kernel launch, at most (bounds the candidate buffers: 8 * cap bytes each).
+const MAX_QB: usize = 1 << 20;
 /// Same overflow guard as `exact.rs`.
 const F32_SAFE_SQ_NORM: f64 = 1e36;
 
@@ -39,13 +34,13 @@ pub(super) fn cuda_knn(x: &RowMajor, k: usize, ordinal: usize) -> Result<Knn> {
     if n > i32::MAX as usize || d > i32::MAX as usize {
         return Err(Error::gpu(format!("{n} cells x {d} dims exceeds the CUDA kernel index range")));
     }
-    if kk > TOPK_CAP_MAX {
-        return Err(Error::gpu(format!("k = {k} is above the CUDA kNN limit of {} (k counts the cell itself); use the CPU", TOPK_CAP_MAX + 1)));
+    if kk > KNN_CAP_MAX {
+        return Err(Error::gpu(format!("k = {k} is above the CUDA kNN limit of {} (k counts the cell itself); use the CPU", KNN_CAP_MAX + 1)));
     }
     let slack = (kk / 2).max(8);
-    let cap = (kk + slack).min(n - 1).min(TOPK_CAP_MAX).max(kk);
+    let cap = (kk + slack).min(n - 1).min(KNN_CAP_MAX).max(kk);
 
-    // Centre (f64 mean, rounded to f32) and square norms, as the CPU exact search does.
+    // Centre (f64 mean, rounded to f32), as the CPU exact search does.
     let mut mean = vec![0f64; d];
     for i in 0..n {
         for (m, &v) in mean.iter_mut().zip(x.row(i)) {
@@ -56,43 +51,35 @@ pub(super) fn cuda_knn(x: &RowMajor, k: usize, ordinal: usize) -> Result<Knn> {
         *m /= n as f64;
     }
     let mut xc = vec![0f32; n * d];
-    let mut norms = vec![0f32; n];
-    let mut max_norm = 0f64;
-    xc.par_chunks_mut(d).zip(norms.par_iter_mut()).enumerate().for_each(|(i, (row, nrm))| {
-        let xi = x.row(i);
-        let mut s = 0f64;
-        for t in 0..d {
-            let y = (xi[t] as f64 - mean[t]) as f32;
-            row[t] = y;
-            s += y as f64 * y as f64;
-        }
-        *nrm = s as f32;
-    });
-    for &v in &norms {
-        max_norm = max_norm.max(v as f64);
-    }
+    let max_norm = xc
+        .par_chunks_mut(d)
+        .enumerate()
+        .map(|(i, row)| {
+            let mut s = 0f64;
+            for (t, (y, &v)) in row.iter_mut().zip(x.row(i)).enumerate() {
+                *y = (v as f64 - mean[t]) as f32;
+                s += *y as f64 * *y as f64;
+            }
+            s
+        })
+        .reduce(|| 0.0, f64::max);
     if max_norm * 4.0 > F32_SAFE_SQ_NORM {
-        // f32 cross terms could overflow: the CPU exact search handles this case.
+        // f32 squared distances could overflow: the CPU exact search handles this case.
         return Ok(super::exact::exact_knn(x, k));
     }
 
     let gpu = Gpu::get(ordinal)?;
-    let base = 4 * (n * d + n);
-    gpu.ensure_fits(base + 4 * n, &format!("kNN on {n} cells x {d} dims"))?;
+    let base = 4 * n * d;
+    gpu.ensure_fits(base + 8 * cap, &format!("kNN on {n} cells x {d} dims"))?;
     let free = gpu.free_bytes()?;
-    let budget = SCORE_BUDGET.min(free.saturating_sub(base) / 2);
-    let qb = (budget / (4 * n)).min(MAX_QB).min(n);
+    let qb = (free.saturating_sub(base) / 2 / (8 * cap)).min(MAX_QB).min(n);
     if qb == 0 {
-        return Err(Error::gpu(format!(
-            "out of device memory: kNN on {n} cells needs at least {:.2} GiB for one query block, {:.2} GiB free",
-            (base + 4 * n) as f64 / (1u64 << 30) as f64,
-            free as f64 / (1u64 << 30) as f64
-        )));
+        return Err(Error::gpu(format!("out of device memory: kNN on {n} cells, {:.2} GiB free", free as f64 / (1u64 << 30) as f64)));
     }
 
     let mut indices = vec![0u32; n * k];
     let mut distances = vec![0f32; n * k];
-    run_blocks(&gpu, x, &xc, &norms, n, d, kk, cap, qb, &mut indices, &mut distances)?;
+    run_blocks(&gpu, x, &xc, n, d, kk, cap, qb, &mut indices, &mut distances)?;
     Ok(Knn { n, k, indices, distances })
 }
 
@@ -101,7 +88,6 @@ fn run_blocks(
     gpu: &Arc<Gpu>,
     x: &RowMajor,
     xc: &[f32],
-    norms: &[f32],
     n: usize,
     d: usize,
     kk: usize,
@@ -111,54 +97,37 @@ fn run_blocks(
     distances: &mut [f32],
 ) -> Result<()> {
     let k = kk + 1;
+    let (kernel, tp) = gpu.knn_kernel(d, cap)?;
     guard("CUDA kNN", || {
         let xc_d = gpu.upload(xc, "upload embeddings")?;
-        let norms_d = gpu.upload(norms, "upload norms")?;
-        let mut scores = gpu.alloc_zeros::<f32>(n * qb, "alloc score block")?;
         let mut out_idx = gpu.alloc_zeros::<u32>(qb * cap, "alloc candidate indices")?;
-        let mut out_est = gpu.alloc_zeros::<f32>(qb * cap, "alloc candidate estimates")?;
+        let mut out_d2 = gpu.alloc_zeros::<f32>(qb * cap, "alloc candidate distances")?;
         let mut host_idx = vec![0u32; qb * cap];
-        let mut host_est = vec![0f32; qb * cap];
 
         let mut q0 = 0usize;
         while q0 < n {
             let nq = qb.min(n - q0);
-            // scores (n x nq, column-major) = Xc (n x d) . Xc[q0..q0+nq]^T: with Xc stored
-            // row-major it is the column-major d x n matrix A, so C = A^T B with
-            // B = A[:, q0..q0+nq] (ld = d).
-            let cfg = GemmConfig {
-                transa: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
-                transb: cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-                m: n as i32,
-                n: nq as i32,
-                k: d as i32,
-                alpha: 1.0f32,
-                lda: d as i32,
-                ldb: d as i32,
-                beta: 0.0f32,
-                ldc: n as i32,
+            let (ni, q0i, nqi) = (n as i32, q0 as i32, nq as i32);
+            let cfg = LaunchConfig {
+                grid_dim: (nq.div_ceil(BLOCK as usize) as u32, 1, 1),
+                block_dim: (BLOCK, 1, 1),
+                shared_mem_bytes: (4 * tp * d) as u32,
             };
-            let b = xc_d.slice(q0 * d..(q0 + nq) * d);
-            // SAFETY: dimensions and leading dimensions match the buffers above.
-            unsafe { gpu.blas.gemm(cfg, &xc_d, &b, &mut scores) }.map_err(|e| blas_err("cublasSgemm", e))?;
-            let (ni, q0i, capi) = (n as i32, q0 as i32, cap as i32);
-            // SAFETY: argument order and types match the `topk` kernel; one block per
-            // query, BLOCK threads as the kernel's shared arrays assume.
+            // SAFETY: argument order and types match the `knn` kernel compiled for this
+            // (d, cap); the shared tile holds tp * d floats.
             unsafe {
                 gpu.stream
-                    .launch_builder(&gpu.topk)
-                    .arg(&scores)
-                    .arg(&norms_d)
+                    .launch_builder(&kernel)
+                    .arg(&xc_d)
                     .arg(&ni)
                     .arg(&q0i)
-                    .arg(&capi)
+                    .arg(&nqi)
                     .arg(&mut out_idx)
-                    .arg(&mut out_est)
-                    .launch(cudarc::driver::LaunchConfig { grid_dim: (nq as u32, 1, 1), block_dim: (BLOCK, 1, 1), shared_mem_bytes: 0 })
+                    .arg(&mut out_d2)
+                    .launch(cfg)
             }
-            .map_err(|e| drv_err("launch topk", e))?;
+            .map_err(|e| drv_err("launch knn", e))?;
             gpu.stream.memcpy_dtoh(&out_idx, &mut host_idx).map_err(|e| drv_err("download candidates", e))?;
-            gpu.stream.memcpy_dtoh(&out_est, &mut host_est).map_err(|e| drv_err("download candidates", e))?;
             gpu.sync("download candidates")?;
 
             // Exact re-ranking of the candidates on the host.

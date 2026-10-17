@@ -1,7 +1,7 @@
 //! CUDA backend plumbing (feature `cuda`, docs/scfast-integration.md Phase 6).
 //!
-//! Built on `cudarc` with `dynamic-loading`: nothing links against libcuda, libnvrtc or
-//! libcublas at build time. They are `dlopen`ed on first use, so this module compiles and
+//! Built on `cudarc` with `dynamic-loading`: nothing links against libcuda or libnvrtc at
+//! build time. They are `dlopen`ed on first use, so this module compiles and
 //! its CPU-side tests run on a machine without a GPU; [`probe`] reports whether a device
 //! can actually be used.
 //!
@@ -10,12 +10,12 @@
 //! | Kernel          | Device memory                                        | Products |
 //! |-----------------|------------------------------------------------------|----------|
 //! | PCA (`pca/cuda.rs`) | CSR of the HVG matrix (f32 values, u32 columns, i64 row offsets), gene mean / 1/sd, one cells x l and a few genes x l f32 buffers | NVRTC CSR SpMM kernels `zv` (Z V) and `ztu` (Z^T U, scatter with atomics), mean / 1/sd correction fused in |
-//! | kNN (`knn/cuda.rs`) | centred cells x dims (f32), squared norms, one cells x block score buffer, block x cap candidate buffer | cuBLAS SGEMM for the cross terms, NVRTC `topk` (one block per query) |
+//! | kNN (`knn/cuda.rs`) | centred cells x dims (f32), block x cap candidate buffer | NVRTC `knn`: fused distances and top-k, one query per thread, compiled per (dims, cap) |
 //!
 //! Dense steps of the randomised SVD (TSQR, the small SVD) and the exact re-ranking of kNN
 //! candidates stay on the CPU (faer / f64), exactly as in the CPU paths.
 //!
-//! Errors: every driver / NVRTC / cuBLAS failure becomes [`Error::Gpu`] with the failing
+//! Errors: every driver / NVRTC failure becomes [`Error::Gpu`] with the failing
 //! step named; `CUDA_ERROR_OUT_OF_MEMORY` is reported as "out of device memory (...)" so
 //! callers that resolved `device = "auto"` can fall back to the CPU and say why.
 //!
@@ -26,25 +26,84 @@ use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use cudarc::cublas::CudaBlas;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DriverError, LaunchConfig};
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 
 use crate::device::DeviceInfo;
 use crate::error::{Error, Result};
 
-/// Threads per block for every kernel here. `topk` relies on it (shared-memory arrays).
+/// Threads per block for every kernel here.
 pub(crate) const BLOCK: u32 = 256;
-/// Largest candidate list `topk` keeps per query (local-memory arrays in the kernel).
-pub(crate) const TOPK_CAP_MAX: usize = 128;
+/// Largest candidate list `knn` keeps per query (a per-thread local array).
+pub(crate) const KNN_CAP_MAX: usize = 128;
+/// Shared memory for one tile of reference points in `knn` (bytes).
+const KNN_TILE_BYTES: usize = 32 << 10;
+
+/// Brute-force kNN, one query per thread. The block stages a tile of `TP` reference points
+/// in shared memory; every thread computes exact f32 squared distances from its query (held
+/// in registers: `D` is fixed at compile time) to the tile and keeps its `CAP` best, sorted
+/// by (distance, index), with the current worst in registers so that the common case, a
+/// rejected point, touches no local memory. Nothing goes through DRAM per pair. Compiled
+/// per (`D`, `CAP`) by NVRTC with those `#define`s prepended. Rows of x are
+/// `D` contiguous floats; output slot `q` covers query `q0 + q`.
+const KNN_KERNEL: &str = r#"
+#define POS_INF __int_as_float(0x7f800000)
+extern "C" __global__ void knn(const float* __restrict__ x, int n, int q0, int nq,
+                               unsigned int* __restrict__ out_idx, float* __restrict__ out_d2) {
+  extern __shared__ float tile[];
+  const int qi = blockIdx.x * blockDim.x + threadIdx.x;
+  const bool active = qi < nq;
+  const unsigned int self = (unsigned int)(q0 + qi);
+  float q[D];
+#pragma unroll
+  for (int t = 0; t < D; ++t) q[t] = active ? x[(size_t)self * D + t] : 0.0f;
+  float bv[CAP];
+  unsigned int bi[CAP];
+  int cnt = 0;
+  float wv = POS_INF;
+  unsigned int wi = 0xffffffffu;
+  for (int base = 0; base < n; base += TP) {
+    const int m = min(TP, n - base);
+    __syncthreads();
+    for (int e = threadIdx.x; e < m * D; e += blockDim.x) tile[e] = x[(size_t)base * D + e];
+    __syncthreads();
+    if (!active) continue;
+    for (int p = 0; p < m; ++p) {
+      float s = 0.0f;
+#pragma unroll
+      for (int t = 0; t < D; ++t) {
+        const float df = tile[p * D + t] - q[t];
+        s = fmaf(df, df, s);
+      }
+      const unsigned int r = (unsigned int)(base + p);
+      if (!(s < wv || (s == wv && r < wi)) || r == self) continue;
+      int pos = (cnt < CAP) ? cnt : CAP - 1;
+      while (pos > 0 && (s < bv[pos - 1] || (s == bv[pos - 1] && r < bi[pos - 1]))) {
+        bv[pos] = bv[pos - 1];
+        bi[pos] = bi[pos - 1];
+        --pos;
+      }
+      bv[pos] = s;
+      bi[pos] = r;
+      if (cnt < CAP) ++cnt;
+      if (cnt == CAP) {
+        wv = bv[CAP - 1];
+        wi = bi[CAP - 1];
+      }
+    }
+  }
+  if (!active) return;
+  for (int t = 0; t < CAP; ++t) {
+    out_idx[(size_t)qi * CAP + t] = (t < cnt) ? bi[t] : 0xffffffffu;
+    out_d2[(size_t)qi * CAP + t] = (t < cnt) ? bv[t] : POS_INF;
+  }
+}
+"#;
 
 /// CUDA C source of the kernels, compiled with NVRTC. Kept in one translation unit so a
 /// single module holds every function.
 pub(crate) const KERNELS: &str = r#"
 // Self-contained: no headers, so NVRTC needs no include path.
-#define BLOCK 256
-#define POS_INF __int_as_float(0x7f800000)
-#define CAP_MAX 128
 
 // Z V for the implicitly scaled operator Z = (X - 1 mu^T) diag(inv_sd):
 //   out[i, c] = sum_j X[i, j] * vs[j, c] - shift[c]
@@ -107,70 +166,6 @@ extern "C" __global__ void ztu_finish(const float* __restrict__ acc,
   int c = (int)(tid - (long long)j * l);
   out[tid] = (acc[tid] - mean[j] * colsum[c]) * inv_sd[j];
 }
-
-// Top-k candidate selection for kNN. scores is column-major n x nq: column q holds
-// q_(q0+q) . x_r for every reference r (from cuBLAS). The squared-distance estimate up to
-// the per-query constant |q|^2 is est = norms[r] - 2 scores[r]. One block per query: each
-// thread scans a strided slice keeping its `cap` best (ascending by est, then index) in a
-// sorted local array, then the block merges the per-thread lists by repeatedly taking the
-// minimum of the list heads. Writes cap (index, est) pairs per query in ascending order;
-// slots past n - 1 candidates hold index 0xffffffff.
-extern "C" __global__ void topk(const float* __restrict__ scores,
-                                const float* __restrict__ norms,
-                                int n, int q0, int cap,
-                                unsigned int* __restrict__ out_idx,
-                                float* __restrict__ out_est) {
-  __shared__ float sv[BLOCK];
-  __shared__ unsigned int si[BLOCK];
-  const int q = blockIdx.x;
-  const int self_idx = q0 + q;
-  const float* col = scores + (size_t)q * n;
-  float best_v[CAP_MAX];
-  unsigned int best_i[CAP_MAX];
-  int cnt = 0;
-  for (int r = threadIdx.x; r < n; r += BLOCK) {
-    if (r == self_idx) continue;
-    float v = norms[r] - 2.0f * col[r];
-    unsigned int ri = (unsigned int)r;
-    if (cnt == cap) {
-      float wv = best_v[cap - 1];
-      if (!(v < wv || (v == wv && ri < best_i[cap - 1]))) continue;
-    }
-    int pos = (cnt < cap) ? cnt : cap - 1;
-    while (pos > 0 && (v < best_v[pos - 1] || (v == best_v[pos - 1] && ri < best_i[pos - 1]))) {
-      best_v[pos] = best_v[pos - 1];
-      best_i[pos] = best_i[pos - 1];
-      --pos;
-    }
-    best_v[pos] = v;
-    best_i[pos] = ri;
-    if (cnt < cap) ++cnt;
-  }
-  int head = 0;
-  for (int t = 0; t < cap; ++t) {
-    sv[threadIdx.x] = (head < cnt) ? best_v[head] : POS_INF;
-    si[threadIdx.x] = (head < cnt) ? best_i[head] : 0xffffffffu;
-    __syncthreads();
-    for (int stride = BLOCK / 2; stride > 0; stride >>= 1) {
-      if (threadIdx.x < stride) {
-        int a = threadIdx.x, b = a + stride;
-        if (sv[b] < sv[a] || (sv[b] == sv[a] && si[b] < si[a])) {
-          sv[a] = sv[b];
-          si[a] = si[b];
-        }
-      }
-      __syncthreads();
-    }
-    unsigned int win = si[0];
-    float winv = sv[0];
-    if (head < cnt && best_i[head] == win) ++head;
-    if (threadIdx.x == 0) {
-      out_idx[(size_t)q * cap + t] = win;
-      out_est[(size_t)q * cap + t] = winv;
-    }
-    __syncthreads();
-  }
-}
 "#;
 
 // ------------------------------------------------------------------ error mapping
@@ -181,10 +176,6 @@ pub(crate) fn drv_err(step: &str, e: DriverError) -> Error {
     }
     let what = e.error_string().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|_| format!("{:?}", e.0));
     Error::gpu(format!("{step}: {what}"))
-}
-
-pub(crate) fn blas_err(step: &str, e: cudarc::cublas::result::CublasError) -> Error {
-    Error::gpu(format!("{step}: cuBLAS {:?}", e.0))
 }
 
 /// Runs `f`, turning a panic inside cudarc (a missing symbol in an old driver, a library
@@ -220,9 +211,6 @@ pub(crate) fn probe() -> &'static DeviceInfo {
             if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
                 return Err("NVRTC library (libnvrtc) not found".into());
             }
-            if !unsafe { cudarc::cublas::sys::is_culib_present() } {
-                return Err("cuBLAS library (libcublas) not found".into());
-            }
             let count = CudaContext::device_count().map_err(|e| format!("cuInit / cuDeviceGetCount: {e:?}"))?;
             if count <= 0 {
                 return Err("no CUDA device visible".into());
@@ -253,25 +241,38 @@ pub(crate) fn probe() -> &'static DeviceInfo {
 
 // ------------------------------------------------------------------ device handle
 
-/// One CUDA device: primary context, a stream, a cuBLAS handle and the compiled kernels.
+/// Compiles `src` for the device's own architecture; if this NVRTC does not know it (NVRTC
+/// older than the GPU), falls back to NVRTC's default target, which the driver JITs.
+fn compile(ctx: &Arc<CudaContext>, src: &str) -> Result<Arc<CudaModule>> {
+    let (major, minor) = ctx.compute_capability().map_err(|e| drv_err("compute capability", e))?;
+    let with_arch = CompileOptions { options: vec![format!("--gpu-architecture=compute_{major}{minor}")], ..Default::default() };
+    let ptx = match compile_ptx_with_opts(src, with_arch) {
+        Ok(p) => p,
+        Err(_) => compile_ptx_with_opts(src, CompileOptions::default())
+            .map_err(|e| Error::gpu(format!("NVRTC compilation of the scfast kernels failed: {e:?}")))?,
+    };
+    ctx.load_module(ptx).map_err(|e| drv_err("cuModuleLoadData", e))
+}
+
+/// One CUDA device: primary context, a stream and the compiled kernels.
 /// Shared per ordinal for the life of the process.
 pub(crate) struct Gpu {
     pub ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
-    pub blas: CudaBlas,
     #[allow(dead_code)]
     module: Arc<CudaModule>,
     pub zv: CudaFunction,
     pub ztu: CudaFunction,
     pub ztu_finish: CudaFunction,
-    pub topk: CudaFunction,
+    /// `knn` compiled per (dims, cap).
+    knn: Mutex<HashMap<(usize, usize), CudaFunction>>,
     pub ordinal: usize,
 }
 
 static GPUS: OnceLock<Mutex<HashMap<usize, Arc<Gpu>>>> = OnceLock::new();
 
 impl Gpu {
-    /// The handle for `ordinal`, created (context, NVRTC compile, cuBLAS handle) on first use.
+    /// The handle for `ordinal`, created (context, NVRTC compile) on first use.
     pub fn get(ordinal: usize) -> Result<Arc<Gpu>> {
         let map = GPUS.get_or_init(|| Mutex::new(HashMap::new()));
         let mut guard_map = map.lock().unwrap_or_else(|e| e.into_inner());
@@ -294,26 +295,28 @@ impl Gpu {
         }
         let ctx = CudaContext::new(ordinal).map_err(|e| drv_err("cuDevicePrimaryCtxRetain", e))?;
         let stream = ctx.default_stream();
-        let (major, minor) = ctx.compute_capability().map_err(|e| drv_err("compute capability", e))?;
-        // Compile for the device's own architecture; if this NVRTC does not know it (NVRTC
-        // older than the GPU), fall back to NVRTC's default target, which the driver JITs.
-        let with_arch = CompileOptions {
-            options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
-            ..Default::default()
-        };
-        let ptx = match compile_ptx_with_opts(KERNELS, with_arch) {
-            Ok(p) => p,
-            Err(_) => compile_ptx_with_opts(KERNELS, CompileOptions::default())
-                .map_err(|e| Error::gpu(format!("NVRTC compilation of the scfast kernels failed: {e:?}")))?,
-        };
-        let module = ctx.load_module(ptx).map_err(|e| drv_err("cuModuleLoadData", e))?;
+        let module = compile(&ctx, KERNELS)?;
         let f = |name: &str| module.load_function(name).map_err(|e| drv_err(&format!("cuModuleGetFunction({name})"), e));
         let zv = f("zv")?;
         let ztu = f("ztu")?;
         let ztu_finish = f("ztu_finish")?;
-        let topk = f("topk")?;
-        let blas = CudaBlas::new(stream.clone()).map_err(|e| blas_err("cublasCreate", e))?;
-        Ok(Gpu { ctx, stream, blas, module, zv, ztu, ztu_finish, topk, ordinal })
+        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, knn: Mutex::new(HashMap::new()), ordinal })
+    }
+
+    /// The `knn` kernel for `d` dims and `cap` candidates, and the reference points per
+    /// shared-memory tile; compiled on first use.
+    pub fn knn_kernel(&self, d: usize, cap: usize) -> Result<(CudaFunction, usize)> {
+        let tp = (KNN_TILE_BYTES / (4 * d)).clamp(1, BLOCK as usize);
+        let mut map = self.knn.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(f) = map.get(&(d, cap)) {
+            return Ok((f.clone(), tp));
+        }
+        let src = format!("#define D {d}\n#define CAP {cap}\n#define TP {tp}\n{KNN_KERNEL}");
+        let f = guard("NVRTC knn", || {
+            compile(&self.ctx, &src)?.load_function("knn").map_err(|e| drv_err("cuModuleGetFunction(knn)", e))
+        })?;
+        map.insert((d, cap), f.clone());
+        Ok((f, tp))
     }
 
     /// Free device memory in bytes right now.
@@ -377,11 +380,10 @@ mod tests {
     /// Rust side loads is defined, and the compile-time constants agree.
     #[test]
     fn kernel_source_names_every_entry_point() {
-        for name in ["zv", "ztu", "ztu_finish", "topk"] {
+        for name in ["zv", "ztu", "ztu_finish"] {
             assert!(KERNELS.contains(&format!("__global__ void {name}(")), "kernel {name} missing");
         }
-        assert!(KERNELS.contains(&format!("#define BLOCK {BLOCK}")));
-        assert!(KERNELS.contains(&format!("#define CAP_MAX {TOPK_CAP_MAX}")));
+        assert!(KNN_KERNEL.contains("__global__ void knn("));
     }
 
     #[test]

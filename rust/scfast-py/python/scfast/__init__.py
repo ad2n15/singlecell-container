@@ -108,8 +108,8 @@ def _with_cpu_fallback(requested: str, resolved: str, call: Any) -> Any:
 def device_info() -> dict[str, Any]:
     """CUDA state of this build (never raises).
 
-    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver,
-    NVRTC and cuBLAS load and a device is visible), ``device_count``, ``device_name``,
+    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver and
+    NVRTC load and a device is visible), ``device_count``, ``device_name``,
     ``free_gb``, ``total_gb``, ``compute_capability`` (device 0; ``None`` when unavailable),
     ``cuda_error`` (why CUDA is unavailable, else ``None``) and ``auto_device`` (what
     ``device="auto"`` resolves to: ``"cpu"`` or ``"cuda:0"``).
@@ -260,7 +260,7 @@ def knn(
         not bit-reproducible across runs (hnsw_rs inserts in parallel).
     device
         ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
-        the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
+        the search is exact brute force (fused distance + top-k kernel) at every size, ``method`` is
         ignored and ``k`` must be at most 129.
 
     Returns
