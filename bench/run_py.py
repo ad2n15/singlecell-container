@@ -171,8 +171,9 @@ class ScfastEngine:
     AnnData's attribute names.
 
     'normalize' is scfast.preprocess, one Rust pass that log-normalises, computes Seurat's
-    vst statistics, selects the HVGs and builds their CSR, so 'hvg' and 'scale' only hand
-    that CSR on (scfast's PCA scales implicitly). Leiden clusters Seurat's SNN graph; UMAP
+    vst statistics (the HVGs are Seurat's, not scanpy's seurat_v3), selects the HVGs and
+    builds their CSR, so 'hvg' and 'scale' only hand that CSR on (scfast's PCA scales and
+    clips implicitly). Leiden clusters Seurat's SNN graph; UMAP
     lays out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN distances go
     to obsp["distances"] so the parity outputs line up.
     """

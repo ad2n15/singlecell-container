@@ -253,7 +253,7 @@ fn device_py(device: &str) -> PyResult<String> {
 
 /// Low-level PCA on borrowed CSR arrays (cells x genes). See scfast.pca.
 #[pyfunction]
-#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, device = "cpu"))]
+#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, device = "cpu", clip = None))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn pca_csr<'py>(
     py: Python<'py>,
@@ -268,8 +268,9 @@ fn pca_csr<'py>(
     oversample: usize,
     power_iters: usize,
     device: &str,
+    clip: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
-    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, ..PcaParams::default() };
+    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, clip };
     let device = parse_device(device)?;
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;

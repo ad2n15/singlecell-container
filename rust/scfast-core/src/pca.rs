@@ -39,7 +39,7 @@ mod cuda;
 mod dense;
 mod operator;
 
-use operator::{Blocks, ScaledOp};
+use operator::{Blocks, Clipped, ScaledOp};
 
 /// The implicit operator `Z` as the randomised SVD sees it: `Z v` and `Z^T u` on
 /// column-major f64 faer matrices. Implemented by the CPU [`ScaledOp`] and, with feature
@@ -68,8 +68,8 @@ pub struct PcaParams {
     pub seed: u64,
     /// Divide genes by their standard deviation (Seurat `do.scale = TRUE`).
     pub scale: bool,
-    /// Seurat's `scale.max` clip (default 10). The implicit operator cannot clip, so this is
-    /// recorded for reference only and the differences are measured by the parity checks.
+    /// Seurat's `scale.max` clip (default 10), applied exactly as a sparse correction to the
+    /// implicit operator; `None` or `inf` leaves the scaled values unclipped.
     pub clip: Option<f64>,
 }
 
@@ -112,7 +112,7 @@ pub struct PcaResult {
 /// - `gene_sd` is the sd actually used: the sample sd (n - 1 denominator) for scaled genes,
 ///   1 for constant genes, and 1 for every gene when `params.scale` is false.
 /// - `l = n_comps + oversample` is capped at `min(n_cells, n_genes)`.
-/// - `params.clip` is validated (must be positive, `inf` allowed) but not applied.
+/// - `params.clip` must be positive (`inf` allowed); finite values clip scaled values above it.
 /// - Errors: `InvalidParameter` for `n_comps == 0`, `n_comps >= min(n_cells, n_genes)` or a
 ///   non-positive / NaN `clip`; `InvalidInput` for malformed CSR structure (including
 ///   duplicate column indices within a row) or non-finite values.
@@ -142,15 +142,22 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
     let inv_sd: Vec<f64> = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
 
     let l = k.saturating_add(params.oversample).min(n.min(p));
+    let clip = params.clip.filter(|c| c.is_finite());
     let (q, ub, d, vb) = match device {
         Device::Cpu => {
             let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
-            randomized_svd(&op, l, params.power_iters, params.seed)?
+            match clip {
+                Some(c) => randomized_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), l, params.power_iters, params.seed)?,
+                None => randomized_svd(&op, l, params.power_iters, params.seed)?,
+            }
         }
         #[cfg(feature = "cuda")]
         Device::Cuda(ordinal) => {
             let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, l, ordinal)?;
-            randomized_svd(&op, l, params.power_iters, params.seed)?
+            match clip {
+                Some(c) => randomized_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), l, params.power_iters, params.seed)?,
+                None => randomized_svd(&op, l, params.power_iters, params.seed)?,
+            }
         }
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => {

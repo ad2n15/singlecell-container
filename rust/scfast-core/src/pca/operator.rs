@@ -410,3 +410,67 @@ impl<I: Idx, T: Real> super::Operator for ScaledOp<'_, I, T> {
         Ok(ScaledOp::apply_t(self, u))
     }
 }
+
+/// `Z - C`, where `C` holds `z_ij - clip` at every entry with `z_ij > clip`: Seurat's
+/// `ScaleData(scale.max = clip)` applied exactly. Only stored entries of `X` can exceed a
+/// positive clip (a zero maps to `-mean / sd <= 0`), so `C` is sparse and small.
+pub(super) struct Clipped<O> {
+    inner: O,
+    rows: Vec<usize>,
+    cols: Vec<usize>,
+    vals: Vec<f64>,
+}
+
+impl<O: super::Operator> Clipped<O> {
+    pub fn new<I: Idx, T: Real>(inner: O, x: &CsrView<'_, I, T>, mean: &[f64], inv_sd: &[f64], clip: f64) -> Self {
+        let per_row: Vec<Vec<(usize, usize, f64)>> = (0..x.n_rows)
+            .into_par_iter()
+            .with_min_len(ZV_ROWS)
+            .map(|i| {
+                let (idx, val) = x.row(i);
+                idx.iter()
+                    .zip(val)
+                    .filter_map(|(j, v)| {
+                        let j = j.to_usize();
+                        let z = (v.to_f64() - mean[j]) * inv_sd[j];
+                        (z > clip).then_some((i, j, z - clip))
+                    })
+                    .collect()
+            })
+            .collect();
+        let (mut rows, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, j, c) in per_row.into_iter().flatten() {
+            rows.push(i);
+            cols.push(j);
+            vals.push(c);
+        }
+        Self { inner, rows, cols, vals }
+    }
+}
+
+impl<O: super::Operator> super::Operator for Clipped<O> {
+    fn nrows(&self) -> usize {
+        self.inner.nrows()
+    }
+    fn ncols(&self) -> usize {
+        self.inner.ncols()
+    }
+    fn apply(&self, v: MatRef<'_, f64>, mut out: MatMut<'_, f64>) -> Result<()> {
+        self.inner.apply(v, out.rb_mut())?;
+        for c in 0..v.ncols() {
+            for e in 0..self.vals.len() {
+                out[(self.rows[e], c)] -= self.vals[e] * v[(self.cols[e], c)];
+            }
+        }
+        Ok(())
+    }
+    fn apply_t(&self, u: MatRef<'_, f64>) -> Result<Mat<f64>> {
+        let mut out = self.inner.apply_t(u)?;
+        for c in 0..u.ncols() {
+            for e in 0..self.vals.len() {
+                out[(self.cols[e], c)] -= self.vals[e] * u[(self.rows[e], c)];
+            }
+        }
+        Ok(out)
+    }
+}

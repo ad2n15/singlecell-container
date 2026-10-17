@@ -30,6 +30,7 @@ def pca_csr(
     oversample: int,
     power_iters: int,
     device: str = "cpu",
+    clip: float | None = None,
     /,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """Implicitly scaled PCA of a CSR matrix (cells x genes) given as raw arrays.

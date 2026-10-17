@@ -33,6 +33,8 @@ pub struct FuzzyGraph {
 
 const SMOOTH_K_TOLERANCE: f32 = 1e-5;
 const MIN_K_DIST_SCALE: f32 = 1e-3;
+/// Edges per SGD task at least: every epoch ends in a barrier, so small graphs stay on few threads.
+const MIN_TASK_EDGES: usize = 16_384;
 
 /// `indices` / `distances` are (n, k) row-major with the cell itself in column 0.
 pub fn fuzzy_simplicial_set(indices: &[u32], distances: &[f32], n: usize, k: usize) -> Result<FuzzyGraph> {
@@ -199,7 +201,7 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
     for epoch in 0..p.n_epochs {
         let ep = epoch as f32;
         let alpha = p.learning_rate * (1.0 - ep / p.n_epochs as f32);
-        next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().for_each(|(c, (nx, nn))| {
+        next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().with_min_len(MIN_TASK_EDGES / chunk).for_each(|(c, (nx, nn))| {
             let base = c * chunk;
             let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(base as u64 * 0x2545_F491_4F6C_DD1D) | 1;
             let mut row = (usize::MAX, [0f32; DIM], [0f32; DIM]);
