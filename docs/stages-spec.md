@@ -65,6 +65,8 @@ Object files are `.rds` (always available). If `qs2` is installed and `object_fo
 
 **`samples.csv`** (required columns: `sample_id`, `path`; optional `format`; any other columns become cell metadata):
 
+**Relative `path` values are resolved against the folder that holds `config.yaml`, not the folder that holds `samples.csv`.** (The runner copies `samples.csv` into the run directory, and the resolved paths are recorded in `config.resolved.yaml` as `samples_resolved`.)
+
 ```csv
 sample_id,path,format,donor,condition,batch
 S1,data/S1/filtered_feature_bc_matrix.h5,,D1,control,B1
