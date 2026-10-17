@@ -1,8 +1,9 @@
 """scfast: fast single-cell kernels in Rust for Seurat- and Scanpy-style workflows.
 
-The four steps between the HVG matrix and cluster labels (docs/RUST_ENGINE.md section 5)::
+The steps from raw counts to cluster labels (docs/RUST_ENGINE.md section 5)::
 
     import scfast
+    pre = scfast.preprocess(X_counts_csr, n_hvg=2000)                   # normalise + vst HVGs, one pass
     pcs, loadings, sdev = scfast.pca(X_csr, n_comps=30, seed=0)       # no dense scaled matrix
     knn_idx, knn_dist   = scfast.knn(pcs, k=20)                         # self first, Euclidean
     snn                 = scfast.snn(knn_idx, prune=1/15)               # scipy CSR, Jaccard
@@ -27,7 +28,7 @@ import numpy as np
 from . import _scfast
 from ._scfast import __version__
 
-__all__ = ["__version__", "knn", "leiden", "pca", "snn"]
+__all__ = ["__version__", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -299,7 +300,26 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
     return sp.csr_matrix((weights, col, indptr), shape=(n, n))
 
 
-def leiden(graph: Any, resolution: float = 0.5, seed: int = 0, n_iterations: int = 2) -> np.ndarray:
+def leiden_device(device: str = "auto") -> str:
+    """The device :func:`leiden` would run on for ``device``: ``"cpu"`` or ``"cuda:<index>"``.
+
+    ``"auto"`` resolves to ``"cuda:0"`` only when this build of scfast has the ``cugraph``
+    feature, ``libcugraph_c.so`` loads (``SCFAST_CUGRAPH_LIB`` overrides the search) and a
+    CUDA device is usable; otherwise ``"cpu"``. An explicit ``"cuda"`` / ``"cuda:<index>"``
+    that is not usable raises ``RuntimeError`` naming the reason.
+    """
+    if not isinstance(device, str):
+        raise TypeError(f"device must be a string, got {type(device).__name__}")
+    return _scfast.leiden_device(device)["resolved"]
+
+
+def leiden(
+    graph: Any,
+    resolution: float = 0.5,
+    seed: int = 0,
+    n_iterations: int = 2,
+    device: Literal["auto", "cpu", "cuda"] | str = "auto",
+) -> np.ndarray:
     """Leiden clustering (RB / configuration objective), replacing ``FindClusters(algorithm = 4)``.
 
     Parameters
@@ -315,7 +335,12 @@ def leiden(graph: Any, resolution: float = 0.5, seed: int = 0, n_iterations: int
     seed
         Random seed; the same seed and graph give identical labels.
     n_iterations
-        Leiden iterations (Seurat ``n.iter``), at least 1.
+        Leiden iterations (Seurat ``n.iter``), at least 1. On cuGraph this is ``max_level``.
+    device
+        ``"auto"`` (cuGraph Leiden when this build has the ``cugraph`` feature and a CUDA
+        device is usable, else the CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"`` (an
+        error when cuGraph is not available). See :func:`leiden_device`. Labels follow the
+        same numbering on both backends; they are compared by ARI, not expected identical.
 
     Returns
     -------
@@ -323,6 +348,8 @@ def leiden(graph: Any, resolution: float = 0.5, seed: int = 0, n_iterations: int
         Cluster labels 0..c-1, numbered by decreasing cluster size (ties by lowest cell
         index), like Seurat's ``seurat_clusters`` levels.
     """
+    if not isinstance(device, str):
+        raise TypeError(f"device must be a string, got {type(device).__name__}")
     n_rows, n_cols, indptr, indices, data = _csr_parts(graph, "graph")
     if n_rows != n_cols:
         raise ValueError(f"graph must be square (cells x cells), got shape {(n_rows, n_cols)}")
@@ -332,5 +359,78 @@ def leiden(graph: Any, resolution: float = 0.5, seed: int = 0, n_iterations: int
     if resolution < 0:
         raise ValueError(f"resolution must be non-negative, got {resolution}")
     return _scfast.leiden_csr(
-        n_rows, indptr, indices, data, resolution, _seed(seed), _int("n_iterations", n_iterations, 1)
+        n_rows, indptr, indices, data, resolution, _seed(seed), _int("n_iterations", n_iterations, 1), device
     )
+
+
+def preprocess(
+    X_counts: Any,
+    n_hvg: int = 2000,
+    scale_factor: float = 1e4,
+    span: float = 0.3,
+    clip: float | None = None,
+) -> dict[str, Any]:
+    """Fused log-normalisation and vst variable-gene statistics, replacing Seurat's
+    ``NormalizeData`` + ``FindVariableFeatures(selection.method = "vst")`` (Scanpy's
+    ``normalize_total`` + ``log1p`` + ``highly_variable_genes(flavor="seurat_v3")`` on the
+    same statistics) in one streaming pass over the counts.
+
+    Parameters
+    ----------
+    X_counts
+        scipy.sparse CSR matrix (``csr_matrix`` or ``csr_array``), cells x genes, raw counts.
+        float32/float64 data with int32/int64 indices is read in place (zero copy); other
+        real dtypes (integer counts included) are converted to float32 first (a copy). Must
+        be canonical (``X.sum_duplicates()``). Counts must be finite and non-negative.
+    n_hvg
+        Number of variable genes (Seurat ``nfeatures``), capped at the number of genes.
+    scale_factor
+        ``NormalizeData(scale.factor)``: values are ``log1p(x / library_size * scale_factor)``.
+    span
+        Loess span of the mean-variance trend (Seurat ``loess.span``).
+    clip
+        Clip for the standardised values (Seurat ``clip.max``); ``None`` means
+        ``sqrt(n_cells)``.
+
+    Returns
+    -------
+    dict
+        ``"data"``: scipy.sparse.csr_matrix, float32, cells x genes, the log-normalised
+        values (same sparsity pattern as the input; the index arrays are shared with it).
+        ``"library_size"``: float64 (cells,). ``"mean"``, ``"variance"``,
+        ``"variance_expected"``, ``"variance_standardized"``: float64 (genes,), the vst
+        columns (``vst.*`` in Seurat; constant genes get 0 expected and standardised
+        variance). ``"hvg"``: int32 (n_hvg,) gene indices, most variable first.
+        ``"hvg_mean"``, ``"hvg_sd"``: float64 (n_hvg,), mean and sample standard deviation
+        of the log-normalised values of each HVG (what ``ScaleData`` / :func:`pca` scale
+        with). ``"clip"``: the clip used. ``"X_hvg"``: ``data[:, hvg]`` as a CSR matrix,
+        ready for :func:`pca`.
+
+    Notes
+    -----
+    The loess is R's ``loess(..., surface = "direct")`` (exact local quadratic fit at
+    every gene); Seurat uses R's interpolated surface, so the expected variances differ
+    slightly and the HVG sets overlap by > 99% rather than exactly.
+    """
+    import scipy.sparse as sp
+
+    n_rows, n_cols, indptr, indices, data = _csr_parts(X_counts, "X_counts")
+    n_hvg = _int("n_hvg", n_hvg, 1)
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X_counts is empty (shape {(n_rows, n_cols)})")
+    n_hvg = min(n_hvg, n_cols)
+    scale_factor = _float("scale_factor", scale_factor)
+    if scale_factor <= 0:
+        raise ValueError(f"scale_factor must be positive, got {scale_factor}")
+    span = _float("span", span)
+    if span <= 0:
+        raise ValueError(f"span must be positive, got {span}")
+    if clip is not None:
+        clip = _float("clip", clip)
+        if clip <= 0:
+            raise ValueError(f"clip must be positive, got {clip}")
+    out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
+    norm = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
+    out["data"] = norm
+    out["X_hvg"] = norm[:, out["hvg"]]
+    return out

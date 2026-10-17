@@ -28,6 +28,19 @@ rs_snn <- function(idx, n, k, prune) .Call(wrap__rs_snn, idx, n, k, prune)
 #' @keywords internal
 rs_leiden <- function(p, i, x, n, resolution, seed, n_iter) .Call(wrap__rs_leiden, p, i, x, n, resolution, seed, n_iter)
 
+#' `rs_leiden` with a device: "cpu", "auto" (cuGraph when built with the `cugraph` feature,
+#' loadable and a CUDA device is usable, else CPU), "cuda" or "cuda:<index>" (an error when
+#' cuGraph is not available). Phase 7, docs/scfast-integration.md.
+#' @keywords internal
+rs_leiden_on <- function(p, i, x, n, resolution, seed, n_iter, device) .Call(wrap__rs_leiden_on, p, i, x, n, resolution, seed, n_iter, device)
+
+#' Resolves a Leiden device string to the device `rs_leiden_on` would run on: "cpu" or
+#' "cuda:<index>". "auto" becomes "cuda:0" only when cuGraph is usable; an explicit "cuda"
+#' that is not usable is an error naming the reason. Third element: whether the `cugraph`
+#' feature was compiled in at all.
+#' @keywords internal
+rs_leiden_device <- function(device) .Call(wrap__rs_leiden_device, device)
+
 #' Is the n x n dgCMatrix (`@p`, `@i`, `@x`, row indices sorted within columns, as in any
 #' valid dgCMatrix) symmetric to a relative tolerance? O(nnz log degree), no allocation,
 #' unlike `isSymmetric()` in R, which builds the transpose.
@@ -51,3 +64,16 @@ rs_csr_view_ptrs <- function(p, i, x, n_genes, n_cells) .Call(wrap__rs_csr_view_
 #' @keywords internal
 rs_debug_panic <- function(msg) .Call(wrap__rs_debug_panic, msg)
 
+
+#' Fused NormalizeData + FindVariableFeatures(vst) + ScaleData statistics of a genes x cells
+#' counts dgCMatrix, read in place as cells x genes CSR. Returns the log-normalised `@x`
+#' (same `@p`/`@i` as the counts), per-cell library sizes, the per-gene vst columns, and the
+#' HVGs (1-based, most variable first) with the mean / sd of their log-normalised values.
+#' `clip` <= 0 means sqrt(n_cells).
+#' @keywords internal
+rs_preprocess_csc <- function(p, i, x, n_genes, n_cells, n_hvg, scale_factor, span, clip) .Call(wrap__rs_preprocess_csc, p, i, x, n_genes, n_cells, n_hvg, scale_factor, span, clip)
+
+#' Local quadratic loess of y on x evaluated at every x (R's loess with surface = "direct").
+#' For the parity tests of the loess used by rs_preprocess_csc.
+#' @keywords internal
+rs_loess_direct <- function(x, y, span) .Call(wrap__rs_loess_direct, x, y, span)

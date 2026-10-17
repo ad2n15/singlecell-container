@@ -20,7 +20,7 @@
 //! R error. Nothing unwinds into R.
 
 use extendr_api::prelude::*;
-use scfast_core::{cluster, knn, pca, snn, CsrView, Knn, RowMajor, SparseGraph};
+use scfast_core::{cluster, knn, pca, preprocess, snn, CsrView, Knn, RowMajor, SparseGraph};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 
@@ -293,11 +293,39 @@ fn rs_snn(idx: Robj, n: i32, k: i32, prune: f64) -> RResult<Robj> {
 
 // ------------------------------------------------------------------ Leiden
 
-/// Leiden (RB objective) on a symmetric n x n dgCMatrix given by its `@p`, `@i`, `@x`.
-/// Returns 0-based labels numbered by decreasing cluster size.
+/// Leiden (RB objective) on a symmetric n x n dgCMatrix given by its `@p`, `@i`, `@x`, on the
+/// CPU. Returns 0-based labels numbered by decreasing cluster size.
 /// @keywords internal
 #[extendr]
 fn rs_leiden(p: Robj, i: Robj, x: Robj, n: i32, resolution: f64, seed: f64, n_iter: i32) -> RResult<Robj> {
+    leiden_impl(p, i, x, n, resolution, seed, n_iter, cluster::LeidenDevice::Cpu)
+}
+
+/// `rs_leiden` with a device: "cpu", "auto" (cuGraph when built with the `cugraph` feature,
+/// loadable and a CUDA device is usable, else CPU), "cuda" or "cuda:<index>" (an error when
+/// cuGraph is not available). Phase 7, docs/scfast-integration.md.
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_leiden_on(p: Robj, i: Robj, x: Robj, n: i32, resolution: f64, seed: f64, n_iter: i32, device: &str) -> RResult<Robj> {
+    let device = cluster::LeidenDevice::parse(device).map_err(|e| extendr_api::Error::Other(e.to_string()))?;
+    leiden_impl(p, i, x, n, resolution, seed, n_iter, device)
+}
+
+/// Resolves a Leiden device string to the device `rs_leiden_on` would run on: "cpu" or
+/// "cuda:<index>". "auto" becomes "cuda:0" only when cuGraph is usable; an explicit "cuda"
+/// that is not usable is an error naming the reason. Third element: whether the `cugraph`
+/// feature was compiled in at all.
+/// @keywords internal
+#[extendr]
+fn rs_leiden_device(device: &str) -> RResult<Robj> {
+    let requested = cluster::LeidenDevice::parse(device).map_err(|e| extendr_api::Error::Other(e.to_string()))?;
+    let resolved = run_kernel("leiden", || cluster::resolve_leiden_device(requested))?;
+    Ok(list!(requested = requested.as_string(), resolved = resolved.as_string(), cugraph = cluster::cugraph_compiled()).into())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn leiden_impl(p: Robj, i: Robj, x: Robj, n: i32, resolution: f64, seed: f64, n_iter: i32, device: cluster::LeidenDevice) -> RResult<Robj> {
     let n = non_negative(n, "number of nodes")?;
     let p = int_slice(&p, "@p")?;
     let i = int_slice(&i, "@i")?;
@@ -327,7 +355,7 @@ fn rs_leiden(p: Robj, i: Robj, x: Robj, n: i32, resolution: f64, seed: f64, n_it
         weights: x.iter().map(|&v| v as f32).collect(),
     };
     let params = cluster::ClusterParams { resolution, seed: seed_u64(seed)?, n_iterations: n_iter as usize };
-    let labels = run_kernel("leiden", || cluster::leiden(&graph, &params))?;
+    let labels = run_kernel("leiden", || cluster::leiden_on(&graph, &params, device))?;
     if labels.len() != n {
         return err(format!("scfast leiden: kernel returned {} labels for {n} nodes", labels.len()));
     }
@@ -432,15 +460,72 @@ fn rs_debug_panic(msg: &str) -> RResult<Robj> {
     run_kernel("debug", move || -> scfast_core::Result<Robj> { panic!("{}", m) })
 }
 
+// ------------------------------------------------------------------ preprocessing (Phase 9)
+
+/// Fused NormalizeData + FindVariableFeatures(vst) + ScaleData statistics of a genes x cells
+/// counts dgCMatrix, read in place as cells x genes CSR. Returns the log-normalised `@x`
+/// (same `@p`/`@i` as the counts), per-cell library sizes, the per-gene vst columns, and the
+/// HVGs (1-based, most variable first) with the mean / sd of their log-normalised values.
+/// `clip` <= 0 means sqrt(n_cells).
+/// @keywords internal
+#[extendr]
+fn rs_preprocess_csc(p: Robj, i: Robj, x: Robj, n_genes: i32, n_cells: i32, n_hvg: i32, scale_factor: f64, span: f64, clip: f64) -> RResult<Robj> {
+    let view = csc_as_csr(&p, &i, &x, n_genes, n_cells)?;
+    if n_hvg < 1 {
+        return err(format!("n_hvg must be >= 1, got {n_hvg}"));
+    }
+    let params = preprocess::PreprocessParams {
+        n_hvg: n_hvg as usize,
+        scale_factor,
+        span,
+        clip: if clip > 0.0 { Some(clip) } else { None },
+    };
+    let res: preprocess::PreprocessResult<f64> = run_kernel("preprocess", || preprocess::preprocess(view, &params))?;
+    if res.data.len() != view.nnz() || res.library_size.len() != view.n_rows || res.mean.len() != view.n_cols {
+        return err(format!(
+            "scfast preprocess: kernel returned {} values, {} library sizes and {} gene means for {} non-zeros, {} cells, {} genes",
+            res.data.len(), res.library_size.len(), res.mean.len(), view.nnz(), view.n_rows, view.n_cols
+        ));
+    }
+    Ok(list!(
+        data = res.data,
+        library_size = res.library_size,
+        mean = res.mean,
+        variance = res.variance,
+        variance_expected = res.variance_expected,
+        variance_standardized = res.variance_standardized,
+        clip = res.clip,
+        hvg = res.hvg.iter().map(|&j| j as i32 + 1).collect::<Vec<i32>>(),
+        hvg_mean = res.hvg_mean,
+        hvg_sd = res.hvg_sd
+    )
+    .into())
+}
+
+/// Local quadratic loess of y on x evaluated at every x (R's loess with surface = "direct").
+/// For the parity tests of the loess used by rs_preprocess_csc.
+/// @keywords internal
+#[extendr]
+fn rs_loess_direct(x: Robj, y: Robj, span: f64) -> RResult<Robj> {
+    let xs = real_slice(&x, "x")?;
+    let ys = real_slice(&y, "y")?;
+    let f = run_kernel("loess", || preprocess::loess_direct(xs, ys, span))?;
+    Ok(f.into())
+}
+
 extendr_module! {
     mod scfastR;
     fn rs_pca_csc;
     fn rs_knn;
     fn rs_snn;
     fn rs_leiden;
+    fn rs_leiden_on;
+    fn rs_leiden_device;
     fn rs_is_symmetric;
     fn rs_info;
     fn rs_dataptr;
     fn rs_csr_view_ptrs;
     fn rs_debug_panic;
+    fn rs_preprocess_csc;
+    fn rs_loess_direct;
 }

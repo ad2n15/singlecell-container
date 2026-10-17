@@ -16,6 +16,12 @@ scfast-core = { path = "../../../scfast-core" }
 # Only for rs_info() (thread count); same version as scfast-core uses.
 rayon = "1.10"
 
+[features]
+# GPU Leiden via cuGraph's C API (Phase 7): libcugraph_c.so is dlopen'ed at run time, so the
+# package still builds and loads without it. Build with
+#   SCFASTR_CARGO_FEATURES=cugraph R CMD INSTALL rust/scfast-r   (see src/Makevars)
+cugraph = ["scfast-core/cugraph"]
+
 # Standalone crate: rust/Cargo.toml excludes scfast-r from the workspace, so this table
 # stops cargo from searching upwards and adopting rust/ as its workspace root.
 [workspace]

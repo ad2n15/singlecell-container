@@ -2,7 +2,8 @@
 //!
 //! CPU: single-clustering 0.7.0 (pinned), RB objective, which is what Seurat
 //! (`RBConfigurationVertexPartition`) and Scanpy optimise (docs/RUST_ENGINE.md section 4).
-//! GPU (Phase 7): cuGraph Leiden behind the same `Clusterer` trait.
+//! GPU (Phase 7): cuGraph Leiden ([`crate::cugraph::CugraphLeiden`], feature `cugraph`) behind
+//! the same `Clusterer` trait; [`leiden_on`] picks the backend from a [`LeidenDevice`].
 //!
 //! # Self-loops (the SNN diagonal)
 //!
@@ -142,15 +143,117 @@ impl Clusterer for SingleClusteringLeiden {
     }
 }
 
-/// Convenience: CPU Leiden with the default backend.
+/// Convenience: CPU Leiden with the default backend. Unchanged by the `cugraph` feature;
+/// use [`leiden_on`] to choose a device.
 pub fn leiden(graph: &SparseGraph, params: &ClusterParams) -> Result<Vec<u32>> {
     SingleClusteringLeiden.cluster(graph, params)
+}
+
+/// Where Leiden runs. The binding strings are `"cpu"`, `"auto"`, `"cuda"` (device 0) and
+/// `"cuda:<index>"`; `"gpu"` is accepted as an alias of `"cuda"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LeidenDevice {
+    /// single-clustering (the reference implementation).
+    #[default]
+    Cpu,
+    /// cuGraph on device 0 when scfast-core was built with the `cugraph` feature **and**
+    /// `libcugraph_c.so` loads **and** a CUDA device is usable; otherwise the CPU.
+    Auto,
+    /// cuGraph on the given CUDA device index; an error when that is not possible.
+    Cuda(usize),
+}
+
+impl LeidenDevice {
+    /// Parses the binding-level device string (case-insensitive).
+    pub fn parse(s: &str) -> Result<Self> {
+        let t = s.trim().to_ascii_lowercase();
+        match t.as_str() {
+            "cpu" => return Ok(Self::Cpu),
+            "auto" => return Ok(Self::Auto),
+            "cuda" | "gpu" => return Ok(Self::Cuda(0)),
+            _ => {}
+        }
+        if let Some(idx) = t.strip_prefix("cuda:").or_else(|| t.strip_prefix("gpu:")) {
+            if let Ok(i) = idx.parse::<usize>() {
+                return Ok(Self::Cuda(i));
+            }
+        }
+        Err(Error::InvalidParameter(format!("device must be \"auto\", \"cpu\", \"cuda\" or \"cuda:<index>\", got {s:?}")))
+    }
+
+    /// The string form the bindings report (`"cpu"`, `"auto"`, `"cuda:<index>"`).
+    pub fn as_string(&self) -> String {
+        match self {
+            Self::Cpu => "cpu".into(),
+            Self::Auto => "auto".into(),
+            Self::Cuda(i) => format!("cuda:{i}"),
+        }
+    }
+}
+
+/// Whether this build can run Leiden on cuGraph at all (feature `cugraph` compiled in). It
+/// says nothing about the library or a GPU being present: see [`resolve_leiden_device`].
+pub const fn cugraph_compiled() -> bool {
+    cfg!(feature = "cugraph")
+}
+
+/// Turns [`LeidenDevice::Auto`] into the device [`leiden_on`] would use (`Cpu`, or `Cuda(0)`
+/// when cuGraph is built, loadable and a device is usable) and checks that an explicit
+/// `Cuda(i)` is usable. `Cpu` and a usable `Cuda(i)` are returned unchanged.
+pub fn resolve_leiden_device(device: LeidenDevice) -> Result<LeidenDevice> {
+    match device {
+        LeidenDevice::Cpu => Ok(LeidenDevice::Cpu),
+        LeidenDevice::Auto => {
+            #[cfg(feature = "cugraph")]
+            {
+                if crate::cugraph::CugraphLeiden::new(0).is_ok() {
+                    return Ok(LeidenDevice::Cuda(0));
+                }
+            }
+            Ok(LeidenDevice::Cpu)
+        }
+        LeidenDevice::Cuda(i) => {
+            #[cfg(feature = "cugraph")]
+            {
+                crate::cugraph::CugraphLeiden::new(i).map(|_| LeidenDevice::Cuda(i))
+            }
+            #[cfg(not(feature = "cugraph"))]
+            {
+                Err(Error::Backend {
+                    context: "cuGraph Leiden",
+                    message: format!(
+                        "device cuda:{i} requested but scfast-core was built without the `cugraph` feature \
+                         (build with `--features cugraph`), or use device \"cpu\" / \"auto\""
+                    ),
+                })
+            }
+        }
+    }
+}
+
+/// Leiden on the chosen device. `Cpu` is exactly [`leiden`]; `Auto` falls back to the CPU
+/// whenever cuGraph is not built, not loadable or has no usable device; `Cuda(i)` is an error
+/// in those cases. Labels follow the same numbering on every backend (by decreasing size).
+pub fn leiden_on(graph: &SparseGraph, params: &ClusterParams, device: LeidenDevice) -> Result<Vec<u32>> {
+    match resolve_leiden_device(device)? {
+        LeidenDevice::Cuda(_i) => {
+            #[cfg(feature = "cugraph")]
+            {
+                crate::cugraph::CugraphLeiden::new(_i)?.cluster(graph, params)
+            }
+            #[cfg(not(feature = "cugraph"))]
+            {
+                unreachable!("resolve_leiden_device never returns Cuda without the cugraph feature")
+            }
+        }
+        _ => leiden(graph, params),
+    }
 }
 
 /// Structural checks single-clustering would otherwise trip over (it derives n from
 /// `indptr`, so a wrong `n` would go unnoticed). Index bounds, weight sign/finiteness and
 /// symmetry are checked by `CSRNetwork::from_csr_parts`.
-fn validate_shape(g: &SparseGraph) -> Result<()> {
+pub(crate) fn validate_shape(g: &SparseGraph) -> Result<()> {
     if g.indptr.len() != g.n + 1 {
         return Err(Error::InvalidInput(format!("indptr has {} entries, expected n + 1 = {}", g.indptr.len(), g.n + 1)));
     }
@@ -185,7 +288,7 @@ fn map_err(e: ClusteringError) -> Error {
 
 /// Renumber clusters 0.. by decreasing size, ties broken by the lowest node index in the
 /// cluster, so labels don't depend on the backend's internal numbering.
-fn relabel_by_size(labels: &[usize]) -> Vec<u32> {
+pub(crate) fn relabel_by_size(labels: &[usize]) -> Vec<u32> {
     let n_slots = labels.iter().copied().max().map_or(0, |m| m + 1);
     let mut size = vec![0usize; n_slots];
     let mut first = vec![usize::MAX; n_slots];
@@ -226,5 +329,34 @@ mod tests {
         assert!(matches!(leiden(&g, &p), Err(Error::InvalidParameter(_))));
         let p = ClusterParams { resolution: f64::NAN, ..Default::default() };
         assert!(matches!(leiden(&g, &p), Err(Error::InvalidParameter(_))));
+    }
+
+    #[test]
+    fn parses_device_strings() {
+        assert_eq!(LeidenDevice::parse("CPU").unwrap(), LeidenDevice::Cpu);
+        assert_eq!(LeidenDevice::parse(" auto ").unwrap(), LeidenDevice::Auto);
+        assert_eq!(LeidenDevice::parse("cuda").unwrap(), LeidenDevice::Cuda(0));
+        assert_eq!(LeidenDevice::parse("gpu").unwrap(), LeidenDevice::Cuda(0));
+        assert_eq!(LeidenDevice::parse("cuda:3").unwrap(), LeidenDevice::Cuda(3));
+        assert!(matches!(LeidenDevice::parse("tpu"), Err(Error::InvalidParameter(_))));
+        assert!(matches!(LeidenDevice::parse("cuda:x"), Err(Error::InvalidParameter(_))));
+        assert_eq!(LeidenDevice::Cuda(2).as_string(), "cuda:2");
+    }
+
+    /// Without a GPU (this machine), `auto` is the CPU and gives the CPU labels; an explicit
+    /// CUDA device is a `Backend` error whether or not the feature is compiled in.
+    #[test]
+    fn device_dispatch_without_a_gpu() {
+        let g = SparseGraph { n: 2, indptr: vec![0, 1, 2], indices: vec![1, 0], weights: vec![1.0, 1.0] };
+        let p = ClusterParams::default();
+        if std::env::var_os("SCFAST_CUGRAPH_TEST").is_some() {
+            return; // a GPU box: the ignored tests in cugraph.rs cover it
+        }
+        assert_eq!(resolve_leiden_device(LeidenDevice::Cpu).unwrap(), LeidenDevice::Cpu);
+        assert_eq!(resolve_leiden_device(LeidenDevice::Auto).unwrap(), LeidenDevice::Cpu);
+        assert_eq!(leiden_on(&g, &p, LeidenDevice::Auto).unwrap(), leiden(&g, &p).unwrap());
+        assert_eq!(leiden_on(&g, &p, LeidenDevice::Cpu).unwrap(), leiden(&g, &p).unwrap());
+        assert!(matches!(leiden_on(&g, &p, LeidenDevice::Cuda(0)), Err(Error::Backend { .. })));
+        assert!(matches!(resolve_leiden_device(LeidenDevice::Cuda(0)), Err(Error::Backend { .. })));
     }
 }

@@ -292,13 +292,34 @@ run_s2 <- function(cfg, repo) {
   dmap <- dec$decision[match(colnames(obj), dec$cell_id)]
   obj$qc_decision <- factor(dmap, levels = c("keep", "review"))
 
-  # 2-3. normalise + variable genes
   n_hvg <- min(cfg$n_hvg, nrow(obj))
   assay <- "RNA"
+
+  # 4. device / memory plan (before normalisation: on the scfast engine the fused
+  # PreprocessFast() replaces NormalizeData + FindVariableFeatures, docs/scfast-integration.md Phase 9)
+  plan <- s2_choose_plan(cfg, repo, ncol(obj), n_hvg)
+  scp_log(sprintf("device plan: device=%s plan=%s (%s) [%s]", plan$device, plan$plan, plan$reason, plan$source))
+
+  # 2-3. normalise + variable genes
+  pre_impl <- "Seurat::NormalizeData + FindVariableFeatures(vst)"
+  if (!identical(cfg$normalization, "sct")) {
+    # Same engine decision as below; the harmony fallback (exchange_cpu) keeps the Seurat
+    # preprocessing because that path runs with engine seurat.
+    eng0 <- tryCatch(s2_resolve_engine(cfg, plan, assay), error = function(e) "seurat")
+    harmony_fallback <- identical(cfg$integration$method, "harmony") && !scp_has_pkg("harmony")
+    if (eng0 == "scfast" && !harmony_fallback &&
+        exists("PreprocessFast", envir = asNamespace("scfastR"), inherits = FALSE)) {
+      pre_impl <- "scfastR::PreprocessFast (fused normalise + vst + scaling statistics)"
+    }
+  }
   if (identical(cfg$normalization, "sct")) {
     obj <- tm("sctransform", Seurat::SCTransform(obj, vst.flavor = "v2", variable.features.n = n_hvg,
                                                  seed.use = seed, verbose = FALSE))
     assay <- "SCT"
+    pre_impl <- "Seurat::SCTransform"
+  } else if (startsWith(pre_impl, "scfastR")) {
+    obj <- tm("preprocess", scfastR::PreprocessFast(obj, n_hvg = n_hvg, assay = assay, scale.factor = 1e4,
+                                                    loess.span = 0.3, verbose = FALSE))
   } else {
     obj <- tm("normalize", Seurat::NormalizeData(obj, normalization.method = "LogNormalize",
                                                  scale.factor = 1e4, verbose = FALSE))
@@ -306,10 +327,6 @@ run_s2 <- function(cfg, repo) {
   }
   hvg <- SeuratObject::VariableFeatures(obj, assay = assay)
   n_hvg_used <- length(hvg)
-
-  # 4. device / memory plan
-  plan <- s2_choose_plan(cfg, repo, ncol(obj), n_hvg_used)
-  scp_log(sprintf("device plan: device=%s plan=%s (%s) [%s]", plan$device, plan$plan, plan$reason, plan$source))
 
   integ <- cfg$integration$method
   batch_key <- cfg$integration$batch_key
@@ -502,7 +519,7 @@ run_s2 <- function(cfg, repo) {
                       else if (path == "gpu_scfast") "cuda" else (gpu_summary$device %||% NA),
     cells_in = cells_in, cells_out = ncol(obj),
     qc = list(review_action = review_action, decisions = dec_counts),
-    normalization = cfg$normalization, n_hvg = n_hvg_used,
+    normalization = cfg$normalization, preprocessing = pre_impl, n_hvg = n_hvg_used,
     pcs = pcs_used, pcs_detail = pcs_info,
     n_neighbors = cfg$n_neighbors, resolution = cfg$clustering$resolution, seed = seed,
     integration = list(method = integ, batch_key = if (integ == "harmony") batch_key else NULL,

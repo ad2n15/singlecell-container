@@ -30,13 +30,28 @@
 //! and every faer call runs with `Par::Seq` inside its task, so a given seed and input give
 //! bitwise-identical output for any number of rayon threads (on the same machine and build).
 
+use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::types::{CsrView, Idx, Real, RowMajor};
 
+#[cfg(feature = "cuda")]
+mod cuda;
 mod dense;
 mod operator;
 
 use operator::{Blocks, ScaledOp};
+
+/// The implicit operator `Z` as the randomised SVD sees it: `Z v` and `Z^T u` on
+/// column-major f64 faer matrices. Implemented by the CPU [`ScaledOp`] and, with feature
+/// `cuda`, by [`cuda::CudaScaledOp`].
+pub(crate) trait Operator {
+    fn nrows(&self) -> usize;
+    fn ncols(&self) -> usize;
+    /// `out = Z v`, `v` genes x l, `out` cells x l.
+    fn apply(&self, v: faer::MatRef<'_, f64>, out: faer::MatMut<'_, f64>) -> Result<()>;
+    /// `Z^T u`, `u` cells x l; returns genes x l.
+    fn apply_t(&self, u: faer::MatRef<'_, f64>) -> Result<faer::Mat<f64>>;
+}
 
 /// Parameters, with Seurat-compatible defaults.
 #[derive(Clone, Debug)]
@@ -102,6 +117,20 @@ pub struct PcaResult {
 ///   non-positive / NaN `clip`; `InvalidInput` for malformed CSR structure (including
 ///   duplicate column indices within a row) or non-finite values.
 pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaParams) -> Result<PcaResult> {
+    implicit_scaled_pca_on(x, params, Device::Cpu)
+}
+
+/// [`implicit_scaled_pca`] on a chosen [`Device`] (docs/scfast-integration.md Phase 6).
+///
+/// `Device::Cpu` is exactly [`implicit_scaled_pca`]. `Device::Cuda(i)` runs the two sparse
+/// products of every randomised-SVD step on the GPU (NVRTC CSR kernels with the mean / 1/sd
+/// correction applied on device, f32) and keeps the gene statistics, TSQR and the small SVD
+/// on the CPU in f64; it needs the `cuda` feature, a visible device and enough device memory
+/// for the CSR plus a few cells x l buffers, otherwise it returns [`Error::Gpu`] without
+/// touching the CPU path (callers that asked for `"auto"` can retry on the CPU). The GPU
+/// result is not bitwise equal to the CPU one (f32 products, atomics); the parity target
+/// is a top-10 PC subspace similarity above 0.99.
+pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaParams, device: Device) -> Result<PcaResult> {
     validate(&x, params)?;
     let (n, p, k) = (x.n_rows, x.n_cols, params.n_comps);
     let blocks = Blocks::new(n, p, x.data.len());
@@ -111,10 +140,23 @@ pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaPa
         .map(|j| if !params.scale || stats.constant[j] || stats.sd[j] == 0.0 { 1.0 } else { stats.sd[j] })
         .collect();
     let inv_sd: Vec<f64> = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
-    let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
 
     let l = k.saturating_add(params.oversample).min(n.min(p));
-    let (q, ub, d, vb) = randomized_svd(&op, l, params.power_iters, params.seed)?;
+    let (q, ub, d, vb) = match device {
+        Device::Cpu => {
+            let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
+            randomized_svd(&op, l, params.power_iters, params.seed)?
+        }
+        #[cfg(feature = "cuda")]
+        Device::Cuda(ordinal) => {
+            let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, l, ordinal)?;
+            randomized_svd(&op, l, params.power_iters, params.seed)?
+        }
+        #[cfg(not(feature = "cuda"))]
+        Device::Cuda(_) => {
+            return Err(Error::gpu("scfast was built without CUDA support (feature `cuda`); use Device::Cpu"));
+        }
+    };
 
     // Sign convention: the largest-magnitude loading of each component is positive (ties go
     // to the lowest gene index).
@@ -185,8 +227,8 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
 
 /// Randomised SVD of the implicit operator. Returns (Q: n x l orthonormal, U_b: p x l,
 /// d: l singular values, V_b: l x l) with `Z ≈ (Q V_b) diag(d) U_b^T`.
-fn randomized_svd<I: Idx, T: Real>(
-    op: &ScaledOp<'_, I, T>,
+fn randomized_svd<O: Operator>(
+    op: &O,
     l: usize,
     power_iters: usize,
     seed: u64,
@@ -194,17 +236,17 @@ fn randomized_svd<I: Idx, T: Real>(
     let (n, p) = (op.nrows(), op.ncols());
     let omega = dense::gaussian(p, l, seed);
     let mut q = faer::Mat::<f64>::zeros(n, l);
-    op.apply(omega.as_ref(), q.as_mut());
+    op.apply(omega.as_ref(), q.as_mut())?;
     drop(omega);
     dense::orthonormalize(q.as_mut());
     for _ in 0..power_iters {
-        let mut w = op.apply_t(q.as_ref());
+        let mut w = op.apply_t(q.as_ref())?;
         dense::orthonormalize(w.as_mut());
-        op.apply(w.as_ref(), q.as_mut());
+        op.apply(w.as_ref(), q.as_mut())?;
         dense::orthonormalize(q.as_mut());
     }
     // B^T = Z^T Q (p x l) = U_b diag(d) V_b^T, so Z ≈ Q B = (Q V_b) diag(d) U_b^T.
-    let bt = op.apply_t(q.as_ref());
+    let bt = op.apply_t(q.as_ref())?;
     let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;
     Ok((q, ub, d, vb))
 }

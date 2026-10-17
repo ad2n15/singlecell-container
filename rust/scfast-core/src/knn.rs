@@ -49,9 +49,12 @@
 //! `Exact` when `n < auto_threshold`, otherwise HNSW with m = 16, ef_construction = 200,
 //! ef_search = max(2k, 64).
 
+use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::types::{Knn, RowMajor};
 
+#[cfg(feature = "cuda")]
+mod cuda;
 mod exact;
 mod hnsw;
 
@@ -95,6 +98,19 @@ const HNSW_MAX_M: usize = 256;
 /// neighbours in increasing distance; ties broken by lower index so results are
 /// deterministic.
 pub fn knn(x: &RowMajor, params: &KnnParams) -> Result<Knn> {
+    knn_on(x, params, Device::Cpu)
+}
+
+/// [`knn`] on a chosen [`Device`] (docs/scfast-integration.md Phase 6).
+///
+/// `Device::Cpu` is exactly [`knn`]. `Device::Cuda(i)` computes the cross terms with cuBLAS
+/// GEMM and selects candidates with a top-k kernel, then re-ranks them by exact f64
+/// distances on the host (same output contract: self first, Euclidean distances, ties by
+/// lower index); `params.method` is ignored there (the GPU search is brute force at every
+/// size) and `k` must be at most 129. Needs the `cuda` feature, a visible device and
+/// device memory for the embeddings plus one score block, otherwise [`Error::Gpu`] is
+/// returned without touching the CPU path.
+pub fn knn_on(x: &RowMajor, params: &KnnParams, device: Device) -> Result<Knn> {
     validate_input(x)?;
     let n = x.n_rows;
     let k = params.k;
@@ -103,6 +119,15 @@ pub fn knn(x: &RowMajor, params: &KnnParams) -> Result<Knn> {
     }
     if k > n {
         return Err(Error::InvalidParameter(format!("k = {k} exceeds the number of cells ({n})")));
+    }
+    match device {
+        Device::Cpu => {}
+        #[cfg(feature = "cuda")]
+        Device::Cuda(ordinal) => return cuda::cuda_knn(x, k, ordinal),
+        #[cfg(not(feature = "cuda"))]
+        Device::Cuda(_) => {
+            return Err(Error::gpu("scfast was built without CUDA support (feature `cuda`); use Device::Cpu"));
+        }
     }
     match params.method {
         KnnMethod::Exact => Ok(exact::exact_knn(x, k)),

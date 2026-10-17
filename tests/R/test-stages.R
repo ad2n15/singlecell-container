@@ -602,6 +602,68 @@ test_that("S2 engine resolution: auto picks scfast only for an installed scfastR
   }
 })
 
+# ---- GPU-plan engine resolution (docs/scfast-integration.md "Pipeline wiring"), scfast_info mocked
+test_that("scp_scfast_cuda treats missing cuda fields as FALSE", {
+  expect_identical(scp_scfast_cuda(NULL), list(built = FALSE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(version = "0.1.0")), list(built = FALSE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(cuda = FALSE)), list(built = FALSE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(cuda_built = TRUE)), list(built = TRUE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(cuda_built = TRUE, cuda_available = NA)), list(built = TRUE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(cuda_built = FALSE, cuda_available = TRUE)), list(built = FALSE, available = FALSE))
+  expect_identical(scp_scfast_cuda(list(cuda_built = TRUE, cuda_available = TRUE)), list(built = TRUE, available = TRUE))
+  # the real scfastR on this machine (if any) has no CUDA
+  expect_false(scp_scfast_cuda()$available)
+})
+
+test_that("scp_resolve_engine on a GPU plan honours engine_gpu and the scfastR CUDA state", {
+  # scfast_info() is mocked by rebinding scp_scfast_info where scp_resolve_engine looks it up
+  with_info <- function(info, code) {
+    env <- environment(scp_resolve_engine)
+    old <- get("scp_scfast_info", envir = env)
+    assign("scp_scfast_info", function() info, envir = env)
+    on.exit(assign("scp_scfast_info", old, envir = env), add = TRUE)
+    force(code)
+  }
+  cuda_ok <- list(version = "0.1.0", cuda_built = TRUE, cuda_available = TRUE)
+  cuda_built_only <- list(version = "0.1.0", cuda_built = TRUE, cuda_available = FALSE)
+  no_cuda <- list(version = "0.1.0", cuda = FALSE)
+  for (info in list(cuda_ok, cuda_built_only, no_cuda, NULL)) {
+    with_info(info, {
+      expect_identical(scp_resolve_engine(list(engine = "seurat"), "gpu"), "seurat")
+      expect_identical(scp_resolve_engine(list(engine_gpu = "rapids"), "gpu"), "seurat")
+      expect_error(scp_resolve_engine(list(engine = "scfast", engine_gpu = "rapids"), "gpu"), "no GPU backend")
+      expect_error(scp_resolve_engine(list(engine_gpu = "cuda"), "gpu"), "engine_gpu must be")
+      expect_error(scp_resolve_engine(list(engine_gpu = "cuda"), "cpu"), "engine_gpu must be")
+    })
+  }
+  with_info(cuda_ok, {
+    expect_identical(scp_resolve_engine(list(), "gpu"), "scfast")
+    expect_identical(scp_resolve_engine(list(engine = "auto", engine_gpu = "auto"), "gpu"), "scfast")
+    expect_identical(scp_resolve_engine(list(engine_gpu = "scfast"), "gpu"), "scfast")
+    expect_identical(scp_resolve_engine(list(engine = "scfast"), "gpu"), "scfast")
+    expect_identical(s2_resolve_engine(list(), list(device = "gpu")), "scfast")
+    expect_identical(s2_resolve_engine(list(), list(device = "gpu"), assay = "SCT"), "seurat")
+    expect_error(s2_resolve_engine(list(engine = "scfast"), list(device = "gpu"), assay = "SCT"), "lognorm")
+  })
+  for (info in list(cuda_built_only, no_cuda, NULL)) {
+    with_info(info, {
+      expect_identical(scp_resolve_engine(list(), "gpu"), "seurat")
+      expect_identical(scp_resolve_engine(list(engine_gpu = "auto"), "gpu"), "seurat")
+      expect_identical(s2_resolve_engine(list(), list(device = "gpu")), "seurat")
+      expect_error(scp_resolve_engine(list(engine_gpu = "scfast"), "gpu"), "engine_gpu: scfast needs scfastR built with CUDA")
+      expect_error(scp_resolve_engine(list(engine = "scfast"), "gpu"), "no GPU backend")
+    })
+  }
+  # the CUDA state never changes a CPU plan
+  with_info(cuda_ok, {
+    have <- requireNamespace("scfastR", quietly = TRUE)
+    expect_identical(scp_resolve_engine(list(engine_gpu = "scfast"), "cpu"), if (have) "scfast" else "seurat")
+    expect_identical(scp_resolve_engine(list(engine_gpu = "rapids"), "cpu"), if (have) "scfast" else "seurat")
+  })
+  expect_identical(.s2_scfast_device("gpu_scfast"), "cuda")
+  expect_identical(.s2_scfast_device("scfast"), "cpu")
+})
+
 test_that("S2 scfast path recovers the planted cell types and writes no exchange files", {
   skip_if_not_installed("scfastR")
   rd <- new_run(TWO, tag = "s2fast", engine = "scfast")

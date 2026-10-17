@@ -95,11 +95,42 @@ def leiden_csr(
     seed: int,
     n_iterations: int,
     /,
+    device: str = "cpu",
 ) -> npt.NDArray[np.int32]:
     """Leiden (RB objective) on a square, symmetric, canonical CSR graph given as raw arrays.
 
     The graph is copied once into the clustering library's own buffers. Returns int32
-    labels numbered by decreasing cluster size.
+    labels numbered by decreasing cluster size. device: "cpu", "auto", "cuda" or
+    "cuda:<index>" (cuGraph, feature `cugraph`); an unusable explicit CUDA device raises
+    RuntimeError.
+    """
+
+def leiden_device(device: str, /) -> dict[str, Any]:
+    """Resolve a Leiden device string.
+
+    Returns {"requested", "resolved" ("cpu" or "cuda:<index>"), "cugraph_compiled": bool}.
+    "auto" resolves to "cuda:0" only when the cugraph feature is built, libcugraph_c.so
+    loads and a CUDA device is usable; an unusable explicit "cuda" raises RuntimeError.
+    """
+
+def preprocess_csr(
+    n_rows: int,
+    n_cols: int,
+    indptr: npt.NDArray[np.int32] | npt.NDArray[np.int64],
+    indices: npt.NDArray[np.int32] | npt.NDArray[np.int64],
+    data: npt.NDArray[np.float32] | npt.NDArray[np.float64],
+    n_hvg: int,
+    scale_factor: float,
+    span: float,
+    clip: float | None,
+    /,
+) -> dict[str, Any]:
+    """Fused normalisation + vst HVG statistics of a CSR counts matrix (cells x genes).
+
+    The arrays are borrowed as in pca_csr. Returns {"data": float32 (nnz,) log-normalised
+    values in input order, "library_size": float64 (n_rows,), "mean", "variance",
+    "variance_expected", "variance_standardized": float64 (n_cols,), "hvg": int32 (n_hvg,)
+    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float}.
     """
 
 def _probe_detach(seconds: float, /) -> float:
