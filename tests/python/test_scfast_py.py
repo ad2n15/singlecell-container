@@ -722,6 +722,22 @@ def test_leiden_is_deterministic_and_accepts_other_graph_types():
     assert ari(e, truth) > 0.99  # a diagonal (as in Seurat's RNA_snn) is accepted
 
 
+# ---------------------------------------------------------------- preprocess
+
+def test_preprocess_x_hvg_is_data_columns_in_hvg_order():
+    rng = np.random.default_rng(1)
+    counts = sp.random(300, 80, density=0.2, format="csr", random_state=rng, dtype=np.float32)
+    counts.data = np.ceil(counts.data * 10)
+    out = scfast.preprocess(counts, n_hvg=25)
+    expected = out["data"][:, out["hvg"]]
+    expected.sort_indices()
+    x = out["X_hvg"]
+    assert x.shape == (300, 25) and x.has_sorted_indices
+    np.testing.assert_array_equal(x.indptr, expected.indptr)
+    np.testing.assert_array_equal(x.indices, expected.indices)
+    np.testing.assert_array_equal(x.data, expected.data)
+
+
 # ---------------------------------------------------------------- 10x h5
 
 @pytest.mark.parametrize("shuffle, int_dtype", [(False, np.int64), (False, np.int32), (True, np.int64)])
