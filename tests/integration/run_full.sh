@@ -65,10 +65,11 @@ for r in rows:
     w.writerow(r)
 PY
 "$PYTHON" - "$SRC_CONF/cpu.yaml" "$CONF/full.yaml" "$HOME_LEDGER" <<'PY'
-import sys, yaml
+import os, sys, yaml
 src, dst, ledger = sys.argv[1:4]
 cfg = yaml.safe_load(open(src))
 cfg["project"] = "full_test"
+cfg["engine"] = os.environ.get("SCPIPE_TEST_ENGINE", "auto")   # auto: Rust path when scfastR is installed
 cfg["llm"] = {"default": {"provider": "mock", "model": "mock-model"},
               "budget": {"per_run_limit": 5, "total_limit": 30, "ledger_path": ledger}, "replay": False}
 cfg["opentargets"] = {"enabled": True, "offline": True, "cache_dir": "refs/opentargets"}

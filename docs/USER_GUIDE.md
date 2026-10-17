@@ -18,8 +18,9 @@ scpipe doctor --config config.yaml
 # 2. run; --detach keeps it alive inside tmux when your SSH session drops
 scpipe run --config config.yaml --detach
 
-# 3. follow it
+# 3. follow it: text, or open <run_dir>/dashboard.html (rewritten after every stage; refreshes itself)
 scpipe status --run-dir /scratch/$USER/scpipe/my_study
+scpipe dashboard --run-dir /scratch/$USER/scpipe/my_study --watch 30   # optional: keep regenerating
 
 # 4. if a gate stops the run for your approval (exit code 3), it prints what to do:
 scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage G2 [--from-file edited.json] [--by you]
@@ -148,6 +149,18 @@ the engine `auto` would choose. Install steps, including Rust, are in [`INSTALL.
 ```
 
 Put the run directory on scratch; results you keep belong on project storage.
+
+### Watching a run: the dashboard
+
+`<run_dir>/dashboard.html` is one self-contained page (no network, no JavaScript) that `scpipe run`
+rewrites after every stage change. It shows the pipeline strip (S0 … S5 with the four gates)
+coloured by status, a wall-clock timeline with the waiting time at each gate hatched, and a card
+per stage and gate: wall time, peak memory, cells in and out, QC keep/review/exclude, engine and
+path, clusters, the S2 step timings, contrasts, the gate mode, who decided, fallback, reviewer
+verdict and a link to that gate's `report.html`. Open it over SMB/`scp`, or in a browser on the
+login node; while the run is live it reloads itself every 30 s. `scpipe dashboard --run-dir D`
+regenerates it by hand, and `--watch N` keeps doing so until the run finishes. The tail of the log
+is shown inline for a running, waiting or failed stage. Set `SCPIPE_NO_DASHBOARD=1` to disable it.
 
 ## 4. Gates and approvals
 

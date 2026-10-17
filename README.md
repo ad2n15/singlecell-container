@@ -25,6 +25,7 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 | **Annotation** | Consensus of lineage signatures, CellTypist and markers against 72 human cell types with Cell Ontology IDs; the annotation agent touches only low-confidence or conflicting clusters |
 | **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
 | **Pseudobulk DGE + Open Targets** | Conditions, replicates and contrasts from config; DESeq2 (limma-voom fallback); up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
+| **Run dashboard** | `<run_dir>/dashboard.html`, rewritten after every stage: pipeline strip, timeline with gate waits, per-stage and per-gate cards with timings, memory, cells, QC counts, engine, clusters, decisions and links to the gate reports |
 | **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `scpipe approve` for humans; full audit log and replay |
 | **Any LLM, £30 cap** | Claude Haiku 4.5 by default; OpenAI-compatible servers (vLLM, Ollama) supported; a ledger refuses any call that would cross the per-run or total budget and falls back to rules |
 | **Any HPC** | `direct`, SLURM/PBS/LSF/SGE or `split` execution; `scpipe init-site` and `doctor`; Apptainer and Docker recipes; resource caps and `nice` for shared login nodes; checkpoints and `resume` |
@@ -53,7 +54,7 @@ Copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`
 export ANTHROPIC_API_KEY=...                       # or any provider; omit for rules-only gates
 scpipe doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
 scpipe run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
-scpipe status --run-dir /scratch/$USER/scpipe/my_study
+scpipe status --run-dir /scratch/$USER/scpipe/my_study     # or open <run_dir>/dashboard.html
 scpipe approve --run-dir ... --stage G2 --by me   # when a gate stops for you
 scpipe resume  --run-dir ...                      # continue after a gate, disconnect or kill
 ```

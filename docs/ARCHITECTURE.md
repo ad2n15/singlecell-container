@@ -66,7 +66,10 @@ process under `nice` with thread, memory and GPU-memory caps passed as environme
 keys and input files that stage uses, so `scpipe run` again skips finished stages and a config
 change reruns only the stages that depend on it. A gate that needs a human exits with code 3;
 `scpipe approve` records the decision and `scpipe resume` carries on. `--detach` runs inside
-tmux (or nohup) so a dropped SSH session doesn't kill the run.
+tmux (or nohup) so a dropped SSH session doesn't kill the run. After every state change the runner
+rewrites `dashboard.html` (`python/scpipe/dashboard.py`): a self-contained page with the pipeline
+strip, a timeline and a card per stage and gate, built only from `state.json`, the stage summaries
+and the gate files.
 
 ## 3. Engines and CPU ⇄ GPU switching
 
