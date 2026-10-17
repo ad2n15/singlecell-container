@@ -61,6 +61,7 @@ def main():
     p.add_argument("--dims", type=int, default=10)
     p.add_argument("--k", type=int, default=20)
     p.add_argument("--resolution", type=float, default=0.5)
+    p.add_argument("--save-labels", help="folder for each method's Leiden labels (labels_<method>.npy)")
     a = p.parse_args()
 
     import scfast
@@ -102,6 +103,9 @@ def main():
             lab, r["leiden_s"], r["leiden_all"] = timed(
                 lambda: scfast.leiden(g, resolution=a.resolution, seed=0, n_iterations=2, device="cpu"), a.reps)
             r["n_clusters"] = int(lab.max()) + 1
+            if a.save_labels:
+                Path(a.save_labels).mkdir(parents=True, exist_ok=True)
+                np.save(Path(a.save_labels) / f"labels_{m.replace(':', '_').replace(';', '_')}.npy", lab)
             if ref_lab is None:
                 ref_lab = lab
             else:
