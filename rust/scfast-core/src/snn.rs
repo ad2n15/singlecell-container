@@ -214,9 +214,10 @@ impl WeightTable {
         let (mut keep, mut weight) = (Vec::with_capacity(k + 1), Vec::with_capacity(k + 1));
         for s in 0..=k {
             let sf = s as f64;
-            // ComputeSNN: value / (k + (k - value)); `value < prune` -> 0 -> removed
+            // ComputeSNN: value / (k + (k - value)); `value < prune` -> 0 -> removed, so
+            // equality survives (w and prune are finite here, so `>=` is exactly `!(<)`)
             let w = sf / (kf + (kf - sf));
-            keep.push(s > 0 && !(w < prune));
+            keep.push(s > 0 && w >= prune);
             weight.push(w as f32);
         }
         Self { keep, weight }

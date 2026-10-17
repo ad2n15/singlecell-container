@@ -513,9 +513,9 @@ fn write_f32(path: &std::path::Path, v: &[f32]) {
 /// Times `implicit_scaled_pca` on a matrix exported by Seurat (CSR arrays as written by
 /// `writeBin`: X_indptr.i32, X_indices.i32, X_data.f64 and dims.txt = "n p nnz"), records
 /// peak RSS per run (VmHWM after resetting it through /proc/self/clear_refs), and writes the
-/// result next to the input as scfast_q<power_iters>_{emb,load,stdev}.f32 (row-major).
+/// result next to the input as scfast_q<power_iters>_os<oversample>_{emb,load,stdev}.f32 (row-major).
 /// Env: SCFAST_PCA_BENCH=<dir>, SCFAST_PCA_REPS (3), SCFAST_PCA_THREADS ("1,2"),
-/// SCFAST_PCA_POWER_ITERS (4), SCFAST_PCA_NCOMPS (30).
+/// SCFAST_PCA_POWER_ITERS (4), SCFAST_PCA_OVERSAMPLE (default), SCFAST_PCA_NCOMPS (30).
 #[test]
 #[ignore]
 fn bench_from_env() {
@@ -528,6 +528,7 @@ fn bench_from_env() {
     let threads: Vec<usize> = env("SCFAST_PCA_THREADS", "1,2").split(',').map(|t| t.trim().parse().unwrap()).collect();
     let power_iters: usize = env("SCFAST_PCA_POWER_ITERS", "4").parse().unwrap();
     let k: usize = env("SCFAST_PCA_NCOMPS", "30").parse().unwrap();
+    let oversample: usize = env("SCFAST_PCA_OVERSAMPLE", &PcaParams::default().oversample.to_string()).parse().unwrap();
     let dir = std::path::PathBuf::from(dir);
     let dims: Vec<usize> =
         std::fs::read_to_string(dir.join("dims.txt")).unwrap().split_whitespace().map(|v| v.parse().unwrap()).collect();
@@ -538,7 +539,7 @@ fn bench_from_env() {
     let indices = read_bin(&dir.join("X_indices.i32"), i32le, 4);
     let data = read_bin(&dir.join("X_data.f64"), f64le, 8);
     let view = CsrView::new(n, p, &indptr, &indices, &data).unwrap();
-    let pr = PcaParams { n_comps: k, power_iters, ..PcaParams::default() };
+    let pr = PcaParams { n_comps: k, power_iters, oversample, ..PcaParams::default() };
     println!("input: {n} cells x {p} genes, nnz {} ({:.1} MB as i32 + f64)", data.len(), (data.len() * 12) as f64 / 1e6);
     let mut rows = vec!["threads\trep\twall_s\trss_before_mb\tpeak_mb".to_string()];
     let mut last = None;
@@ -557,7 +558,7 @@ fn bench_from_env() {
         }
     }
     let r = last.unwrap();
-    let tag = format!("scfast_q{power_iters}");
+    let tag = format!("scfast_q{power_iters}_os{oversample}");
     write_f32(&dir.join(format!("{tag}_emb.f32")), &r.embeddings.data);
     write_f32(&dir.join(format!("{tag}_load.f32")), &r.loadings.data);
     write_f32(&dir.join(format!("{tag}_stdev.f32")), &r.stdev);

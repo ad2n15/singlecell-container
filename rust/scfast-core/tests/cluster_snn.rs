@@ -401,7 +401,7 @@ fn leiden_recovers_planted_partition_graph() {
     // weighted stochastic block model, given directly as a symmetric graph with a unit diagonal
     let sizes = [120usize, 90, 60, 40, 25];
     let n: usize = sizes.iter().sum();
-    let truth: Vec<usize> = sizes.iter().enumerate().flat_map(|(c, &s)| std::iter::repeat(c).take(s)).collect();
+    let truth: Vec<usize> = sizes.iter().enumerate().flat_map(|(c, &s)| std::iter::repeat_n(c, s)).collect();
     let mut rng = Rng(7);
     let mut rows: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n];
     for i in 0..n {
@@ -479,17 +479,13 @@ fn leiden_edge_cases() {
     let diag = snn_from_knn(&knn, &SnnParams::default()).unwrap();
     assert_eq!(leiden(&diag, &p).unwrap(), vec![0, 1, 2]);
     // two disconnected cliques, the larger listed second: never merged, larger gets label 0
-    let mut rows: Vec<Vec<u32>> = vec![Vec::new(); 9];
-    for (lo, hi) in [(0usize, 4usize), (4, 9)] {
-        for i in lo..hi {
-            rows[i] = (lo as u32..hi as u32).collect();
-        }
-    }
     let mut g = SparseGraph { n: 9, indptr: vec![0], indices: vec![], weights: vec![] };
-    for r in rows {
-        g.weights.extend(std::iter::repeat(1.0).take(r.len()));
-        g.indices.extend(r);
-        g.indptr.push(g.indices.len());
+    for (lo, hi) in [(0u32, 4u32), (4, 9)] {
+        for _ in lo..hi {
+            g.indices.extend(lo..hi);
+            g.weights.extend(std::iter::repeat_n(1.0, (hi - lo) as usize));
+            g.indptr.push(g.indices.len());
+        }
     }
     assert_eq!(leiden(&g, &p).unwrap(), vec![1, 1, 1, 1, 0, 0, 0, 0, 0]);
 }
