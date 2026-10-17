@@ -4,7 +4,7 @@ Engines:
   scanpy      Scanpy on CPU
   rapids      rapids-singlecell on GPU (CuPy / RAPIDS)
   scfast-cpu  scfast Rust engine, CPU backend   (records 'unavailable' until built)
-  scfast-gpu  scfast Rust engine, CUDA backend  (records 'unavailable' until built)
+  scfast-gpu  scfast Rust engine, CUDA backend  (needs a wheel built with --features cuda,cugraph)
 
 Steps (same names and parameters as bench/run_seurat.R): read, normalize, hvg,
 scale, pca, neighbors, cluster, umap; GPU engines add to_gpu / to_cpu transfers.
@@ -162,9 +162,7 @@ def make_engine(name: str):
         import scfast  # noqa: F401
     except ImportError as e:
         raise Unavailable(f"scfast is not built ({e}); see rust/scfast-py") from e
-    if name == "scfast-gpu":
-        raise Unavailable("scfast CUDA backend is not implemented yet (Phase 6)")
-    return ScfastEngine()
+    return ScfastGpuEngine() if name == "scfast-gpu" else ScfastEngine()
 
 
 class ScfastEngine(ScanpyEngine):
@@ -176,6 +174,8 @@ class ScfastEngine(ScanpyEngine):
     """
 
     device = "cpu"
+    scfast_device = "cpu"
+    leiden_device = "cpu"
 
     def startup(self):
         versions = super().startup()
@@ -193,7 +193,9 @@ class ScfastEngine(ScanpyEngine):
     def pca(self, a, cfg):
         import scipy.sparse as sp
 
-        emb, load, sdev = self.scfast.pca(sp.csr_matrix(a.X), n_comps=cfg.n_pcs, seed=cfg.seed)
+        x = a.X.get() if hasattr(a.X, "get") else a.X
+        emb, load, sdev = self.scfast.pca(sp.csr_matrix(x), n_comps=cfg.n_pcs, seed=cfg.seed,
+                                          device=self.scfast_device)
         a.obsm["X_pca"] = emb
         a.varm["PCs"] = load
         a.uns["pca"] = {"variance": (sdev.astype("float64") ** 2)}
@@ -202,7 +204,8 @@ class ScfastEngine(ScanpyEngine):
         import numpy as np
         import scipy.sparse as sp
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact")
+        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
+                                    device=self.scfast_device)
         n = idx.shape[0]
         rows = np.repeat(np.arange(n), cfg.k - 1)
         a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
@@ -213,11 +216,56 @@ class ScfastEngine(ScanpyEngine):
         import pandas as pd
 
         labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
-                                    n_iterations=2)
+                                    n_iterations=2, device=self.leiden_device)
         a.obs["cluster"] = pd.Categorical(labels.astype(str))
 
     def umap(self, a, cfg):
         a.obsm["X_umap"] = self.scfast.umap(*self.knn, a.obsm["X_pca"][:, :2], seed=cfg.seed)
+
+
+class ScfastGpuEngine(ScfastEngine, RapidsEngine):
+    """ScfastEngine with its steps on the device.
+
+    rapids-singlecell normalises, selects HVGs and runs UMAP on the GPU; scfast's CUDA
+    backend does PCA and kNN, and Leiden runs on cuGraph when scfast can load it (the backend
+    used is recorded as `leiden_device` in the environment file). The UMAP fuzzy simplicial
+    set comes from cuML, from the same kNN that Leiden's SNN graph uses.
+    """
+
+    device = "gpu"
+    scfast_device = "cuda"
+    umap = RapidsEngine.umap
+
+    def startup(self):
+        versions = super().startup()
+        info = self.scfast.device_info()
+        if not info["cuda_available"]:
+            raise RuntimeError(f"scfast CUDA backend unavailable: {info['cuda_error']}")
+        self.leiden_device = self.scfast.leiden_device("auto")
+        versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
+        return versions
+
+    def gpu_mem(self):
+        free, total = self.cp.cuda.runtime.memGetInfo()
+        return int(total - free)  # scfast allocates outside CuPy's pool
+
+    def neighbors(self, a, cfg):
+        import numpy as np
+        import scipy.sparse as sp
+        from cuml.manifold.umap import fuzzy_simplicial_set
+
+        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
+                                    device=self.scfast_device)
+        n = idx.shape[0]
+        rows = np.repeat(np.arange(n), cfg.k - 1)
+        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
+        a.obsp["snn"] = self.scfast.snn(idx)
+        conn = fuzzy_simplicial_set(self.cp.zeros((n, 1), dtype=np.float32), cfg.k, cfg.seed,
+                                    knn_indices=self.cp.asarray(idx), knn_dists=self.cp.asarray(dist),
+                                    set_op_mix_ratio=1.0, local_connectivity=1.0)
+        a.obsp["connectivities"] = conn.tocsr()
+        a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
+                              "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
 
 
 # ---------------------------------------------------------------- main
