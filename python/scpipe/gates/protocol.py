@@ -312,6 +312,7 @@ def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResu
         proposal = _fallback_proposal(gate_id, g.worker_role, base, why)
         review = _rules_review("approve" if not llm else "escalate", f"rules baseline used: {why}")
         decided_by = "rules"
+        fallback = True
         wait = mode != "auto"
         notes.append("LLM agents disabled (no llm section): rules-only decision" if not llm else why)
         if llm:
