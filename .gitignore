@@ -28,3 +28,4 @@ tests/benchmark/results/
 bench/results/
 rust/target/
 .venv-bench/
+*.egg-info/
