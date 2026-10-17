@@ -12,9 +12,16 @@ Which engine runs the CPU steps is set by `engine:` in `config.yaml`
 | `scfast` | Rust `scfast`, error if not installed or if `device: gpu` | none |
 | `seurat` | Seurat (CPU) or rapids-singlecell via exchange (GPU) | only on the GPU path |
 
-The Rust engine is CPU-only today. On a GPU plan the pipeline keeps rapids-singlecell and the
-exchange format, as before. Rust is needed only to build `scfast`; without it `engine: auto` falls
-back to Seurat.
+On a GPU plan `engine_gpu: auto | scfast | rapids` picks between the Rust CUDA backend
+(`gpu_scfast`, no exchange) and rapids-singlecell via the exchange; `auto` uses the Rust backend
+only when `scfastR` was built with `--features cuda` and a device is visible. Rust is needed only
+to build `scfast`; without it `engine: auto` falls back to Seurat.
+
+**The CUDA and cuGraph code has never run on a GPU.** It was written and compiled in a workspace
+without one; the kernels were checked by CPU emulation and the cuGraph C-API bindings are
+hand-written against the 24.x headers. Section 1b lists the acceptance tests to run on the L4
+first. Until they pass, leave `engine_gpu: auto` (which stays on rapids until `scfastR` reports a
+CUDA build) or set `engine_gpu: rapids`.
 
 ## 1. Iridis X, L4 login node
 
@@ -78,6 +85,33 @@ scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
 Results: `S5/report.html` and `S5/explorer.html` in the run directory. Copy them to your laptop with
 `scp`. Be considerate on the shared node: keep `resources.threads` at 8 or fewer, `nice: 10`, and
 `gpu_mem_cap_gb: 20` as in the site file.
+
+### 1b. Enabling the Rust GPU backend on the L4 (acceptance tests first)
+
+```bash
+# needs the CUDA 12 toolkit (nvrtc, cublas) and, for GPU Leiden, a RAPIDS env with libcugraph_c
+module load cuda/12.4                                   # confirm the name; or activate the RAPIDS conda env
+cd /scratch/$USER/singlecell/rust
+
+# 1. Rust parity tests on the device (PCA subspace > 0.99, kNN overlap >= 90%, Leiden ARI >= 0.9)
+cargo test -p scfast-core --release --features cuda --test cuda -- --ignored --nocapture
+export SCFAST_CUGRAPH_LIB=$CONDA_PREFIX/lib/libcugraph_c.so   # if not on the loader path
+export SCFAST_CUGRAPH_API=legacy                              # or 24.08 / 24.10 to match `conda list cugraph`
+SCFAST_CUGRAPH_TEST=1 cargo test --features cugraph -- --ignored cugraph --nocapture
+
+# 2. Rebuild the R package and the wheel with the features on
+SCFASTR_CARGO_FEATURES=cuda,cugraph R CMD INSTALL rust/scfast-r
+Rscript -e 'str(scfastR::scfast_info())'               # cuda_built TRUE, cuda_available TRUE, device_name "NVIDIA L4"
+cd rust/scfast-py && maturin build --release --features cuda,cugraph && pip install target/wheels/scfast-*.whl
+
+# 3. Pipeline-level check, then the scale runs (bench/hpc/README.md)
+scpipe doctor --config config.yaml                       # "scfastR cuda built: ok", "CUDA device visible: ok"
+sbatch --export=ALL,SIZES=50000,ENGINES=seurat-cpu,scfast-cpu,scfast-cuda,rapids bench/hpc/slurm_scale.sh
+```
+
+If a parity test fails, report the numbers; `engine_gpu: rapids` keeps the pipeline on the proven
+path meanwhile. The most likely failure is the cuGraph graph-constructor layout: try the other
+`SCFAST_CUGRAPH_API` values before anything else.
 
 ## 2. Linux (workstation, server, cloud VM)
 

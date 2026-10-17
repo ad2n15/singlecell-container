@@ -118,14 +118,23 @@ report:
 
 | `engine` | What runs | Exchange `.h5ad` files |
 |---|---|---|
-| `auto` (default) | Rust `scfast` when `scfastR` is installed and the device plan is CPU; otherwise Seurat | none on the Rust path |
-| `scfast` | Rust only. Errors if `scfastR` is missing, or with `device: gpu` (no GPU backend yet) | none |
+| `auto` (default) | Rust `scfast` when `scfastR` is installed and the plan is CPU; on a GPU plan, `engine_gpu` decides | none on the Rust paths |
+| `scfast` | Rust only. Errors if `scfastR` is missing, or with `device: gpu` unless `engine_gpu: scfast` | none |
 | `seurat` | Seurat on CPU; rapids-singlecell through the exchange when the plan is GPU | GPU path only |
 
+On a **GPU plan** a second key, `engine_gpu: auto | scfast | rapids` (default `auto`), chooses
+between the Rust CUDA backend (`gpu_scfast`: PCA, kNN and Leiden on the GPU in process, UMAP on
+the CPU, no exchange files) and rapids-singlecell through the exchange (`gpu_exchange`). `auto`
+takes the Rust backend only when `scfastR` was built with the `cuda` feature **and** a device is
+visible (`scpipe doctor` prints both), otherwise rapids. The CUDA backend has not yet been run
+on real hardware — see [`INSTALL.md`](INSTALL.md) for the acceptance tests to run on the L4
+before trusting `gpu_scfast` on a real dataset.
+
 On the Rust path S1a scores doublets itself (a Scrublet-style detector) and S2 runs entirely in R,
-so Python and Scanpy are not involved and nothing is written for the exchange. `S2/summary.json`
-records `path` (`cpu_scfast`, `cpu_seurat`, `gpu_exchange`, `exchange_cpu`), `engine` and
-`scfast_version`. Doublet calls differ slightly from Scrublet's (the detector is a reimplementation),
+so Python and Scanpy are not involved and nothing is written for the exchange. Normalisation, HVG
+selection and the scaling statistics are one fused pass (`PreprocessFast`; HVGs agree with Seurat's
+vst at ≥ 99.8%). `S2/summary.json` records `path` (`cpu_scfast`, `gpu_scfast`, `cpu_seurat`,
+`gpu_exchange`, `exchange_cpu`), `engine`, `scfast_version`, `scfast_device` and `preprocessing`. Doublet calls differ slightly from Scrublet's (the detector is a reimplementation),
 and Harmony without the R `harmony` package falls back to the exchange route. `scpipe doctor` prints
 the engine `auto` would choose. Install steps, including Rust, are in [`INSTALL.md`](INSTALL.md).
 

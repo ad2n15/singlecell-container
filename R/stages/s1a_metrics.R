@@ -114,8 +114,10 @@ run_s1a <- function(cfg, repo) {
 
   res <- scp_timed("compute metrics", s1a_compute_metrics(obj, policy))$value
   for (w in res$warnings) scp_warn_log(w)
-  engine <- scp_resolve_engine(cfg, .s1a_plan_device(cfg, repo, ncol(obj), nrow(obj)))
-  scp_log("S1a: engine ", engine, " (config engine: ", cfg$engine %||% "auto", ")")
+  plan_dev <- .s1a_plan_device(cfg, repo, ncol(obj), nrow(obj))
+  engine <- scp_resolve_engine(cfg, plan_dev)
+  scfast_dev <- if (identical(engine, "scfast") && identical(plan_dev, "gpu")) "cuda" else "cpu"
+  scp_log("S1a: engine ", engine, " (config engine: ", cfg$engine %||% "auto", "; scfast device ", scfast_dev, ")")
   h5 <- file.path(out_dir, "metrics_counts.h5ad")
 
   if (identical(engine, "scfast")) {
@@ -124,7 +126,7 @@ run_s1a <- function(cfg, repo) {
       scp_stop("doublets.method scdblfinder is not implemented for engine scfast; use scrublet or none")
     unlink(h5)  # no exchange file on this path; drop a stale one from an earlier engine
     dbl <- scp_timed("scfast doublets + pre-clustering",
-                     scp_doublets_scfast(scp_counts(obj), res$metrics$sample_id, cfg$seed))$value
+                     scp_doublets_scfast(scp_counts(obj), res$metrics$sample_id, cfg$seed, device = scfast_dev))$value
     for (w in dbl$notes) scp_log(w)
     tab <- scp_dbl_format(dbl$table)
     if (identical(method, "none")) {
