@@ -27,6 +27,10 @@ Constraints from the user (2026-10-17):
   4. scfast loess used surface="direct"; Seurat uses "interpolate" (2/2000 HVGs differed). Ported by loess agent, merged: HVGs 2000/2000 = Seurat, fit within 6e-12 of R.
   Final PBMC 3k vs Seurat: PC sim 0.99995, kNN 0.976, ARI 0.936 (scanpy: 0.9997 / 0.968 / 0.818).
 
+- CPU front end merged (agent): parallel Rust h5 read (libdeflate), X_hvg in Rust, engine without scanpy/AnnData. 100k: read+normalize+hvg+scale 5.45 -> 0.39 s; process ready 0.05 s (was 1.75 s).
+- Current scfast-cpu at 100k synthetic, Mac 12 threads under load avg ~20 (s): read 0.15, normalize 0.19, pca 1.13, neighbors 0.68, cluster 0.87, umap 1.28 -> ~4.3 s incl. read (Seurat 93 s, Scanpy 54 s incl. read, both measured on a quieter machine).
+- PCA experiments rejected: Krylov 10/4 (PBMC kNN 0.87, fails); f32 product kernels (~10% single-thread, loses f64 determinism).
+
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - GPU path on Modal (Sonnet 5.5): bench/modal_app.py, CUDA tests on L4, scfast-gpu engine.
