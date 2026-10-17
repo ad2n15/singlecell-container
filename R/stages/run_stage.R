@@ -17,12 +17,12 @@
 
 scp_source_stages <- function(repo) {
   source(file.path(repo, "R", "exchange", "exchange.R"))
-  for (f in c("common.R", "s0_ingest.R", "s1a_metrics.R", "s2_core.R"))
+  for (f in c("common.R", "s0_ingest.R", "s1a_metrics.R", "s2_core.R", "s3_evidence.R", "s4_dge.R"))
     source(file.path(repo, "R", "stages", f))
   invisible(repo)
 }
 
-.SCP_STAGES <- c("S0", "S1a", "S2")
+.SCP_STAGES <- c("S0", "S1a", "S2", "S3", "S4")
 
 scp_run_stage <- function(stage, run_dir, repo) {
   if (!(stage %in% .SCP_STAGES)) scp_stop("unknown stage '", stage, "' (R stages: ", paste(.SCP_STAGES, collapse = ", "), ")")
@@ -39,7 +39,9 @@ scp_run_stage <- function(stage, run_dir, repo) {
   switch(stage,
          S0 = run_s0(cfg, repo),
          S1a = run_s1a(cfg, repo),
-         S2 = run_s2(cfg, repo))
+         S2 = run_s2(cfg, repo),
+         S3 = run_s3(cfg, repo),
+         S4 = run_s4(cfg, repo))
   scp_log(sprintf("stage %s finished; peak memory %s GB", stage, format(scp_peak_mem_gb())))
   invisible(TRUE)
 }

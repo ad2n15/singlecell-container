@@ -131,10 +131,21 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
         "qc.review_action",
         "resources.gpu_mem_cap_gb",
     ),
+    "S4": ("object_format", "seed", "dge", "opentargets.enabled", "opentargets.max_genes_per_direction",
+           "opentargets.offline"),
+    "S5": ("project", "seed", "report"),
 }
 
 OBJ = "S0/object.rds|S0/object.qs2"
 OBJ2 = "S2/object.rds|S2/object.qs2"
+# Written by G3 / S3 when those stages exist; S4 uses them when present (optional inputs).
+S4_OPTIONAL = ("gates/G3/decision.json", "S3/annotation.tsv")
+# S5 (report + explorer) reads whatever earlier stages produced; only the S2 object is required.
+S5_OPTIONAL = ("S0/ingest_report.json", "S1/qc_summary.json", "S1/qc_metrics.tsv.gz", "S2/summary.json",
+               "S3/cluster_summary.json", "S3/markers.tsv.gz", "S3/annotation.tsv", "S3/annotation_consensus.tsv",
+               "S4/dge_summary.json", "S4/opentargets_summary.json",
+               "gates/G1/decision.json", "gates/G2/decision.json", "gates/G3/decision.json", "gates/G4/decision.json",
+               "llm/ledger.json")
 
 
 @dataclass
@@ -145,7 +156,8 @@ class Stage:
     and ``outputs`` are paths relative to the run directory; ``a|b`` means
     either file satisfies it. ``external_inputs(cfg)`` returns absolute paths
     hashed live (e.g. the sample files). ``transient`` outputs may be deleted
-    by later stages and are not required for skipping.
+    by later stages and are not required for skipping. ``optional_inputs``
+    are fingerprinted when present (``"absent"`` otherwise), never required.
     """
 
     id: str
@@ -156,6 +168,7 @@ class Stage:
     outputs: tuple[str, ...] = ()
     transient: tuple[str, ...] = ()
     external_inputs: Callable[[Mapping[str, Any]], list[str]] | None = None
+    optional_inputs: tuple[str, ...] = ()
 
 
 @dataclass
@@ -203,6 +216,14 @@ def default_stages() -> list[Stage]:
               outputs=("S1/qc_decisions.tsv.gz", "S1/qc_summary.json")),
         Stage("S2", "R", _r_stage("S2"), STAGE_CONFIG_KEYS["S2"],
               inputs=(OBJ, "S1/qc_decisions.tsv.gz"), outputs=(OBJ2, "S2/summary.json")),
+        # S4 = the R pseudobulk DGE step, then the Open Targets Python step (one stage, one log).
+        Stage("S4", "python", _py_stage("scpipe.stages.s4"), STAGE_CONFIG_KEYS["S4"],
+              inputs=(OBJ2,), outputs=("S4/dge_summary.json", "S4/opentargets_summary.json"),
+              optional_inputs=S4_OPTIONAL),
+        # S5 must stay last: the R export (S5/umap.tsv.gz, S5/expr_subset.tsv.gz) then report.html/explorer.html.
+        Stage("S5", "python", _py_stage("scpipe.stages.s5_report"), STAGE_CONFIG_KEYS["S5"],
+              inputs=(OBJ2,), outputs=("S5/report.html", "S5/explorer.html", "S5/umap.tsv.gz"),
+              optional_inputs=S5_OPTIONAL),
     ]
 
 
@@ -305,6 +326,9 @@ def _fingerprint(stages: Sequence[Stage], idx: int, ctx: RunContext, state: dict
     if st.external_inputs is not None:
         for p in st.external_inputs(ctx.cfg):
             parts["inputs"][p] = file_checksum(p) if Path(p).exists() else "missing"
+    for spec in st.optional_inputs:
+        p = _existing(ctx.run_dir, spec)
+        parts["inputs"][spec] = file_checksum(p) if p is not None else "absent"
     fp = hashlib.sha256(canonical_json(parts).encode()).hexdigest()
     return fp, parts
 

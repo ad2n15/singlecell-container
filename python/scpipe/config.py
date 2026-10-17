@@ -88,16 +88,55 @@ DEFAULTS: dict[str, Any] = {
     "pcs": "auto",
     "n_neighbors": 20,
     "clustering": {"resolution": 0.5},
+    # S4 pseudobulk DGE and Open Targets (docs/agents-spec.md section 6)
+    "dge": {
+        "sample_col": "sample_id",
+        "condition_col": "condition",
+        "group_by": "cell_type_broad",
+        "contrasts": [],
+        "min_cells_per_sample": 20,
+        "min_replicates": 2,
+        "method": "deseq2",
+        "padj": 0.05,
+        "lfc": 0.5,
+    },
+    "opentargets": {
+        "enabled": True,
+        "max_genes_per_direction": 50,
+        "cache_dir": "refs/opentargets",
+        "offline": False,
+        "timeout_s": 30,
+        "retries": 3,
+    },
+    # Portability (docs/agents-spec.md section 8, DESIGN 7.1-7.2). `site:` names
+    # a site file (conf/sites/<name>.yaml or a path) whose execution, resources,
+    # container and scheduler sections are defaults; config.yaml overrides them.
+    # S5 report and explorer (docs/agents-spec.md section 7)
+    "report": {"explorer_max_cells": 100000, "expr_genes": 200, "expr_max_cells": 20000, "top_markers": 10},
+    "site": None,
+    "scratch": None,
+    "execution": "direct",
+    "container": {"runtime": "none", "image": None, "options": []},
+    "scheduler": {"partition": None, "account": None, "queue": None, "time": "24:00:00", "cpus": None,
+                  "mem_gb": None, "gpus": 0, "extra": []},
 }
 
+EXECUTION_MODES = ("direct", "slurm", "pbs", "lsf", "sge", "split")
+SITE_SECTIONS = ("execution", "resources", "container", "scheduler", "scratch")
+
 ALLOWED = {
+    "execution": EXECUTION_MODES,
+    "container.runtime": ("none", "apptainer", "singularity", "docker"),
     "object_format": ("rds", "qs2"),
     "doublets.method": ("scrublet", "scdblfinder", "none"),
     "qc.review_action": ("keep", "exclude"),
     "normalization": ("lognorm", "sct"),
     "device": ("auto", "cpu", "gpu"),
     "integration.method": ("none", "harmony"),
+    "dge.method": ("deseq2", "limma_voom"),
 }
+
+_CONTRAST_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 SAMPLE_FORMATS = ("10x_h5", "10x_mtx", "h5ad", "seurat", "loom", "table")
 
@@ -114,9 +153,12 @@ _DERIVED_KEYS = (
     "sample_columns",
     "policy_hash",
     "scpipe_version",
+    "site_source",
 )
 _HASH_EXCLUDE = ("run_id", "config_hash", "run_dir", "repo_root", "config_file", "config_dir", "samples_source",
-                 "qc_policy_source", "samples", "qc_policy", "scpipe_version")
+                 "qc_policy_source", "samples", "qc_policy", "scpipe_version",
+                 # where/how the run executes does not change its results
+                 "site", "site_source", "execution", "container", "scheduler", "scratch")
 
 
 class ConfigError(ValueError):
@@ -281,6 +323,181 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
     need(isinstance(bk, str) and bool(bk.strip()), f"integration.batch_key must be a non-empty string, got {bk!r}")
     if cfg["normalization"] == "sct" and cfg["device"] == "gpu":
         problems.append("normalization: sct runs on CPU only; use device: cpu or auto with sct")
+    _check_dge(cfg, problems)
+    _check_opentargets(cfg, problems)
+
+
+def _check_dge(cfg: dict[str, Any], problems: list[str]) -> None:
+    """Types and ranges of the ``dge`` section (sample-sheet checks are in :func:`_check_contrasts`)."""
+    d = cfg["dge"]
+
+    def need(cond: bool, msg: str) -> None:
+        if not cond:
+            problems.append(msg)
+
+    for k in ("sample_col", "condition_col", "group_by"):
+        need(isinstance(d[k], str) and bool(d[k].strip()), f"dge.{k} must be a non-empty string, got {d[k]!r}")
+    for k in ("min_cells_per_sample", "min_replicates"):
+        need(_is_int(d[k]) and d[k] >= 1, f"dge.{k} must be an integer >= 1, got {d[k]!r}")
+    need(_is_num(d["padj"]) and 0 < d["padj"] <= 1, f"dge.padj must be a number in (0, 1], got {d['padj']!r}")
+    need(_is_num(d["lfc"]) and d["lfc"] >= 0, f"dge.lfc must be a number >= 0, got {d['lfc']!r}")
+    if d["contrasts"] is None:
+        d["contrasts"] = []
+    if not isinstance(d["contrasts"], list):
+        problems.append(f"dge.contrasts must be a list of mappings, got {type(d['contrasts']).__name__}")
+        return
+    names: dict[str, int] = {}
+    for i, c in enumerate(d["contrasts"]):
+        where = f"dge.contrasts[{i}]"
+        if not isinstance(c, Mapping):
+            problems.append(f"{where} must be a mapping with name, numerator and denominator")
+            continue
+        for k in ("name", "numerator", "denominator"):
+            v = c.get(k)
+            need(isinstance(v, str) and bool(v.strip()), f"{where}.{k} must be a non-empty string, got {v!r}")
+        name = c.get("name")
+        if isinstance(name, str) and name.strip():
+            need(_CONTRAST_NAME_RE.fullmatch(name) is not None,
+                 f"{where}.name {name!r} may only contain letters, digits, '.', '_' and '-' (it names output files)")
+            if name in names:
+                problems.append(f"dge.contrasts: name {name!r} is used twice (entries {names[name]} and {i})")
+            names.setdefault(name, i)
+        if isinstance(c.get("numerator"), str) and c.get("numerator") == c.get("denominator"):
+            problems.append(f"{where}: numerator and denominator are both {c['numerator']!r}")
+        cov = c.get("covariates")
+        if cov is None:
+            c["covariates"] = []
+        elif not (isinstance(cov, list) and all(isinstance(x, str) and x.strip() for x in cov)):
+            problems.append(f"{where}.covariates must be a list of column names, got {cov!r}")
+        unknown = sorted(set(c) - {"name", "numerator", "denominator", "covariates"})
+        if unknown:
+            problems.append(f"{where}: unknown key(s) {unknown}")
+
+
+def _check_opentargets(cfg: dict[str, Any], problems: list[str]) -> None:
+    o = cfg["opentargets"]
+
+    def need(cond: bool, msg: str) -> None:
+        if not cond:
+            problems.append(msg)
+
+    for k in ("enabled", "offline"):
+        need(isinstance(o[k], bool), f"opentargets.{k} must be true or false, got {o[k]!r}")
+    need(_is_int(o["max_genes_per_direction"]) and o["max_genes_per_direction"] >= 1,
+         f"opentargets.max_genes_per_direction must be an integer >= 1, got {o['max_genes_per_direction']!r}")
+    need(isinstance(o["cache_dir"], str) and bool(o["cache_dir"].strip()),
+         f"opentargets.cache_dir must be a non-empty path, got {o['cache_dir']!r}")
+    need(_is_num(o["timeout_s"]) and o["timeout_s"] > 0, f"opentargets.timeout_s must be > 0, got {o['timeout_s']!r}")
+    need(_is_int(o["retries"]) and o["retries"] >= 0, f"opentargets.retries must be an integer >= 0, got {o['retries']!r}")
+
+
+def _check_contrasts(cfg: dict[str, Any], header: list[str], records: list[dict[str, str]], problems: list[str]) -> None:
+    """Contrast levels and covariates must exist in the sample sheet (agents-spec section 6, DESIGN 6.1)."""
+    d = cfg["dge"]
+    contrasts = d.get("contrasts") or []
+    if not header or not isinstance(contrasts, list) or not contrasts:
+        return
+    cond = d["condition_col"]
+    if not isinstance(cond, str) or not cond.strip():
+        return
+    if cond not in header:
+        problems.append(f"dge.condition_col {cond!r} is not a samples.csv column (columns: {header})")
+        return
+    levels = sorted({r.get(cond, "") for r in records if r.get(cond, "")})
+    scol = d["sample_col"]
+    if isinstance(scol, str) and scol.strip() and scol != "sample_id" and scol not in header:
+        problems.append(f"dge.sample_col {scol!r} is not a samples.csv column (columns: {header})")
+    for i, c in enumerate(contrasts):
+        if not isinstance(c, Mapping):
+            continue
+        where = f"dge.contrasts[{i}]"
+        for k in ("numerator", "denominator"):
+            v = c.get(k)
+            if isinstance(v, str) and v.strip() and v not in levels:
+                problems.append(f"{where}.{k} {v!r} is not a value of samples.csv column {cond!r} (values: {levels})")
+        for cv in c.get("covariates") or []:
+            if isinstance(cv, str) and cv not in header:
+                problems.append(f"{where}.covariates: {cv!r} is not a samples.csv column (columns: {header})")
+            elif cv == cond:
+                problems.append(f"{where}.covariates: {cv!r} is the condition column itself")
+
+
+def _check_portability(cfg: dict[str, Any], problems: list[str]) -> None:
+    """Types of the ``container`` and ``scheduler`` sections (``execution`` is in ALLOWED)."""
+    def need(cond: bool, msg: str) -> None:
+        if not cond:
+            problems.append(msg)
+
+    c = cfg["container"]
+    need(c.get("image") is None or (isinstance(c["image"], str) and bool(c["image"].strip())),
+         f"container.image must be a path/URI or null, got {c.get('image')!r}")
+    need(isinstance(c.get("options"), list) and all(isinstance(x, str) for x in c["options"]),
+         f"container.options must be a list of strings, got {c.get('options')!r}")
+    s = cfg["scheduler"]
+    for k in ("partition", "account", "queue", "time"):
+        need(s.get(k) is None or isinstance(s[k], str), f"scheduler.{k} must be a string or null, got {s.get(k)!r}")
+    for k in ("cpus", "gpus"):
+        need(s.get(k) is None or (_is_int(s[k]) and s[k] >= 0), f"scheduler.{k} must be an integer >= 0 or null, got {s.get(k)!r}")
+    need(s.get("mem_gb") is None or (_is_num(s["mem_gb"]) and s["mem_gb"] > 0),
+         f"scheduler.mem_gb must be a positive number or null, got {s.get('mem_gb')!r}")
+    need(isinstance(s.get("extra"), list) and all(isinstance(x, str) for x in s["extra"]),
+         f"scheduler.extra must be a list of strings (raw directive lines), got {s.get('extra')!r}")
+    sc = cfg.get("scratch")
+    need(sc is None or (isinstance(sc, str) and bool(sc.strip())), f"scratch must be a path or null, got {sc!r}")
+
+
+def resolve_site_path(value: str, base: Path) -> Path:
+    """``site: iridisx`` -> ``<repo>/conf/sites/iridisx.yaml``; a path is resolved against ``base``."""
+    v = os.path.expanduser(os.path.expandvars(value))
+    if "/" not in v and not v.endswith((".yaml", ".yml")):
+        return REPO_ROOT / "conf" / "sites" / f"{v}.yaml"
+    p = Path(v)
+    if not p.is_absolute():
+        p = base / p
+    return Path(os.path.normpath(p))
+
+
+def apply_site(raw: Mapping[str, Any], base: Path, problems: list[str], warnings: list[str]) -> tuple[dict[str, Any], str | None]:
+    """Merge the site file named by ``raw['site']`` under ``raw`` (config.yaml wins per key).
+
+    Only :data:`SITE_SECTIONS` are taken from the site file; the site file's
+    own ``site`` key (its name) is kept for the record. Returns the merged raw
+    mapping and the site file path (or None).
+    """
+    raw = dict(raw)
+    site = raw.get("site")
+    if site is None:
+        return raw, None
+    if not isinstance(site, str) or not site.strip():
+        problems.append(f"site must be a site name or a path to a site YAML file, got {site!r}")
+        return raw, None
+    path = resolve_site_path(site, base)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except OSError as e:
+        problems.append(f"site: cannot read {path}: {e}")
+        return raw, None
+    except yaml.YAMLError as e:
+        problems.append(f"site: {path} is not valid YAML: {e}")
+        return raw, None
+    if not isinstance(data, Mapping):
+        problems.append(f"site: {path} must hold a mapping")
+        return raw, None
+    for k, v in data.items():
+        if k == "site":
+            continue
+        if k not in SITE_SECTIONS:
+            warnings.append(f"site: key {k!r} in {path.name} is not a site setting (ignored; site files hold {list(SITE_SECTIONS)})")
+            continue
+        if isinstance(v, Mapping):
+            merged = dict(v)
+            user = raw.get(k)
+            if isinstance(user, Mapping):
+                merged.update(user)
+            raw[k] = merged
+        elif k not in raw:
+            raw[k] = v
+    return raw, str(path)
 
 
 def _read_samples(path: Path, problems: list[str], warnings: list[str]) -> tuple[list[str], list[dict[str, str]]]:
@@ -380,8 +597,12 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
     if not isinstance(raw, Mapping):
         raise ConfigError(f"config file {config_path} must hold a mapping, got {type(raw).__name__}")
     base = config_path.parent
+    raw, site_source = apply_site(raw, base, problems, warnings)
     cfg = _merge_defaults(raw, problems, warnings)
+    if site_source:
+        cfg["site_source"] = site_source
     _check_values(cfg, problems)
+    _check_portability(cfg, problems)
 
     # run_dir
     if run_dir is not None:
@@ -414,6 +635,12 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
         )
     if cfg["integration"]["method"] == "harmony" and resolved_samples and len(resolved_samples) < 2:
         warnings.append("integration.method is harmony but there is only one sample")
+    if samples_path is not None:
+        _check_contrasts(cfg, header, records, problems)
+    # Open Targets cache: shared across runs, so it lives outside the run dir (relative to config.yaml).
+    oc = cfg["opentargets"].get("cache_dir")
+    if isinstance(oc, str) and oc.strip():
+        cfg["opentargets"]["cache_dir"] = str(_resolve_path(oc, base, problems, "opentargets.cache_dir"))
 
     # qc_policy
     policy_path = None
