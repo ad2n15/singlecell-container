@@ -220,7 +220,9 @@ def default_stages() -> list[Stage]:
               inputs=(OBJ,), outputs=("S1/metrics_counts.h5ad", "S1/qc_metrics.tsv.gz"),
               transient=("S1/metrics_counts.h5ad",)),
         Stage("S1b", "python", _py_stage("scpipe.stages.s1b_doublets"), STAGE_CONFIG_KEYS["S1b"],
-              inputs=("S1/metrics_counts.h5ad", "S1/qc_metrics.tsv.gz"), outputs=("S1/qc_metrics.tsv.gz",)),
+              inputs=("S1/qc_metrics.tsv.gz",), outputs=("S1/qc_metrics.tsv.gz",)),
+        # metrics_counts.h5ad (S1a, transient, absent on the scfast path) is deliberately not an input here:
+        # S1b depends on S1a through qc_metrics.tsv.gz, and S1c deletes the h5ad, which would change S1b's fingerprint.
         Stage("S1c", "python", _py_stage("scpipe.stages.s1c_qc"), STAGE_CONFIG_KEYS["S1c"],
               inputs=("S1/qc_metrics.tsv.gz", "config/qc_policy.yaml"),
               outputs=("S1/qc_decisions.tsv.gz", "S1/qc_summary.json")),
@@ -768,7 +770,7 @@ def run_pipeline(
                         return 130
                 rec.update(ended_utc=_utc(), wall_s=round(wall, 3), peak_rss_bytes=peak, exit_code=code)
                 if code == 0:
-                    absent = [s for s in st.outputs if _existing(run_dir, s) is None]
+                    absent = [s for s in st.outputs if s not in st.transient and _existing(run_dir, s) is None]
                     if absent:
                         code = rec["exit_code"] = 1
                         with open(log_path, "a") as fh:

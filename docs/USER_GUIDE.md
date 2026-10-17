@@ -62,6 +62,7 @@ Start from [`config/examples/`](../config/examples). Settings are validated befo
 runs and every problem is reported at once. The sections added by build steps 3–7:
 
 ```yaml
+engine: auto                     # auto | scfast | seurat   (section 5b): which engine runs the CPU steps
 site: iridisx                    # a name in conf/sites/<name>.yaml, or a path; supplies defaults for
                                  # execution, resources, container, scheduler, scratch (config.yaml wins per key)
 execution: direct                # direct | slurm | pbs | lsf | sge | split   (section 5)
@@ -109,6 +110,23 @@ report:
   expr_max_cells: 20000          # cells with expression values in the explorer
   top_markers: 10                # markers per cluster shown in report.html
 ```
+
+### Engine: Rust, Seurat or GPU
+
+`engine` picks the code that does doublets, pre-clustering, PCA, neighbours and Leiden:
+
+| `engine` | What runs | Exchange `.h5ad` files |
+|---|---|---|
+| `auto` (default) | Rust `scfast` when `scfastR` is installed and the device plan is CPU; otherwise Seurat | none on the Rust path |
+| `scfast` | Rust only. Errors if `scfastR` is missing, or with `device: gpu` (no GPU backend yet) | none |
+| `seurat` | Seurat on CPU; rapids-singlecell through the exchange when the plan is GPU | GPU path only |
+
+On the Rust path S1a scores doublets itself (a Scrublet-style detector) and S2 runs entirely in R,
+so Python and Scanpy are not involved and nothing is written for the exchange. `S2/summary.json`
+records `path` (`cpu_scfast`, `cpu_seurat`, `gpu_exchange`, `exchange_cpu`), `engine` and
+`scfast_version`. Doublet calls differ slightly from Scrublet's (the detector is a reimplementation),
+and Harmony without the R `harmony` package falls back to the exchange route. `scpipe doctor` prints
+the engine `auto` would choose. Install steps, including Rust, are in [`INSTALL.md`](INSTALL.md).
 
 ## 3. The run directory
 
