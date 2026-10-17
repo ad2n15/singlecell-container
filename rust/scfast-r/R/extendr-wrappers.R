@@ -87,3 +87,8 @@ rs_preprocess_csc <- function(p, i, x, n_genes, n_cells, n_hvg, scale_factor, sp
 #' For the parity tests of the loess used by rs_preprocess_csc.
 #' @keywords internal
 rs_loess_direct <- function(x, y, span) .Call(wrap__rs_loess_direct, x, y, span)
+
+#' UMAP layout from an n x k kNN graph: 1-based indices and distances (self first), an
+#' n x 2 starting layout and the curve parameters `a`, `b`. Returns the n x 2 embedding.
+#' @keywords internal
+rs_umap <- function(idx, dist, init, n, k, a, b, n_epochs, negative_sample_rate, learning_rate, seed) .Call(wrap__rs_umap, idx, dist, init, n, k, a, b, n_epochs, negative_sample_rate, learning_rate, seed)

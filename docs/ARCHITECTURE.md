@@ -92,7 +92,7 @@ package `scfastR` (extendr) and the Python module `scfast` (PyO3). The CUDA and 
 compiled and unit-tested without hardware; their parity tests are `#[ignore]` and run on the L4.
 
 On the Rust path S1a computes doublet scores and pre-clusters in R (`R/stages/doublets_scfast.R`),
-S2 runs `RunPCAFast`, `FindNeighborsFast`, `FindClustersFast` and `uwot` UMAP in process, and
+S2 runs `RunPCAFast`, `FindNeighborsFast`, `FindClustersFast` and `RunUMAPFast` in process, and
 Python `gpu_core --engine rust` offers the same kernels for the exchange route. The exchange below
 is used only when the GPU does the work.
 
