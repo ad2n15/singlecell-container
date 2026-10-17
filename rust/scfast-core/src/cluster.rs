@@ -4,9 +4,34 @@
 //! (`RBConfigurationVertexPartition`) and Scanpy optimise (docs/RUST_ENGINE.md section 4).
 //! GPU (Phase 7): cuGraph Leiden behind the same `Clusterer` trait.
 //!
-//! STATUS: stub. Signature and contract are fixed; the body is implemented separately.
+//! # Self-loops (the SNN diagonal)
+//!
+//! Seurat's `RNA_snn` keeps a diagonal of 1s, and how a self-loop enters the RB null model
+//! depends on how the graph is handed to leidenalg:
+//!
+//! - Seurat (5.0.x via the `leiden` R package, and 5.1+ via `leidenbase`) converts the SNN
+//!   matrix with `Graph.Weighted_Adjacency` / `graph_from_adjacency_matrix`, whose default
+//!   mode is **directed**: every off-diagonal weight w becomes two arcs and every diagonal 1
+//!   becomes **one** loop arc. leidenalg's directed RB is
+//!   `sum_c [w_c - g * K_c^out * K_c^in / m]`, so each loop adds 1 to a node's strength and
+//!   1 to m.
+//! - single-clustering is undirected with the igraph convention: a loop of weight w adds 2w
+//!   to the node's strength and w to the total weight.
+//!
+//! Passing the diagonal at **half weight** makes the two objectives identical: with an
+//! undirected loop of 0.5 the strength gains 1 and 4m = 2 * (2M + n), so
+//! `Q_undirected = Q_directed / 2` up to a constant, for every partition. Keeping the
+//! diagonal at full weight (strength + 2) or dropping it (strength + 0) optimises a
+//! different objective from Seurat's. [`DIAGONAL_SCALE`] records the choice; the evidence
+//! is in its documentation.
 
-use crate::error::Result;
+use std::cmp::Reverse;
+
+use single_clustering::community_search::leiden::{leiden as sc_leiden, LeidenConfig, ObjectiveKind};
+use single_clustering::network::CSRNetwork;
+use single_clustering::ClusteringError;
+
+use crate::error::{Error, Result};
 use crate::types::SparseGraph;
 
 /// Parameter mapping from Seurat / the pipeline (docs/RUST_ENGINE.md section 4).
@@ -34,6 +59,12 @@ pub trait Clusterer {
     fn cluster(&self, graph: &SparseGraph, params: &ClusterParams) -> Result<Vec<u32>>;
 }
 
+/// Factor applied to diagonal (self-loop) weights before they reach single-clustering.
+///
+/// 0.5 reproduces the objective Seurat's `FindClusters(algorithm = 4)` optimises on its SNN
+/// (see the module documentation for the derivation). PLACEHOLDER: evidence to be filled in.
+pub const DIAGONAL_SCALE: f32 = 0.5;
+
 /// single-clustering Leiden with the RB objective.
 pub struct SingleClusteringLeiden;
 
@@ -41,13 +72,133 @@ impl Clusterer for SingleClusteringLeiden {
     fn name(&self) -> &'static str {
         "single-clustering 0.7.0 (Leiden, RB)"
     }
+
+    /// Errors: malformed CSR or a graph that isn't symmetric (`InvalidInput`), negative or
+    /// non-finite resolution or `n_iterations == 0` (`InvalidParameter`).
     fn cluster(&self, graph: &SparseGraph, params: &ClusterParams) -> Result<Vec<u32>> {
-        let _ = (graph, params);
-        unimplemented!("SingleClusteringLeiden: Phase 2")
+        if !params.resolution.is_finite() || params.resolution < 0.0 {
+            return Err(Error::InvalidParameter(format!(
+                "resolution must be finite and non-negative, got {}",
+                params.resolution
+            )));
+        }
+        if params.n_iterations == 0 {
+            return Err(Error::InvalidParameter("n_iterations must be at least 1".into()));
+        }
+        validate_shape(graph)?;
+        if graph.n == 0 {
+            return Ok(Vec::new());
+        }
+
+        // from_csr_parts takes owned buffers: this is the one copy of the graph per call
+        let mut weights = graph.weights.clone();
+        if DIAGONAL_SCALE != 1.0 {
+            for i in 0..graph.n {
+                for e in graph.indptr[i]..graph.indptr[i + 1] {
+                    if graph.indices[e] as usize == i {
+                        weights[e] *= DIAGONAL_SCALE;
+                    }
+                }
+            }
+        }
+        let network = CSRNetwork::from_csr_parts(graph.indptr.clone(), graph.indices.clone(), weights, None)
+            .map_err(map_err)?;
+
+        let config = LeidenConfig {
+            objective: ObjectiveKind::Rb { resolution: params.resolution },
+            seed: Some(params.seed),
+            n_iterations: params.n_iterations,
+            refine: true,
+            ..Default::default()
+        };
+        let clustering = sc_leiden(&network, &config).map_err(map_err)?;
+        Ok(relabel_by_size(clustering.labels()))
     }
 }
 
 /// Convenience: CPU Leiden with the default backend.
 pub fn leiden(graph: &SparseGraph, params: &ClusterParams) -> Result<Vec<u32>> {
     SingleClusteringLeiden.cluster(graph, params)
+}
+
+/// Structural checks single-clustering would otherwise trip over (it derives n from
+/// `indptr`, so a wrong `n` would go unnoticed). Index bounds, weight sign/finiteness and
+/// symmetry are checked by `CSRNetwork::from_csr_parts`.
+fn validate_shape(g: &SparseGraph) -> Result<()> {
+    if g.indptr.len() != g.n + 1 {
+        return Err(Error::InvalidInput(format!("indptr has {} entries, expected n + 1 = {}", g.indptr.len(), g.n + 1)));
+    }
+    if g.indices.len() != g.weights.len() {
+        return Err(Error::InvalidInput(format!(
+            "indices ({}) and weights ({}) differ in length",
+            g.indices.len(),
+            g.weights.len()
+        )));
+    }
+    if g.indptr[0] != 0 || g.indptr[g.n] != g.indices.len() {
+        return Err(Error::InvalidInput("indptr must start at 0 and end at nnz".into()));
+    }
+    if g.indptr.windows(2).any(|w| w[1] < w[0]) {
+        return Err(Error::InvalidInput("indptr is not non-decreasing".into()));
+    }
+    Ok(())
+}
+
+fn map_err(e: ClusteringError) -> Error {
+    match e {
+        ClusteringError::InvalidConfig(m) => Error::InvalidParameter(m),
+        ClusteringError::NodeIndexOutOfRange { .. }
+        | ClusteringError::NonFiniteWeight { .. }
+        | ClusteringError::NegativeWeight { .. }
+        | ClusteringError::InvalidCsr(_)
+        | ClusteringError::AsymmetricGraph { .. }
+        | ClusteringError::TooManyNodes { .. } => Error::InvalidInput(format!("graph rejected by single-clustering: {e}")),
+        other => Error::Backend { context: "single-clustering Leiden", message: other.to_string() },
+    }
+}
+
+/// Renumber clusters 0.. by decreasing size, ties broken by the lowest node index in the
+/// cluster, so labels don't depend on the backend's internal numbering.
+fn relabel_by_size(labels: &[usize]) -> Vec<u32> {
+    let n_slots = labels.iter().copied().max().map_or(0, |m| m + 1);
+    let mut size = vec![0usize; n_slots];
+    let mut first = vec![usize::MAX; n_slots];
+    for (v, &c) in labels.iter().enumerate() {
+        size[c] += 1;
+        first[c] = first[c].min(v);
+    }
+    let mut order: Vec<usize> = (0..n_slots).filter(|&c| size[c] > 0).collect();
+    order.sort_unstable_by_key(|&c| (Reverse(size[c]), first[c]));
+    let mut new_id = vec![0u32; n_slots];
+    for (rank, &c) in order.iter().enumerate() {
+        new_id[c] = rank as u32;
+    }
+    labels.iter().map(|&c| new_id[c]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relabels_by_size_then_first_index() {
+        // sizes: a=2 (first 0), b=3 (first 1), c=2 (first 3), d=1
+        let raw = [7, 2, 2, 5, 7, 2, 5, 9];
+        assert_eq!(relabel_by_size(&raw), vec![1, 0, 0, 2, 1, 0, 2, 3]);
+        assert!(relabel_by_size(&[]).is_empty());
+    }
+
+    #[test]
+    fn rejects_bad_shapes_and_params() {
+        let g = SparseGraph { n: 2, indptr: vec![0, 1, 2], indices: vec![1, 0], weights: vec![1.0, 1.0] };
+        assert!(leiden(&g, &ClusterParams::default()).is_ok());
+        let bad_n = SparseGraph { n: 3, ..g.clone() };
+        assert!(matches!(leiden(&bad_n, &ClusterParams::default()), Err(Error::InvalidInput(_))));
+        let asym = SparseGraph { n: 2, indptr: vec![0, 1, 1], indices: vec![1], weights: vec![1.0] };
+        assert!(matches!(leiden(&asym, &ClusterParams::default()), Err(Error::InvalidInput(_))));
+        let p = ClusterParams { n_iterations: 0, ..Default::default() };
+        assert!(matches!(leiden(&g, &p), Err(Error::InvalidParameter(_))));
+        let p = ClusterParams { resolution: f64::NAN, ..Default::default() };
+        assert!(matches!(leiden(&g, &p), Err(Error::InvalidParameter(_))));
+    }
 }

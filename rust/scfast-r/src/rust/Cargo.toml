@@ -13,6 +13,8 @@ name = "scfastr"
 [dependencies]
 extendr-api = "0.9"
 scfast-core = { path = "../../../scfast-core" }
+# Only for rs_info() (thread count); same version as scfast-core uses.
+rayon = "1.10"
 
 # Standalone crate: rust/Cargo.toml excludes scfast-r from the workspace, so this table
 # stops cargo from searching upwards and adopting rust/ as its workspace root.
