@@ -13,3 +13,7 @@ cache/
 .Rproj.user/
 .DS_Store
 __pycache__/
+
+# benchmark runs (commit a chosen baseline with git add -f)
+bench/results/
+__pycache__/

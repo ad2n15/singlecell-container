@@ -1,6 +1,6 @@
 # scfast: Rust engine for the singlecell pipeline — plan
 
-Status: **plan for review** · Version 0.1 · 17 Oct 2026 · Branch: `feat/rust-engine`
+Status: **plan for review** · Version 0.2 · 17 Oct 2026 · Branch: `feat/rust-engine`
 Scope: plan only. No Rust code exists yet. Companion to [`DESIGN.md`](DESIGN.md) and [`exchange-spec.md`](exchange-spec.md).
 
 ## 1. Goal
@@ -160,7 +160,7 @@ Each phase is one pull request into `feat/rust-engine`, and is only merged when 
 
 | Phase | Work | Done when |
 |---|---|---|
-| **0. Baseline** | `bench/` harness: per-step time, peak RSS, peak GPU memory, cluster count, written as JSON. Baselines for Seurat CPU, Scanpy and rapids `gpu_core` on PBMC 3k, the 500-cell fixture and one large dataset. Finish the Leiden checks from section 4 | `bench/baseline.json` committed; single-clustering ARI vs leidenalg ≥ 0.9 on PBMC 3k |
+| **0. Baseline** | `bench/` harness (section 8): per-step time, peak RSS, peak GPU memory, parity outputs, written as JSONL. Baselines for Seurat CPU, Scanpy and rapids `gpu_core` on PBMC 3k, the 500-cell fixture and one large dataset. Finish the Leiden checks from section 4 | Baseline `results.jsonl` and report committed under `bench/results/`; single-clustering ARI vs leidenalg ≥ 0.9 on PBMC 3k |
 | **1. Scaffold** | Cargo workspace, `Backend` and `Clusterer` traits, `CsrView` borrowed from R and Python, no-op round trip | `cargo test` passes; R and Python can call into scfast |
 | **2. Leiden (CPU)** | `SingleClusteringLeiden` behind `Clusterer`; `FindClustersFast` and `scfast.leiden` taking Seurat's existing `RNA_snn` graph | Same SNN graph, ARI vs Seurat `algorithm = 4` ≥ 0.9 on PBMC 3k; same seed gives identical labels |
 | **3. Implicit PCA (CPU)** | Randomised SVD on the implicit scaled operator, faer for dense steps | Top 10 PC subspace similarity > 0.99 vs Seurat; no dense cells × HVG matrix allocated |
@@ -188,7 +188,72 @@ Following the decision not to use GitHub Actions, tests run locally and on the n
 
 Datasets: the 500-cell fixture (`tests/fixtures/pbmc_like`, fast, four known cell types), PBMC 3k, and one dataset of 100k cells or more for scale. Results will not be identical to Seurat (f32 vs f64, exact vs Annoy kNN, randomised SVD); the thresholds above define "correct".
 
-## 8. Build environment
+## 8. CPU/GPU split and benchmarking
+
+### 8.1 What runs where
+
+Rule of thumb: **GPU for heavy, regular arithmetic on data that can stay on the GPU; CPU for I/O, irregular graph work, small data and R-ecosystem steps.** Every CPU⇄GPU copy costs time, so the target is one upload (the HVG matrix) and one download (PCs, graph, labels).
+
+| Step | Device | Engine | Why |
+|---|---|---|---|
+| Read 10x / h5 / h5ad | CPU | Rust or R | Limited by disk, not compute |
+| QC metrics | CPU | Rust, fused pass | Simple sums; uploading the full raw matrix costs more than computing them |
+| Doublets (scDblFinder) | CPU | R | Out of scope |
+| Normalise, log1p, HVG statistics | CPU | Rust, one streaming pass | Works on all genes; only the HVG subset (roughly 5–25% of the data) is worth uploading |
+| **Implicitly scaled PCA** | **GPU** | Rust CUDA (cuSPARSE + cuBLAS); CPU fallback | The largest GPU win: sparse and dense matrix products |
+| Harmony | GPU | rapids for now | Dense maths on PCs; not in Rust yet |
+| **kNN** | **GPU** | Rust CUDA (GEMM + top-k); CPU fallback | Brute-force kNN is matrix multiplication, and it's exact |
+| SNN graph | CPU first, GPU later | Rust | Light either way; moves to GPU only to avoid a copy once kNN is there |
+| **Leiden** | **CPU** | single-clustering | Irregular graph work on a small graph (about 20 edges per cell). GPU (cuGraph) only for multi-million cells |
+| UMAP | GPU (CPU: uwot) | rapids | Already fast; not worth rewriting |
+| Markers, pseudobulk DGE, plots, agents | CPU | R / Python | Not compute-bound, or already fast (presto) |
+
+In Rust, the GPU work is **PCA and kNN**, with SNN and Leiden as later options. Small datasets don't benefit from the GPU because of start-up and transfer costs, so each GPU step falls back to CPU below a cell-count threshold. The threshold is set from the scaling curve (8.2), not guessed; 50k–100k cells is the starting estimate.
+
+### 8.2 How performance is judged
+
+The harness in `bench/` (Phase 0) implements everything below.
+
+**Per-step measurements**, for every engine and dataset size:
+
+- Wall time: median of the measured repeats after one warm-up repeat.
+- Cold start, recorded separately: R package loading, Python imports and CUDA context creation.
+- Transfer time between CPU and GPU, recorded separately.
+- Peak host memory (RSS) per step, and peak GPU memory.
+- Throughput in cells per second.
+
+GPU work runs asynchronously, so every GPU step is timed only after the device has finished (device synchronise or CUDA events).
+
+**Correctness alongside speed.** Every run saves PCs, kNN indices and cluster labels, and the parity checks in section 7 are computed against the Seurat run at the same size. A faster step that fails parity doesn't count.
+
+**Fair comparisons:**
+
+- Same machine, same cells and genes after QC (one shared QC step), same parameters (resolution 0.5, seed 0, same PCs and neighbours).
+- Thread count fixed and recorded, because Seurat, BLAS and rayon each pick their own defaults.
+- System load and `nvidia-smi` recorded with each run, since the L4 login node is shared; repeat runs if another user is active.
+- Precision noted: scfast uses f32, Seurat f64.
+
+**Engines compared:** Seurat CPU (baseline), Scanpy CPU, rapids-singlecell GPU (`gpu_core.py`), scfast CPU, scfast GPU.
+
+**Scaling curve:** one large dataset subsampled to 10k, 50k, 100k, 250k, 500k and 1M cells. Time and memory against cell count, per step and engine, shows where the GPU starts to win (the fallback threshold), where Seurat runs out of memory, and any step that scales worse than expected.
+
+**Profiling** when a number needs explaining: `cargo flamegraph` / `perf` for Rust, `profvis` for Seurat, NVIDIA Nsight Systems (`nsys`) for kernel-versus-copy time on the GPU.
+
+**Adoption rule:** a Rust step replaces the existing one only if parity passes **and**, at 100k cells or more, it is at least 1.5× faster or uses at least 2× less peak memory than the Seurat baseline. Otherwise it stays optional.
+
+### 8.3 Record format
+
+One JSON object per line (`results.jsonl`), one line per step per repeat:
+
+```json
+{"engine": "scfast-gpu", "step": "pca", "cells": 250000, "genes": 2000, "rep": 1, "warmup": false,
+ "wall_s": 1.84, "transfer_s": 0.31, "peak_rss_gb": 3.1, "peak_gpu_gb": 2.4, "threads": 8,
+ "status": "ok", "node": "iridisx-l4", "commit": "29b6e58"}
+```
+
+`bench/report.py` turns these into the results table (median times, speed-up and memory ratio against Seurat, parity, verdict) and the scaling plots.
+
+## 9. Build environment
 
 | Where | What builds | Notes |
 |---|---|---|
@@ -198,7 +263,7 @@ Datasets: the 500-cell fixture (`tests/fixtures/pbmc_like`, fast, four known cel
 
 The `cuda` feature is off by default, so a machine without CUDA always builds. At runtime, `device = "auto"` picks CUDA when a device is visible and falls back to CPU otherwise, mirroring `gpu_core._resolve_device`.
 
-## 9. Risks
+## 10. Risks
 
 | Risk | Mitigation |
 |---|---|
@@ -210,7 +275,7 @@ The `cuda` feature is off by default, so a machine without CUDA always builds. A
 | Results differ from Seurat | Thresholds defined up front; differences reported, not hidden |
 | Scope creep toward a full Seurat port | In/out scope fixed in section 1; new steps need a bench result showing the gain |
 
-## 10. Open questions
+## 11. Open questions
 
 1. Which large dataset to use for scale runs (100k+ human cells closest to the real data, or the 10x 1.3M mouse brain)?
 2. Is building and running Rust on the Iridis X L4 node permitted, and can the container recipe include the Rust toolchain?
