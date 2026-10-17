@@ -13,3 +13,14 @@ cache/
 .Rproj.user/
 .DS_Store
 __pycache__/
+
+# keep small test inputs and example sheets despite the *.csv / *.h5ad rules above
+!config/examples/*.csv
+!tests/fixtures/**/*.csv
+!tests/integration/stage_configs/*.csv
+!tests/fixtures/**/*.h5ad
+# Python caches
+__pycache__/
+.pytest_cache/
+tests/benchmark/inputs/
+tests/benchmark/results/

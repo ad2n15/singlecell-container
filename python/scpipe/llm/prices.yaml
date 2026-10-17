@@ -1,0 +1,15 @@
+# Published list prices, USD per million tokens (input, output, cached input).
+# The ledger converts to GBP with llm.budget.usd_to_gbp (default 0.78).
+# A model name is matched exactly, then by longest prefix (so a dated
+# snapshot like claude-haiku-4-5-20251001 uses the claude-haiku-4-5 row).
+# An unknown model falls back to the `_default` row (deliberately expensive,
+# so an unpriced model never slips under the budget guard) and the ledger
+# entry says so. Edit this file when prices change; nothing else needs to.
+models:
+  claude-haiku-4-5:   {input: 1.00, output: 5.00, cached: 0.10}
+  claude-sonnet-4-5:  {input: 3.00, output: 15.00, cached: 0.30}
+  claude-opus-4-1:    {input: 15.00, output: 75.00, cached: 1.50}
+  gpt-4o-mini:        {input: 0.15, output: 0.60, cached: 0.075}
+  gpt-4o:             {input: 2.50, output: 10.00, cached: 1.25}
+  mock-model:         {input: 1.00, output: 5.00, cached: 0.10}
+  _default:           {input: 15.00, output: 75.00, cached: 1.50}

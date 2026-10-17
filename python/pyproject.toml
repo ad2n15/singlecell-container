@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scpipe"
+version = "0.1.0"
+description = "scpipe: runner, QC engine, exchange format and GPU core step for the singlecell pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "anndata>=0.10",
+    "scanpy>=1.10",
+    "h5py",
+    "numpy",
+    "scipy",
+    "pandas",
+    "igraph",
+    "leidenalg",
+    "pyyaml",
+    "scikit-learn",
+    "scikit-image",
+    "jinja2",
+]
+
+[project.scripts]
+scpipe = "scpipe.runner:main"
+
+[project.optional-dependencies]
+harmony = ["harmonypy"]
+gpu = ["rapids-singlecell"]
+test = ["pytest"]
+report = ["matplotlib"]
+llm = ["requests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["scpipe*"]
