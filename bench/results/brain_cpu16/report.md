@@ -12,6 +12,7 @@ Compute = normalise → UMAP (median of measured repeats, summed). Read and CPU�
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 100,000 | seurat | 194.60 | 21.01 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 100,000 | scanpy | 75.79 | 8.85 | 0.00 | 11.28 | – | 2.57× | –× | 1.000 | 0.995 | 0.585 | fails parity |
+| 100,000 | scfast-cpu | 8.73 | 0.34 | 0.00 | 3.27 | – | 22.29× | –× | 1.000 | 0.996 | 0.598 | fails parity |
 | 500,000 | seurat | 966.82 | 88.44 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 500,000 | scanpy | 488.66 | 51.99 | 0.00 | 50.85 | – | 1.98× | –× | 1.000 | 0.993 | 0.602 | fails parity |
 | 1,290,549 | scanpy | 1161.61 | 101.01 | 0.00 | 150.33 | – | –× | –× | – | – | – | no parity data |
@@ -40,6 +41,14 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 100,000 | scanpy | neighbors | 7.059 | 6.994–7.146 | 3 | 11.28 | process |
 | 100,000 | scanpy | cluster | 3.963 | 3.958–4.233 | 3 | 11.28 | process |
 | 100,000 | scanpy | umap | 49.472 | 49.237–52.280 | 3 | 11.28 | process |
+| 100,000 | scfast-cpu | read | 0.341 | 0.337–0.356 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | normalize | 0.496 | 0.476–0.496 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | scale | 0.004 | 0.004–0.004 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | pca | 1.219 | 1.152–1.228 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | neighbors | 0.602 | 0.596–0.623 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | cluster | 1.459 | 1.362–1.589 | 3 | 3.27 | process |
+| 100,000 | scfast-cpu | umap | 4.949 | 4.860–5.104 | 3 | 3.27 | process |
 | 500,000 | seurat | read | 88.443 | 88.443–88.443 | 1 | – | process |
 | 500,000 | seurat | normalize | 10.623 | 10.623–10.623 | 1 | – | process |
 | 500,000 | seurat | hvg | 26.818 | 26.818–26.818 | 1 | – | process |
@@ -69,6 +78,7 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 
 | Engine | Cells | Start-up s |
 |---|---:|---:|
+| scfast-cpu | 100,000 | 0.00 |
 | scanpy | 1,290,549 | 4.47 |
 | seurat | 500,000 | 4.39 |
 | scanpy | 500,000 | 5.03 |

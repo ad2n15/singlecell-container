@@ -66,6 +66,13 @@ Constraints from the user (2026-10-17):
 
   Seurat at 1.29M not run (published ≈ 3 h on 16 cores; REFERENCES.md).
 
+- Real-data baselines (agent, merged): Modal cpu=16, same image for every engine. Data on volume scfast-data.
+- scfast-cpu on Modal cpu=16 (compute s, normalize..umap; speed-up vs Seurat / Scanpy):
+  - PBMC 68k: Seurat 121.4, Scanpy 57.2, scfast 5.76 (21x / 10x). PC 1.000, kNN 0.994, ARI 0.840.
+  - brain 100k: Seurat 197.6, Scanpy 78.6, scfast 8.55 (23x / 9x). PC 0.99997, kNN 0.996, ARI 0.598 (Scanpy 0.585).
+- ARI gate is below Leiden's noise floor on real data (evidence): PBMC 68k, Seurat vs Seurat with Leiden seeds 0..3: ARI 1.0, 0.709, 0.700; scfast seed vs seed 0.67-0.79 (0.73-0.81 converged). Not changed; reported.
+- UMAP on Modal x86 16 cores is ~4x slower than on the Mac (PBMC 68k: 3.7 s vs 0.9 s). Probing thread scaling.
+
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - GPU path on Modal (Sonnet 5.5): bench/modal_app.py, CUDA tests on L4, scfast-gpu engine.
