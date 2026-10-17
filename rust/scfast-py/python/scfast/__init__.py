@@ -493,7 +493,7 @@ def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:
     """A 1-D h5py dataset as ``dtype``; plain-gzip chunks are inflated in parallel in Rust."""
     plain_gzip = (ds.chunks is not None and ds.ndim == 1 and ds.compression == "gzip" and not ds.shuffle
                   and not ds.fletcher32 and ds.scaleoffset is None and ds.dtype.str[1:] in ("i4", "i8", "f4", "f8")
-                  and ds.dtype.byteorder in "<=|")
+                  and ds.dtype.byteorder in "<=|" and hasattr(ds.id, "chunk_iter"))
     if plain_gzip:
         chunks: list[tuple[int, int, int]] = []
         ds.id.chunk_iter(lambda c: chunks.append((c.chunk_offset[0], c.byte_offset, c.size)))
