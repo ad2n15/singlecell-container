@@ -28,7 +28,7 @@ import numpy as np
 from . import _scfast
 from ._scfast import __version__
 
-__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn"]
+__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn", "umap"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -481,3 +481,44 @@ def preprocess(
     x_hvg.sort_indices()  # column selection in HVG order leaves rows unsorted; pca() needs canonical CSR
     out["X_hvg"] = x_hvg
     return out
+
+
+def _find_ab(spread: float, min_dist: float) -> tuple[float, float]:
+    from scipy.optimize import curve_fit
+
+    x = np.linspace(0, spread * 3, 300)
+    y = np.where(x < min_dist, 1.0, np.exp(-(x - min_dist) / spread))
+    (a, b), _ = curve_fit(lambda x, a, b: 1.0 / (1.0 + a * x ** (2 * b)), x, y)
+    return float(a), float(b)
+
+
+def umap(
+    indices: Any,
+    distances: Any,
+    init: Any,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_epochs: int | None = None,
+    negative_sample_rate: int = 5,
+    learning_rate: float = 1.0,
+    seed: int = 0,
+) -> np.ndarray:
+    """UMAP layout from a kNN graph, replacing ``RunUMAP`` / ``sc.tl.umap``.
+
+    ``indices`` / ``distances`` are the (cells, k) output of :func:`knn` (the cell itself
+    in column 0). ``init`` is a (cells, 2) starting layout, e.g. the first two PCs; it is
+    rescaled to [0, 10] as umap-learn does. ``n_epochs`` defaults to umap-learn's choice
+    (500 below 10,000 cells, else 200). ``min_dist`` 0.5 is Scanpy's default. Returns a
+    float32 (cells, 2) array.
+    """
+    idx = np.ascontiguousarray(indices, dtype=np.int32)
+    dist = np.ascontiguousarray(distances, dtype=np.float32)
+    start = np.ascontiguousarray(np.asarray(init)[:, :2], dtype=np.float32)
+    if idx.ndim != 2 or idx.shape != dist.shape or start.shape != (idx.shape[0], 2):
+        raise ValueError(f"indices {idx.shape}, distances {dist.shape} and init {start.shape} do not match")
+    if n_epochs is None:
+        n_epochs = 500 if idx.shape[0] <= 10_000 else 200
+    a, b = _find_ab(_float("spread", spread), _float("min_dist", min_dist))
+    return _scfast.umap(idx, dist, start, a, b, _int("n_epochs", n_epochs, 1),
+                        _int("negative_sample_rate", negative_sample_rate, 0),
+                        _float("learning_rate", learning_rate), _seed(seed))

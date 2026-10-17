@@ -168,11 +168,11 @@ def make_engine(name: str):
 
 
 class ScfastEngine(ScanpyEngine):
-    """Scanpy for I/O, normalisation and HVGs; scfast for scale+PCA, kNN+SNN and Leiden.
+    """Scanpy for I/O, normalisation and HVGs; scfast for scale+PCA, kNN+SNN, Leiden and UMAP.
 
-    'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. The
-    SNN graph is stored in obsp["connectivities"] so UMAP runs on the same graph Seurat
-    would use, and the kNN distances in obsp["distances"] so the parity outputs line up.
+    'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. Leiden
+    clusters Seurat's SNN graph; UMAP lays out the kNN graph (umap-learn's fuzzy set) from
+    a PCA start. The kNN distances go to obsp["distances"] so the parity outputs line up.
     """
 
     device = "cpu"
@@ -202,17 +202,12 @@ class ScfastEngine(ScanpyEngine):
         import numpy as np
         import scipy.sparse as sp
 
-        from scanpy.neighbors import _connectivity
-
         idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact")
         n = idx.shape[0]
         rows = np.repeat(np.arange(n), cfg.k - 1)
         a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
         a.obsp["snn"] = self.scfast.snn(idx)  # Seurat's SNN (Jaccard), what Leiden clusters on
-        # UMAP expects scanpy's fuzzy-simplicial connectivities, not an SNN graph
-        a.obsp["connectivities"] = _connectivity.umap(idx, dist, n_obs=n, n_neighbors=cfg.k)
-        a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
-                              "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
+        self.knn = idx, dist
 
     def cluster(self, a, cfg):
         import pandas as pd
@@ -220,6 +215,9 @@ class ScfastEngine(ScanpyEngine):
         labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
                                     n_iterations=2)
         a.obs["cluster"] = pd.Categorical(labels.astype(str))
+
+    def umap(self, a, cfg):
+        a.obsm["X_umap"] = self.scfast.umap(*self.knn, a.obsm["X_pca"][:, :2], seed=cfg.seed)
 
 
 # ---------------------------------------------------------------- main

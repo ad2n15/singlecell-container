@@ -161,3 +161,15 @@ def _probe_error(kind: str, message: str, /) -> None:
 def _probe_panic(kind: str, /) -> None:
     """Panic inside the kernel wrapper: "panic", "unimplemented" (like a stub kernel) or
     "rayon" (on a rayon worker thread). Test helper: must raise, never abort."""
+
+def umap(
+    indices: npt.NDArray[np.int32],
+    distances: npt.NDArray[np.float32],
+    init: npt.NDArray[np.float32],
+    a: float,
+    b: float,
+    n_epochs: int,
+    negative_sample_rate: int,
+    learning_rate: float,
+    seed: int,
+) -> npt.NDArray[np.float32]: ...

@@ -32,6 +32,7 @@ use scfast_core::knn::{self as core_knn, KnnMethod, KnnParams};
 use scfast_core::pca::{self as core_pca, PcaParams, PcaResult};
 use scfast_core::preprocess::{self as core_preprocess, PreprocessParams, PreprocessResult};
 use scfast_core::snn::{self as core_snn, SnnParams};
+use scfast_core::umap::{self as core_umap, UmapParams};
 use scfast_core::{CsrView, Device, Error, Idx, Knn, Real, RowMajor, SparseGraph};
 
 // ------------------------------------------------------------------ errors and panics
@@ -638,6 +639,36 @@ fn probe_panic(py: Python<'_>, kind: &str) -> PyResult<()> {
     })
 }
 
+// ------------------------------------------------------------------ UMAP
+
+/// UMAP layout from (n, k) kNN indices / distances (self in column 0) and an (n, 2) init.
+#[pyfunction]
+#[pyo3(name = "umap", signature = (indices, distances, init, a, b, n_epochs, negative_sample_rate, learning_rate, seed))]
+#[allow(clippy::too_many_arguments)]
+fn umap_knn<'py>(
+    py: Python<'py>,
+    indices: PyReadonlyArray2<'py, i32>,
+    distances: PyReadonlyArray2<'py, f32>,
+    init: PyReadonlyArray2<'py, f32>,
+    a: f32,
+    b: f32,
+    n_epochs: usize,
+    negative_sample_rate: usize,
+    learning_rate: f32,
+    seed: u64,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let (n, k) = (indices.shape()[0], indices.shape()[1]);
+    let idx = contiguous(&indices, "indices")?;
+    let dist = contiguous(&distances, "distances")?;
+    let init = contiguous(&init, "init")?;
+    let params = UmapParams { a, b, n_epochs, negative_sample_rate, learning_rate, seed };
+    let emb = run_kernel(py, "umap", || {
+        let idx = knn_indices_to_u32(idx, n, k)?;
+        core_umap::umap(&idx, dist, n, k, init, &params)
+    })?;
+    vec2_to_py(py, n, 2, emb)
+}
+
 // ------------------------------------------------------------------ module
 
 /// Native core of scfast (Rust). Use the `scfast` package, not this module, directly.
@@ -646,7 +677,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices};
+    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {
