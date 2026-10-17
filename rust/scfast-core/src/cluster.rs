@@ -9,10 +9,12 @@
 //! Seurat's `RNA_snn` keeps a diagonal of 1s, and how a self-loop enters the RB null model
 //! depends on how the graph is handed to leidenalg:
 //!
-//! - Seurat (5.0.x via the `leiden` R package, and 5.1+ via `leidenbase`) converts the SNN
-//!   matrix with `Graph.Weighted_Adjacency` / `graph_from_adjacency_matrix`, whose default
-//!   mode is **directed**: every off-diagonal weight w becomes two arcs and every diagonal 1
-//!   becomes **one** loop arc. leidenalg's directed RB is
+//! - Seurat 5.0.1 (verified: `RunLeiden` -> `leiden` R package -> python-igraph
+//!   `Graph.Weighted_Adjacency`) converts the SNN matrix in igraph's default **directed**
+//!   mode: every stored off-diagonal weight becomes an arc, so each edge is two arcs, and
+//!   every diagonal 1 becomes **one** loop arc. (Seurat 5.1+ hands the matrix to `leidenbase`
+//!   through `igraph::graph_from_adjacency_matrix`, also directed by default; not verified
+//!   here, as only 5.0.1 is installed.) leidenalg's directed RB is
 //!   `sum_c [w_c - g * K_c^out * K_c^in / m]`, so each loop adds 1 to a node's strength and
 //!   1 to m.
 //! - single-clustering is undirected with the igraph convention: a loop of weight w adds 2w
