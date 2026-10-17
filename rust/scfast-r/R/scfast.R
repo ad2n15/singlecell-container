@@ -4,6 +4,7 @@
 #   RunPCAFast()        replaces ScaleData() + RunPCA()     -> DimReduc "pca"
 #   FindNeighborsFast() replaces FindNeighbors()            -> Graphs "<assay>_nn", "<assay>_snn"
 #   FindClustersFast()  replaces FindClusters(algorithm=4)  -> seurat_clusters, Idents()
+#   RunUMAPFast()       replaces RunUMAP()                  -> DimReduc "umap"
 #
 # Low-level, Seurat-free: scfast_pca(), scfast_knn(), scfast_snn(), scfast_leiden().
 # The native calls (rs_*) are in R/extendr-wrappers.R; this file does argument checking,
@@ -563,6 +564,79 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
   }
   object <- SeuratObject::LogSeuratCommand(object = object)
   object
+}
+
+# ------------------------------------------------------------------ Seurat: UMAP
+
+# a, b of the low-dimensional similarity 1 / (1 + a d^(2b)) for min_dist / spread.
+.find_ab <- function(spread, min.dist) {
+  if (requireNamespace("uwot", quietly = TRUE) && exists("find_ab_params", envir = asNamespace("uwot"))) {
+    return(unname(utils::getFromNamespace("find_ab_params", "uwot")(spread, min.dist)))
+  }
+  x <- seq(0, spread * 3, length.out = 300)
+  y <- ifelse(x < min.dist, 1, exp(-(x - min.dist) / spread))
+  unname(stats::coef(stats::nls(y ~ 1 / (1 + a * x^(2 * b)), start = list(a = 1, b = 1))))
+}
+
+#' UMAP with the scfast engine, replacing `RunUMAP()`
+#'
+#' Seurat's `RunUMAP()` defaults (uwot, cosine metric, `min.dist` 0.3, spread 1): the rows of
+#' the reduction are L2-normalised, their kNN (scfast, cell included) gives cosine distances
+#' `||u - v||^2 / 2`, and the scfast parallel SGD lays out the fuzzy graph from the first two
+#' dimensions.
+#'
+#' @param object A Seurat object with the reduction.
+#' @param reduction Reduction to use.
+#' @param dims Dimensions of the reduction to use.
+#' @param n.neighbors Neighbours per cell, including the cell itself.
+#' @param nn.method kNN search, `"exact"`, `"hnsw"` or `"auto"` (see [scfast_knn()]).
+#' @param min.dist,spread Curve of the low-dimensional similarity.
+#' @param n.epochs `NULL`: 500 below 10,000 cells, else 200.
+#' @param negative.sample.rate,learning.rate SGD settings.
+#' @param seed.use Random seed.
+#' @param reduction.name,reduction.key Name and key of the stored DimReduc.
+#' @param verbose Print progress messages.
+#' @return The Seurat object with the reduction added.
+#' @export
+RunUMAPFast <- function(object, reduction = "pca", dims = 1:10, n.neighbors = 30, nn.method = "exact", min.dist = 0.3,
+                        spread = 1, n.epochs = NULL, negative.sample.rate = 5, learning.rate = 1,
+                        seed.use = 42, reduction.name = "umap", reduction.key = "umap_", verbose = TRUE) {
+  .check_seurat(object)
+  .check_string(reduction, "reduction")
+  if (!reduction %in% SeuratObject::Reductions(object)) {
+    stop(sprintf("reduction '%s' not found", reduction), call. = FALSE)
+  }
+  min.dist <- .check_positive_number(min.dist, "min.dist")
+  spread <- .check_positive_number(spread, "spread")
+  learning.rate <- .check_positive_number(learning.rate, "learning.rate")
+  negative.sample.rate <- .check_count(negative.sample.rate, "negative.sample.rate", min = 0)
+  seed.use <- .check_seed(seed.use, "seed.use")
+  .check_flag(verbose, "verbose")
+  reduc <- object[[reduction]]
+  emb <- SeuratObject::Embeddings(reduc)
+  if (!.is_whole(dims) || length(dims) < 2L || any(dims < 1) || anyDuplicated(dims)) {
+    stop("'dims' must be at least two distinct positive whole numbers", call. = FALSE)
+  }
+  if (max(dims) > ncol(emb)) stop("More dimensions specified in dims than have been computed", call. = FALSE)
+  x <- emb[, dims, drop = FALSE]
+  n <- nrow(x)
+  k <- min(.check_count(n.neighbors, "n.neighbors", min = 2), n)
+  n.epochs <- .check_count(n.epochs %||% if (n <= 10000L) 500L else 200L, "n.epochs")
+  ab <- .find_ab(spread, min.dist)
+
+  run <- .timed({
+    nn <- scfast_knn(x / sqrt(rowSums(x^2)), k = k, method = nn.method, seed = seed.use, device = "cpu")
+    .rust(rs_umap(nn$idx, nn$dist^2 / 2, x[, 1:2], n, k, ab[[1]], ab[[2]], n.epochs,
+                  negative.sample.rate, learning.rate, seed.use))
+  })
+  um <- run$value
+  dimnames(um) <- list(rownames(x), paste0(reduction.key, 1:2))
+  object[[reduction.name]] <- SeuratObject::CreateDimReducObject(embeddings = um, key = reduction.key,
+                                                                 assay = SeuratObject::DefaultAssay(reduc))
+  if (verbose) {
+    message(sprintf("scfast UMAP: %d cells, k = %d, %d dims, %d epochs in %.2f s", n, k, length(dims), n.epochs, run$seconds))
+  }
+  SeuratObject::LogSeuratCommand(object = object)
 }
 
 # ------------------------------------------------------------------ Seurat: clustering

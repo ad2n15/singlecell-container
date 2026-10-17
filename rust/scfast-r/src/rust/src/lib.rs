@@ -20,7 +20,7 @@
 //! R error. Nothing unwinds into R.
 
 use extendr_api::prelude::*;
-use scfast_core::{cluster, knn, pca, preprocess, snn, CsrView, Device, Knn, RowMajor, SparseGraph};
+use scfast_core::{cluster, knn, pca, preprocess, snn, umap, CsrView, Device, Knn, RowMajor, SparseGraph};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
 
@@ -264,6 +264,21 @@ fn graph_to_r(g: &SparseGraph) -> RResult<Robj> {
     Ok(list!(p = p, i = i, x = x, n = g.n as i32).into())
 }
 
+/// 1-based column-major n x k R index matrix -> 0-based row-major `u32`.
+fn knn_indices(ix: &[i32], n: usize, k: usize) -> RResult<Vec<u32>> {
+    let mut indices = vec![0u32; n * k];
+    for c in 0..k {
+        for r in 0..n {
+            let v = ix[c * n + r];
+            if v < 1 || v as usize > n {
+                return err(format!("neighbour index {v} (row {}, column {}) is outside 1..{n}", r + 1, c + 1));
+            }
+            indices[r * k + c] = (v - 1) as u32;
+        }
+    }
+    Ok(indices)
+}
+
 /// SNN (Jaccard) graph from an n x k matrix of 1-based neighbour indices (self first).
 /// Returns the full symmetric adjacency as CSR parts (0-based), which are also its CSC parts.
 /// @keywords internal
@@ -278,16 +293,7 @@ fn rs_snn(idx: Robj, n: i32, k: i32, prune: f64) -> RResult<Robj> {
     if !prune.is_finite() || !(0.0..=1.0).contains(&prune) {
         return err(format!("prune must be in [0, 1], got {prune}"));
     }
-    let mut indices = vec![0u32; n * k];
-    for c in 0..k {
-        for r in 0..n {
-            let v = ix[c * n + r];
-            if v < 1 || v as usize > n {
-                return err(format!("neighbour index {v} (row {}, column {}) is outside 1..{n}", r + 1, c + 1));
-            }
-            indices[r * k + c] = (v - 1) as u32;
-        }
-    }
+    let indices = knn_indices(ix, n, k)?;
     // snn_from_knn reads only the indices; distances may be empty.
     let knn = Knn { n, k, indices, distances: Vec::new() };
     let params = snn::SnnParams { prune, ..Default::default() };
@@ -545,6 +551,46 @@ fn rs_loess_direct(x: Robj, y: Robj, span: f64) -> RResult<Robj> {
     Ok(f.into())
 }
 
+// ------------------------------------------------------------------ UMAP
+
+/// UMAP layout from an n x k kNN graph: 1-based indices and distances (self first), an
+/// n x 2 starting layout and the curve parameters `a`, `b`. Returns the n x 2 embedding.
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_umap(idx: Robj, dist: Robj, init: Robj, n: i32, k: i32, a: f64, b: f64, n_epochs: i32, negative_sample_rate: i32, learning_rate: f64, seed: f64) -> RResult<Robj> {
+    let n = non_negative(n, "number of cells")?;
+    let k = non_negative(k, "k")?;
+    let ix = int_slice(&idx, "neighbour index matrix")?;
+    let dx = real_slice(&dist, "neighbour distance matrix")?;
+    let x0 = real_slice(&init, "init")?;
+    if ix.len() != n * k || dx.len() != n * k || x0.len() != n * 2 {
+        return err(format!("idx ({}), dist ({}) and init ({}) values do not match {n} cells x {k} neighbours", ix.len(), dx.len(), x0.len()));
+    }
+    if let Some(pos) = dx.iter().chain(x0).position(|v| !v.is_finite()) {
+        return err(format!("dist / init contain a non-finite value at position {}", pos + 1));
+    }
+    let n_epochs = non_negative(n_epochs, "n_epochs")?;
+    let negative_sample_rate = non_negative(negative_sample_rate, "negative_sample_rate")?;
+    let indices = knn_indices(ix, n, k)?;
+    let mut distances = vec![0f32; n * k];
+    for c in 0..k {
+        for r in 0..n {
+            distances[r * k + c] = dx[c * n + r] as f32;
+        }
+    }
+    let mut start = vec![0f32; n * 2];
+    for c in 0..2 {
+        for r in 0..n {
+            start[r * 2 + c] = x0[c * n + r] as f32;
+        }
+    }
+    let params = umap::UmapParams { a: a as f32, b: b as f32, n_epochs, negative_sample_rate, learning_rate: learning_rate as f32, seed: seed_u64(seed)? };
+    let emb = run_kernel("umap", || umap::umap(&indices, &distances, n, k, &start, &params))?;
+    let m = RowMajor::from_vec(n, 2, emb).map_err(|e| extendr_api::Error::Other(format!("scfast: {e}")))?;
+    Ok(rowmajor_to_rmatrix(&m))
+}
+
 extendr_module! {
     mod scfastR;
     fn rs_pca_csc;
@@ -561,4 +607,5 @@ extendr_module! {
     fn rs_debug_panic;
     fn rs_preprocess_csc;
     fn rs_loess_direct;
+    fn rs_umap;
 }

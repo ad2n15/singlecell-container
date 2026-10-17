@@ -177,3 +177,16 @@ test_that("the full fast chain feeds RunUMAP, DimPlot and FindAllMarkers", {
   expect_true(all(as.character(mk$cluster) %in% levels(o$seurat_clusters)))
   expect_gt(ari(o$seurat_clusters, o$group), 0.9)
 })
+
+test_that("RunUMAPFast stores a finite umap DimReduc that separates the planted cell types", {
+  testthat::skip_if_not_installed("cluster")
+  o <- skip_if_stub(RunUMAPFast(fixture_seurat_ref(), dims = 1:10, verbose = FALSE))
+  red <- o[["umap"]]
+  expect_true(methods::validObject(red))
+  emb <- SeuratObject::Embeddings(red)
+  expect_equal(dim(emb), c(ncol(o), 2))
+  expect_identical(colnames(emb), c("umap_1", "umap_2"))
+  expect_true(all(is.finite(emb)))
+  sil <- cluster::silhouette(as.integer(factor(o$cell_type)), stats::dist(emb))[, 3]
+  expect_gt(mean(sil), 0.7)
+})

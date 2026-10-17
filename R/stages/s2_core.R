@@ -241,18 +241,6 @@ s2_resolve_engine <- function(cfg, plan, assay = "RNA") {
 #' Device scfastR runs on for an S2 path: "cuda" on gpu_scfast, else "cpu".
 .s2_scfast_device <- function(path) if (identical(path, "gpu_scfast")) "cuda" else "cpu"
 
-# UMAP on the PCs with uwot, stored as a Seurat "umap" reduction (Seurat's RunUMAP defaults).
-.s2_umap_uwot <- function(obj, reduction, dims, n_neighbors, seed, assay = "RNA") {
-  emb <- SeuratObject::Embeddings(obj, reduction)[, dims, drop = FALSE]
-  set.seed(seed)
-  um <- uwot::umap(emb, n_neighbors = min(n_neighbors, nrow(emb) - 1L), n_components = 2L,
-                   metric = "cosine", min_dist = 0.3, n_threads = 1L, verbose = FALSE)
-  rownames(um) <- rownames(emb)
-  colnames(um) <- paste0("umap_", 1:2)
-  obj[["umap"]] <- SeuratObject::CreateDimReducObject(embeddings = um, key = "umap_", assay = assay)
-  obj
-}
-
 # --------------------------------------------------------------------------
 # Stage
 # --------------------------------------------------------------------------
@@ -378,6 +366,7 @@ run_s2 <- function(cfg, repo) {
   }
 
   leiden_impl <- NA_character_
+  umap_impl <- NA_character_
   scfast_ver <- NULL
   if (path %in% c("scfast", "gpu_scfast")) {
     scfast_ver <- as.character(scfastR::scfast_info()$version %||% scfastR::scfast_info()$package)
@@ -449,7 +438,10 @@ run_s2 <- function(cfg, repo) {
     obj[[paste0(snn_name, "_res.", cfg$clustering$resolution)]] <- cl
     SeuratObject::Idents(obj) <- cl
     # Seurat's one-time notice that uwot became the default is not a problem here
-    obj <- if (use_fast) tm("umap", .s2_umap_uwot(obj, rep_red, dims, cfg$n_neighbors, seed, assay)) else
+    umap_impl <- if (use_fast) paste0("scfastR::RunUMAPFast, scfastR ", scfast_ver)
+                 else paste0("Seurat::RunUMAP(umap.method = \"uwot\"), uwot ", scp_pkg_version("uwot"))
+    obj <- if (use_fast) tm("umap", scfastR::RunUMAPFast(obj, reduction = rep_red, dims = dims, n.neighbors = cfg$n_neighbors,
+                                                         seed.use = seed, verbose = FALSE)) else
       tm("umap", withCallingHandlers(
       Seurat::RunUMAP(obj, reduction = rep_red, dims = dims, n.neighbors = cfg$n_neighbors,
                       umap.method = "uwot", seed.use = seed, verbose = FALSE),
@@ -493,6 +485,7 @@ run_s2 <- function(cfg, repo) {
     gpu_summary <- .s2_parse_json_out(r$stdout)
     obj <- tm("merge", merge_exchange_results(obj, results, overwrite = TRUE, assay = assay))
     pcs_used <- if (!is.null(gpu_summary$n_pcs)) as.integer(gpu_summary$n_pcs) else pcs_used
+    umap_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
     leiden_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
     if (integ == "harmony") integration_impl <- paste0("harmony via scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
     exchange_files <- list(slim = slim, results = results,
@@ -525,6 +518,7 @@ run_s2 <- function(cfg, repo) {
     integration = list(method = integ, batch_key = if (integ == "harmony") batch_key else NULL,
                        implementation = integration_impl),
     clustering = list(implementation = leiden_impl),
+    umap = list(implementation = umap_impl),
     clusters = length(sizes), cluster_sizes = as.list(sizes),
     reductions = SeuratObject::Reductions(obj), graphs = SeuratObject::Graphs(obj),
     timings_s = timings, total_s = round(sum(unlist(timings)), 3),

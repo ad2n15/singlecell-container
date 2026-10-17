@@ -694,6 +694,7 @@ test_that("S2 scfast path recovers the planted cell types and writes no exchange
   expect_false("scale.data" %in% Layers(obj[["RNA"]]))
   expect_equal(nrow(obj), 800)
   expect_identical(ncol(Embeddings(obj, "umap")), 2L)
+  expect_match(sm$umap$implementation, "RunUMAPFast")
   expect_gte(purity(obj$seurat_clusters, truth_for(obj)), 0.9)
   expect_gte(nlevels(obj$seurat_clusters), 4)
   if (!is.null(CPU_RUN)) {      # same decisions as the Seurat run: partitions should agree closely
