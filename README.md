@@ -20,7 +20,7 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 |---|---|
 | **Any dataset** | 10x `.h5` / mtx, `.h5ad`, loom, csv/tsv, Seurat `.rds`/`.qs2`; format auto-detected; samples merged with a gene union; human-organism check |
 | **QC by rules, advised by an agent** | Hard limits, per-sample adaptive bounds, doublets, protected populations (platelets, erythrocytes…) and review triggers from `qc_policy.yaml`. The QC agent can only tighten thresholds within the policy; every cell carries its reason codes |
-| **Rust engine** | `scfast` (Rust) does doublets, PCA, neighbours, SNN and Leiden in process on CPU, so no Seurat ⇄ AnnData exchange is needed and Scanpy is not used; `engine: auto|scfast|seurat` |
+| **Rust engine** | `scfast` (Rust) does preprocessing, doublets, PCA, neighbours, SNN and Leiden in process, so no Seurat ⇄ AnnData exchange is needed and Scanpy is not used; `engine: auto|scfast|seurat`. A CUDA backend (`engine_gpu: scfast`) is built but awaits validation on the L4 |
 | **CPU ⇄ GPU** | Seurat on CPU; rapids-singlecell on an NVIDIA GPU (24 GB L4 is enough for ~1M cells) through an exchange format whose counts checksum is identical in R and Python, so results are only ever merged into the object they came from |
 | **Annotation** | Consensus of lineage signatures, CellTypist and markers against 72 human cell types with Cell Ontology IDs; the annotation agent touches only low-confidence or conflicting clusters |
 | **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
@@ -78,6 +78,7 @@ protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents be
 | [`docs/scfast-integration.md`](docs/scfast-integration.md) | How the Rust engine is wired into S1/S2 and `gpu_core` |
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Install, configure, run, review gates, sites and schedulers |
 | [`tests/README.md`](tests/README.md) | Fixtures, unit and integration tests, benchmarks |
+| [`bench/hpc/README.md`](bench/hpc/README.md) | Scale runs on the L4 (50k–500k): Seurat vs scfast CPU vs scfast CUDA vs rapids, with the adoption verdict |
 | [`bench/README.md`](bench/README.md) | Benchmark harness: times Seurat, Scanpy, rapids and scfast step by step and checks parity with Seurat |
 | [`docs/RUST_ENGINE.md`](docs/RUST_ENGINE.md) | `scfast`, an experimental Rust engine (PCA, kNN, SNN, Leiden) with Python and R bindings |
 
@@ -97,8 +98,9 @@ docs/             architecture, design, specs, user guide
 All seven build steps are implemented and tested offline: ≈980 R expectations, ≈300 Python
 tests, the exchange round trip, the S0–S2 CPU-vs-GPU comparison and the full S0 → S5 run with a
 mock LLM all pass (see [`tests/README.md`](tests/README.md)). There is no hosted CI; tests run
-locally or on the HPC. The Rust engine path (`engine: scfast`) passes the full S0 → S5 run and
-≈1,080 R expectations; the GPU path is unchanged.
+locally or on the HPC. The Rust engine path (`engine: scfast`) passes the full S0 → S5 run. Its CUDA/cuGraph backend
+compiles and passes CPU-side tests but has never run on a GPU: the acceptance tests and scale runs
+for the L4 are in [`docs/INSTALL.md`](docs/INSTALL.md) §1b and [`bench/hpc/`](bench/hpc).
 
 Not yet exercised outside the HPC: a real GPU, the live Claude API and the live Open Targets API
 (unreachable from the development workspace). Before the first real run on Iridis: confirm with

@@ -394,3 +394,19 @@ impl<'a, I: Idx, T: Real> ScaledOp<'a, I, T> {
         Mat::from_fn(p, l, |j, c| (acc[j * l + c] - self.mean[j] * colsum[c]) * self.inv_sd[j])
     }
 }
+
+impl<I: Idx, T: Real> super::Operator for ScaledOp<'_, I, T> {
+    fn nrows(&self) -> usize {
+        ScaledOp::nrows(self)
+    }
+    fn ncols(&self) -> usize {
+        ScaledOp::ncols(self)
+    }
+    fn apply(&self, v: MatRef<'_, f64>, out: MatMut<'_, f64>) -> Result<()> {
+        ScaledOp::apply(self, v, out);
+        Ok(())
+    }
+    fn apply_t(&self, u: MatRef<'_, f64>) -> Result<Mat<f64>> {
+        Ok(ScaledOp::apply_t(self, u))
+    }
+}

@@ -1,5 +1,6 @@
 # scfastR: Seurat-facing wrappers around the scfast Rust kernels (docs/RUST_ENGINE.md).
 #
+#   PreprocessFast()    replaces NormalizeData() + FindVariableFeatures(vst) -> data layer, VariableFeatures
 #   RunPCAFast()        replaces ScaleData() + RunPCA()     -> DimReduc "pca"
 #   FindNeighborsFast() replaces FindNeighbors()            -> Graphs "<assay>_nn", "<assay>_snn"
 #   FindClustersFast()  replaces FindClusters(algorithm=4)  -> seurat_clusters, Idents()
@@ -61,17 +62,41 @@
   invisible(object)
 }
 
-# CUDA is a later phase (docs/RUST_ENGINE.md section 6); "auto" means CPU in this build.
+# PCA / kNN device (docs/scfast-integration.md Phase 6). Validates the string and resolves
+# it to the device the kernels will run on: "cpu", or "cuda:<i>" when scfastR was built with
+# the `cuda` feature and a CUDA device is usable ("auto" picks it; an explicit "cuda" that is
+# not usable is an error). The requested string is kept as attribute "requested" so callers
+# can fall back to the CPU on a GPU failure only when the user asked for "auto".
 .check_device <- function(device) {
+  if (!is.null(attr(device, "requested"))) return(invisible(device)) # already resolved
   .check_string(device, "device")
   device <- tolower(device)
-  if (!device %in% c("auto", "cpu", "cuda")) {
-    stop("'device' must be \"auto\", \"cpu\" or \"cuda\"", call. = FALSE)
+  if (!grepl("^(auto|cpu|cuda|gpu)(:[0-9]+)?$", device) || device %in% c("auto:0", "cpu:0")) {
+    stop("'device' must be \"auto\", \"cpu\", \"cuda\" or \"cuda:<index>\"", call. = FALSE)
   }
-  if (device == "cuda" && !isTRUE(rs_info()$cuda)) {
-    stop("scfastR was built without CUDA support; use device = \"cpu\" or \"auto\"", call. = FALSE)
+  if (startsWith(device, "cuda") || startsWith(device, "gpu")) {
+    if (!isTRUE(rs_info()$cuda_built)) {
+      stop("scfastR was built without CUDA support; use device = \"cpu\" or \"auto\"", call. = FALSE)
+    }
   }
-  invisible("cpu")
+  resolved <- .rust(rs_device(device))
+  attr(resolved, "requested") <- device
+  invisible(resolved)
+}
+
+# Run `fn(device)`; when the device came from "auto" and the GPU fails (an "scfast <kernel>:
+# GPU: ..." error, e.g. out of device memory), warn and run again on the CPU.
+.with_cpu_fallback <- function(device, fn) {
+  requested <- attr(device, "requested") %||% device
+  device <- as.character(device)
+  if (device == "cpu" || requested != "auto") return(fn(device))
+  tryCatch(fn(device), scfast_error = function(e) {
+    msg <- conditionMessage(e)
+    if (!grepl("^scfast [a-z_]+: GPU: ", msg)) stop(e)
+    warning(sprintf("scfast: CUDA failed, falling back to the CPU: %s", sub("^scfast [a-z_]+: GPU: ", "", msg)),
+            call. = FALSE)
+    fn("cpu")
+  })
 }
 
 # Any sparse/dense numeric matrix -> dgCMatrix. A dgCMatrix (or subclass, e.g. Graph) is
@@ -112,20 +137,26 @@
 #' @param npcs Number of components.
 #' @param seed Random seed (non-negative whole number). Same seed, same result.
 #' @param oversample,power.iters Randomised SVD settings; `NULL` keeps the engine defaults.
+#' @param device `"auto"` (CUDA when scfastR was built with the `cuda` feature and a device
+#'   is usable, else CPU), `"cpu"`, `"cuda"` or `"cuda:<index>"`. With `"auto"`, a GPU
+#'   failure (e.g. out of device memory) falls back to the CPU with a warning. On CUDA the
+#'   sparse products run on the device in single precision (results match the CPU to the
+#'   parity thresholds, not bitwise).
 #' @return A list with `embeddings` (cells x npcs, `U * d` as in Seurat), `loadings`
-#'   (genes x npcs), `stdev` (`d / sqrt(n_cells - 1)`), and the per-gene `gene_mean` and
-#'   `gene_sd` used for scaling.
+#'   (genes x npcs), `stdev` (`d / sqrt(n_cells - 1)`), the per-gene `gene_mean` and
+#'   `gene_sd` used for scaling, and `device` (`"cpu"` or `"cuda:<index>"`).
 #' @export
-scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters = NULL) {
+scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters = NULL, device = "auto") {
   dgc <- .as_dgc(dgc, "dgc")
   npcs <- .check_count(npcs, "npcs")
   seed <- .check_seed(seed)
   if (!is.null(oversample)) .check_count(oversample, "oversample", min = 0)
   if (!is.null(power.iters)) .check_count(power.iters, "power.iters", min = 0)
+  device <- .check_device(device)
   if (npcs >= min(dim(dgc))) {
     stop(sprintf("'npcs' (%d) must be less than min(genes, cells) = %d", npcs, min(dim(dgc))), call. = FALSE)
   }
-  res <- .pca_native(dgc, npcs, seed, oversample, power.iters)
+  res <- .pca_native(dgc, npcs, seed, oversample, power.iters, device)
   pcs <- paste0("PC_", seq_len(ncol(res$embeddings)))
   dimnames(res$embeddings) <- list(colnames(dgc), pcs)
   dimnames(res$loadings) <- list(rownames(dgc), pcs)
@@ -133,9 +164,11 @@ scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters 
   res
 }
 
-.pca_native <- function(dgc, npcs, seed, oversample = NULL, power.iters = NULL) {
-  .rust(rs_pca_csc(dgc@p, dgc@i, dgc@x, nrow(dgc), ncol(dgc), as.integer(npcs), as.numeric(seed),
-                   as.integer(oversample %||% -1L), as.integer(power.iters %||% -1L)))
+.pca_native <- function(dgc, npcs, seed, oversample = NULL, power.iters = NULL, device = "cpu") {
+  .with_cpu_fallback(device, function(dev) {
+    .rust(rs_pca_csc(dgc@p, dgc@i, dgc@x, nrow(dgc), ncol(dgc), as.integer(npcs), as.numeric(seed),
+                     as.integer(oversample %||% -1L), as.integer(power.iters %||% -1L), dev))
+  })
 }
 
 #' k nearest neighbours of every row of a matrix
@@ -150,11 +183,15 @@ scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters 
 #'   bit-reproducible across runs; exact search is.
 #' @param auto.threshold Cell count where `"auto"` switches to HNSW; `NULL` keeps the
 #'   engine default.
-#' @return A list with `idx` (n x k integer, 1-based, the cell itself first) and `dist`
-#'   (n x k Euclidean distances).
+#' @param device `"auto"`, `"cpu"`, `"cuda"` or `"cuda:<index>"` (see [scfast_pca()]). On
+#'   CUDA the search is exact brute force (cuBLAS GEMM + top-k) at every size and `method`
+#'   is ignored; `k` must be at most 129.
+#' @return A list with `idx` (n x k integer, 1-based, the cell itself first), `dist`
+#'   (n x k Euclidean distances) and `device` (`"cpu"` or `"cuda:<index>"`).
 #' @export
 scfast_knn <- function(mat, k = 20, method = "auto", seed = 0, hnsw.m = 16,
-                       ef.construction = 200, ef.search = NULL, auto.threshold = NULL) {
+                       ef.construction = 200, ef.search = NULL, auto.threshold = NULL,
+                       device = "auto") {
   if (is.data.frame(mat)) mat <- as.matrix(mat)
   if (!is.matrix(mat) || !is.numeric(mat)) {
     stop("'mat' must be a numeric matrix (cells x dimensions)", call. = FALSE)
@@ -173,8 +210,11 @@ scfast_knn <- function(mat, k = 20, method = "auto", seed = 0, hnsw.m = 16,
   ef.construction <- .check_count(ef.construction, "ef.construction")
   ef.search <- .check_count(ef.search %||% max(64L, 2L * k), "ef.search")
   if (!is.null(auto.threshold)) .check_count(auto.threshold, "auto.threshold", min = 0)
-  res <- .rust(rs_knn(mat, nrow(mat), ncol(mat), k, method, seed, hnsw.m, ef.construction,
-                      ef.search, as.numeric(auto.threshold %||% -1)))
+  device <- .check_device(device)
+  res <- .with_cpu_fallback(device, function(dev) {
+    .rust(rs_knn(mat, nrow(mat), ncol(mat), k, method, seed, hnsw.m, ef.construction,
+                 ef.search, as.numeric(auto.threshold %||% -1), dev))
+  })
   rownames(res$idx) <- rownames(res$dist) <- rownames(mat)
   res
 }
@@ -209,24 +249,46 @@ scfast_snn <- function(idx, prune = 1 / 15) {
 
 #' Leiden clustering of a graph
 #'
-#' CPU Leiden (single-clustering, RB objective: what Seurat's `algorithm = 4` and Scanpy
-#' optimise). A non-symmetric graph is symmetrised as `(G + t(G)) / 2`, with a warning.
+#' Leiden with the RB objective (what Seurat's `algorithm = 4` and Scanpy optimise): on the
+#' CPU with single-clustering, or on a GPU with cuGraph when scfastR was built with the
+#' `cugraph` feature and `libcugraph_c.so` loads. A non-symmetric graph is symmetrised as
+#' `(G + t(G)) / 2`, with a warning.
 #'
 #' @param graph Square weighted adjacency (`dgCMatrix` or Seurat `Graph`), e.g.
 #'   `object[["RNA_snn"]]`.
 #' @param resolution RB resolution (Seurat `resolution`).
 #' @param seed Random seed (Seurat `random.seed`).
-#' @param n.iter Leiden iterations (Seurat `n.iter`, leidenalg `n_iterations`).
+#' @param n.iter Leiden iterations (Seurat `n.iter`, leidenalg `n_iterations`; cuGraph
+#'   `max_level`).
+#' @param device `"auto"` (cuGraph when available, else CPU), `"cpu"`, `"cuda"` or
+#'   `"cuda:<index>"` (an error when cuGraph is not available). The device used is returned
+#'   in the `"device"` attribute.
 #' @return Integer vector of 0-based labels numbered by decreasing cluster size, named by
-#'   `colnames(graph)`.
+#'   `colnames(graph)`, with attribute `device` (`"cpu"` or `"cuda:<index>"`).
 #' @export
-scfast_leiden <- function(graph, resolution = 0.5, seed = 0, n.iter = 2) {
+scfast_leiden <- function(graph, resolution = 0.5, seed = 0, n.iter = 2, device = "auto") {
+  device <- .check_leiden_device(device)
   graph <- .prepare_graph(graph)
   .check_resolution(resolution)
   if (length(resolution) != 1L) stop("'resolution' must be a single number", call. = FALSE)
-  labels <- .leiden_native(graph, resolution, .check_seed(seed), .check_count(n.iter, "n.iter"))
+  labels <- .leiden_native(graph, resolution, .check_seed(seed), .check_count(n.iter, "n.iter"), device)
   names(labels) <- colnames(graph)
+  attr(labels, "device") <- device
   labels
+}
+
+# Leiden device string -> the device the native side will run on ("cpu" or "cuda:<i>").
+# "auto" resolves to cuGraph only when scfastR was built with the `cugraph` feature, the
+# library loads and a CUDA device is usable; an explicit "cuda" that is not usable errors.
+# Separate from .check_device() (PCA / kNN, Phase 6): the two GPU paths are built and
+# detected independently.
+.check_leiden_device <- function(device) {
+  .check_string(device, "device")
+  device <- tolower(device)
+  if (!grepl("^(auto|cpu|cuda|gpu)(:[0-9]+)?$", device) || device %in% c("auto:0", "cpu:0")) {
+    stop("'device' must be \"auto\", \"cpu\", \"cuda\" or \"cuda:<index>\"", call. = FALSE)
+  }
+  .rust(rs_leiden_device(device))$resolved
 }
 
 .check_resolution <- function(resolution) {
@@ -246,16 +308,18 @@ scfast_leiden <- function(graph, resolution = 0.5, seed = 0, n.iter = 2) {
   graph
 }
 
-.leiden_native <- function(graph, resolution, seed, n.iter) {
-  .rust(rs_leiden(graph@p, graph@i, graph@x, ncol(graph), as.numeric(resolution),
-                  as.numeric(seed), as.integer(n.iter)))
+.leiden_native <- function(graph, resolution, seed, n.iter, device = "cpu") {
+  .rust(rs_leiden_on(graph@p, graph@i, graph@x, ncol(graph), as.numeric(resolution),
+                     as.numeric(seed), as.integer(n.iter), device))
 }
 
 #' Engine information
 #'
 #' @return A list: package and engine versions, rayon thread count (set the environment
-#'   variable `RAYON_NUM_THREADS` before the first scfast call to change it), and whether
-#'   CUDA was compiled in.
+#'   variable `RAYON_NUM_THREADS` before the first scfast call to change it), and the CUDA
+#'   state: `cuda_built` (feature compiled in; `cuda` is the same value), `cuda_available`
+#'   (driver loads and a device is visible), `device_count`, `device_name`, `free_gb`,
+#'   `total_gb` (device 0) and `cuda_error` (why CUDA is unavailable, else `NULL`).
 #' @export
 scfast_info <- function() {
   c(list(package = as.character(utils::packageVersion("scfastR"))), rs_info())
@@ -342,7 +406,9 @@ scfast_info <- function() {
 #' @param npcs Number of components (capped at `min(features, cells) - 1`, as in Seurat).
 #' @param seed.use Random seed (`seed` also works, by partial matching).
 #' @param reduction.name,reduction.key Name and key of the stored reduction.
-#' @param device `"auto"`, `"cpu"` or `"cuda"` (CUDA is not built yet; `"auto"` = CPU).
+#' @param device `"auto"` (CUDA when scfastR was built with the `cuda` feature and a device
+#'   is usable, else CPU), `"cpu"`, `"cuda"` or `"cuda:<index>"`; see [scfast_pca()]. The
+#'   device used is recorded in `Misc(reduction)$scfast$device`.
 #' @param oversample,power.iters Randomised SVD accuracy knobs (extra random directions and
 #'   power iterations); `NULL` keeps the engine defaults (10 and 4). Raise them (e.g. 40 and
 #'   8) when the spectrum is flat beyond the leading components and later PCs must match
@@ -363,7 +429,7 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
   seed.use <- .check_seed(seed.use, "seed.use")
   .check_string(reduction.name, "reduction.name")
   .check_string(reduction.key, "reduction.key")
-  .check_device(device)
+  device <- .check_device(device)
   if (!is.null(oversample)) .check_count(oversample, "oversample", min = 0)
   if (!is.null(power.iters)) .check_count(power.iters, "power.iters", min = 0)
   .check_flag(verbose, "verbose")
@@ -375,7 +441,7 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
     warning(sprintf("npcs (%d) reduced to %d (min(features, cells) - 1)", npcs, max.pcs), call. = FALSE)
     npcs <- max.pcs
   }
-  run <- .timed(.pca_native(input$m, npcs, seed.use, oversample, power.iters))
+  run <- .timed(.pca_native(input$m, npcs, seed.use, oversample, power.iters, device))
   res <- run$value
   pcs <- paste0(reduction.key, seq_len(ncol(res$embeddings)))
   dimnames(res$embeddings) <- list(input$cells, pcs)
@@ -392,13 +458,13 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
       total.variance = length(input$features),
       scfast = list(kernel = "implicit_scaled_pca", engine = scfast_info()$version,
                     seed = seed.use, oversample = oversample, power.iters = power.iters,
-                    seconds = run$seconds,
+                    seconds = run$seconds, device = res$device,
                     gene_mean = res$gene_mean, gene_sd = res$gene_sd)
     )
   )
   if (verbose) {
-    message(sprintf("scfast PCA: %d cells x %d features, %d PCs in %.2f s (no ScaleData)",
-                    length(input$cells), length(input$features), npcs, run$seconds))
+    message(sprintf("scfast PCA: %d cells x %d features, %d PCs in %.2f s on %s (no ScaleData)",
+                    length(input$cells), length(input$features), npcs, run$seconds, res$device))
   }
   object[[reduction.name]] <- reduc
   object <- SeuratObject::LogSeuratCommand(object = object)
@@ -422,7 +488,8 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
 #' @param graph.name `NULL` (default names), or two names (kNN graph, SNN graph). As in
 #'   Seurat, a single name stores only the kNN graph.
 #' @param random.seed Seed for HNSW (exact search ignores it).
-#' @param device `"auto"`, `"cpu"` or `"cuda"` (CUDA is not built yet).
+#' @param device `"auto"`, `"cpu"`, `"cuda"` or `"cuda:<index>"`; see [scfast_knn()]. The
+#'   SNN step always runs on the CPU.
 #' @param verbose Print progress messages.
 #' @return The Seurat object with the graphs added.
 #' @export
@@ -443,7 +510,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
     stop("'method' must be one of \"auto\", \"exact\", \"hnsw\"", call. = FALSE)
   }
   random.seed <- .check_seed(random.seed, "random.seed")
-  .check_device(device)
+  device <- .check_device(device)
   .check_flag(verbose, "verbose")
 
   reduc <- object[[reduction]]
@@ -472,7 +539,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
   }
 
   t0 <- proc.time()[["elapsed"]]
-  nn <- scfast_knn(data.use, k = k.param, method = method, seed = random.seed)
+  nn <- scfast_knn(data.use, k = k.param, method = method, seed = random.seed, device = device)
   t.knn <- proc.time()[["elapsed"]] - t0
   # Same construction as Seurat: row i has a 1 at each of its k neighbours (itself included).
   nn.graph <- Matrix::sparseMatrix(i = rep(seq_len(n), times = k.param), j = as.vector(nn$idx),
@@ -491,8 +558,8 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
     object[[graph.name[[ii]]]] <- graphs[[ii]]
   }
   if (verbose) {
-    message(sprintf("scfast neighbours: %d cells, k = %d, %d dims: kNN %.2f s, SNN %.2f s",
-                    n, k.param, length(dims), t.knn, t.snn))
+    message(sprintf("scfast neighbours: %d cells, k = %d, %d dims: kNN %.2f s on %s, SNN %.2f s",
+                    n, k.param, length(dims), t.knn, nn$device, t.snn))
   }
   object <- SeuratObject::LogSeuratCommand(object = object)
   object
@@ -539,9 +606,10 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
 
 #' Leiden clustering of the SNN graph
 #'
-#' Replaces `FindClusters(algorithm = 4)` (leidenalg, RB objective) with the scfast CPU
-#' Leiden. Writes the same outputs: a meta data column `<graph.name>_res.<resolution>` per
-#' resolution, `seurat_clusters`, and `Idents()` (factor with levels 0..n-1).
+#' Replaces `FindClusters(algorithm = 4)` (leidenalg, RB objective) with the scfast Leiden
+#' (CPU, or cuGraph on a GPU with `device`). Writes the same outputs: a meta data column
+#' `<graph.name>_res.<resolution>` per resolution, `seurat_clusters`, and `Idents()` (factor
+#' with levels 0..n-1).
 #'
 #' @param object A Seurat object with an SNN graph (from `FindNeighborsFast()` or
 #'   `FindNeighbors()`).
@@ -551,14 +619,17 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
 #' @param n.iter Leiden iterations.
 #' @param group.singletons Merge single-cell clusters into their most connected cluster,
 #'   as Seurat does.
+#' @param device `"auto"` (cuGraph Leiden when scfastR was built with the `cugraph` feature
+#'   and a CUDA device is usable, else CPU), `"cpu"`, `"cuda"` or `"cuda:<index>"`.
 #' @param verbose Print progress messages.
 #' @param ... `seed` (alias of `random.seed`); `algorithm` (only 4 / "leiden") and `method`
 #'   (ignored) are accepted so a `FindClusters()` call can be renamed unchanged.
 #' @return The Seurat object with clusters added.
 #' @export
 FindClustersFast <- function(object, graph.name = NULL, resolution = 0.5, random.seed = 0,
-                             n.iter = 2, group.singletons = TRUE, verbose = TRUE, ...) {
+                             n.iter = 2, group.singletons = TRUE, device = "auto", verbose = TRUE, ...) {
   .check_seurat(object)
+  device <- .check_leiden_device(device)
   dots <- list(...)
   if (length(dots) && (is.null(names(dots)) || any(!nzchar(names(dots))))) {
     stop("unnamed arguments in '...'", call. = FALSE)
@@ -596,14 +667,14 @@ FindClustersFast <- function(object, graph.name = NULL, resolution = 0.5, random
 
   results <- data.frame(row.names = cells)
   for (r in resolution) {
-    run <- .timed(.leiden_native(graph, r, random.seed, n.iter))
+    run <- .timed(.leiden_native(graph, r, random.seed, n.iter, device))
     labels <- run$value
     if (group.singletons) labels <- .group_singletons(labels, graph, verbose)
     col <- paste0(graph.name, "_res.", r)
     results[[col]] <- factor(labels, levels = sort(unique(labels)))
     if (verbose) {
-      message(sprintf("scfast Leiden: %d clusters at resolution %s in %.2f s",
-                      length(unique(labels)), format(r), run$seconds))
+      message(sprintf("scfast Leiden (%s): %d clusters at resolution %s in %.2f s",
+                      device, length(unique(labels)), format(r), run$seconds))
     }
   }
   object <- SeuratObject::AddMetaData(object, metadata = results)
@@ -612,6 +683,194 @@ FindClustersFast <- function(object, graph.name = NULL, resolution = 0.5, random
   lv <- levels(SeuratObject::Idents(object))
   SeuratObject::Idents(object) <- factor(SeuratObject::Idents(object), levels = lv[order(as.numeric(lv))])
   object[["seurat_clusters"]] <- SeuratObject::Idents(object)
+  object <- SeuratObject::LogSeuratCommand(object = object)
+  object
+}
+
+# ------------------------------------------------------------------ preprocessing (Phase 9)
+
+.check_positive_number <- function(x, name) {
+  if (!is.numeric(x) || length(x) != 1L || !is.finite(x) || x <= 0) {
+    stop(sprintf("'%s' must be a single positive number", name), call. = FALSE)
+  }
+  invisible(as.numeric(x))
+}
+
+#' Fused log-normalisation and vst variable-feature statistics of a counts matrix
+#'
+#' One streaming pass over the raw counts computes what `NormalizeData()`,
+#' `FindVariableFeatures(selection.method = "vst")` and the per-gene statistics of
+#' `ScaleData()` compute: per-cell library sizes, `log1p(counts / library_size *
+#' scale.factor)`, the vst mean / variance / loess-expected variance / clipped standardised
+#' variance of every gene, the top `n_hvg` genes by standardised variance, and the mean and
+#' standard deviation of their log-normalised values (what the implicit PCA scales with).
+#'
+#' The `@p`, `@i` and `@x` arrays of `counts` (genes x cells) are read in place; the
+#' returned `data` matrix shares `@p` and `@i` with `counts`.
+#'
+#' The loess (local quadratic, tricube, span `loess.span`) is R's
+#' `loess(log10(variance) ~ log10(mean), surface = "direct")`; Seurat uses the default
+#' interpolated surface, so expected variances differ slightly (HVG overlap > 99% on the
+#' test data).
+#'
+#' @param counts A genes x cells `dgCMatrix` of raw counts (other matrix classes are
+#'   converted, which copies).
+#' @param n_hvg Number of variable features (Seurat `nfeatures`).
+#' @param scale.factor `NormalizeData(scale.factor)`.
+#' @param loess.span `FindVariableFeatures(loess.span)`.
+#' @param clip.max Clip for the standardised values; `NULL` (default) means
+#'   `sqrt(n_cells)`, as Seurat's `clip.max = "auto"`.
+#' @return A list: `data` (genes x cells `dgCMatrix` of log-normalised values),
+#'   `library_size` (per cell, named), `hvg` (feature names, most variable first),
+#'   `hvg_stats` (data frame with one row per gene: `mean`, `variance`, `variance.expected`,
+#'   `variance.standardized`, `variable`, `rank`), `hvg_mean` and `hvg_sd` (named by HVG),
+#'   `clip` and `seconds`.
+#' @export
+scfast_preprocess <- function(counts, n_hvg = 2000, scale.factor = 1e4, loess.span = 0.3, clip.max = NULL) {
+  counts <- .as_dgc(counts, "counts")
+  n_hvg <- .check_count(n_hvg, "n_hvg")
+  scale.factor <- .check_positive_number(scale.factor, "scale.factor")
+  loess.span <- .check_positive_number(loess.span, "loess.span")
+  clip <- if (is.null(clip.max)) -1 else .check_positive_number(clip.max, "clip.max")
+  if (nrow(counts) < 1L || ncol(counts) < 1L) stop("'counts' is empty", call. = FALSE)
+  if (n_hvg > nrow(counts)) {
+    warning(sprintf("n_hvg (%d) reduced to the number of features (%d)", n_hvg, nrow(counts)), call. = FALSE)
+    n_hvg <- nrow(counts)
+  }
+  run <- .timed(.preprocess_native(counts, n_hvg, scale.factor, loess.span, clip))
+  .preprocess_result(run$value, counts, run$seconds)
+}
+
+.preprocess_native <- function(counts, n_hvg, scale.factor, loess.span, clip) {
+  .rust(rs_preprocess_csc(counts@p, counts@i, counts@x, nrow(counts), ncol(counts), as.integer(n_hvg),
+                          as.numeric(scale.factor), as.numeric(loess.span), as.numeric(clip)))
+}
+
+# Native result -> the documented list (data dgCMatrix sharing @p / @i with the counts).
+.preprocess_result <- function(res, counts, seconds) {
+  features <- rownames(counts) %||% paste0("feature", seq_len(nrow(counts)))
+  cells <- colnames(counts)
+  data <- methods::new("dgCMatrix", i = counts@i, p = counts@p, x = res$data, Dim = dim(counts),
+                       Dimnames = list(rownames(counts), cells))
+  rank <- rep(NA_integer_, nrow(counts))
+  rank[res$hvg] <- seq_along(res$hvg)
+  stats <- data.frame(mean = res$mean, variance = res$variance, variance.expected = res$variance_expected,
+                      variance.standardized = res$variance_standardized, variable = !is.na(rank), rank = rank,
+                      row.names = features, stringsAsFactors = FALSE)
+  lib <- res$library_size
+  names(lib) <- cells
+  hvg <- features[res$hvg]
+  hvg_mean <- res$hvg_mean
+  hvg_sd <- res$hvg_sd
+  names(hvg_mean) <- names(hvg_sd) <- hvg
+  list(data = data, library_size = lib, hvg = hvg, hvg_stats = stats, hvg_mean = hvg_mean, hvg_sd = hvg_sd,
+       clip = res$clip, seconds = seconds)
+}
+
+# The assay's "counts" layer exactly as stored, with feature and cell names.
+.counts_layer <- function(object, assay) {
+  a <- object[[assay]]
+  if (inherits(a, "Assay5")) {
+    layers <- SeuratObject::Layers(a)
+    if (!"counts" %in% layers) {
+      if (any(startsWith(layers, "counts."))) {
+        stop(sprintf("assay '%s' has split counts layers (%s); run JoinLayers() first",
+                     assay, paste(grep("^counts\\.", layers, value = TRUE), collapse = ", ")), call. = FALSE)
+      }
+      stop(sprintf("assay '%s' has no 'counts' layer", assay), call. = FALSE)
+    }
+    m <- methods::slot(a, "layers")[["counts"]]
+    features <- SeuratObject::Features(a, layer = "counts")
+    cells <- SeuratObject::Cells(a, layer = "counts")
+  } else if (inherits(a, "Assay")) {
+    m <- methods::slot(a, "counts")
+    features <- rownames(m)
+    cells <- colnames(m)
+  } else {
+    stop(sprintf("assay '%s' has unsupported class '%s'", assay, class(a)[1]), call. = FALSE)
+  }
+  if (!identical(dim(m), c(length(features), length(cells)))) {
+    stop(sprintf("assay '%s': the counts layer is not stored as features x cells", assay), call. = FALSE)
+  }
+  if (length(cells) != ncol(object) || !setequal(cells, SeuratObject::Cells(object))) {
+    stop(sprintf("assay '%s': the counts layer does not cover all cells of the object", assay), call. = FALSE)
+  }
+  m <- .as_dgc(m, "counts layer")
+  if (is.null(dimnames(m)) || is.null(rownames(m))) dimnames(m) <- list(features, cells)
+  list(m = m, features = features, cells = cells)
+}
+
+#' Normalise, find variable features and compute scaling statistics in one pass
+#'
+#' Replaces `NormalizeData(normalization.method = "LogNormalize")` +
+#' `FindVariableFeatures(selection.method = "vst")` (+ the per-gene statistics of
+#' `ScaleData()`, which `RunPCAFast()` applies implicitly) with one streaming pass over the
+#' assay's counts (see [scfast_preprocess()]). Writes the `data` layer, the variable
+#' features (and the `vf_vst_counts_*` feature meta data that `HVFInfo()` and
+#' `VariableFeaturePlot()` read: pass `selection.method = "vst"` to them, as no
+#' `FindVariableFeatures` command is logged), and `Misc(object, "scfast")$hvg_stats`.
+#'
+#' @param object A Seurat object with raw counts.
+#' @param n_hvg Number of variable features (Seurat `nfeatures`).
+#' @param assay Assay to use; default `DefaultAssay(object)`.
+#' @param scale.factor `NormalizeData(scale.factor)`.
+#' @param loess.span `FindVariableFeatures(loess.span)`.
+#' @param clip.max `NULL` (`sqrt(n_cells)`, Seurat's `"auto"`) or a positive number.
+#' @param verbose Print a progress message.
+#' @return The Seurat object with the `data` layer, variable features and statistics added.
+#' @export
+PreprocessFast <- function(object, n_hvg = 2000, assay = NULL, scale.factor = 1e4, loess.span = 0.3,
+                           clip.max = NULL, verbose = TRUE) {
+  .check_seurat(object)
+  assay <- assay %||% SeuratObject::DefaultAssay(object)
+  .check_string(assay, "assay")
+  if (!assay %in% SeuratObject::Assays(object)) {
+    stop(sprintf("assay '%s' not found in the object", assay), call. = FALSE)
+  }
+  n_hvg <- .check_count(n_hvg, "n_hvg")
+  scale.factor <- .check_positive_number(scale.factor, "scale.factor")
+  loess.span <- .check_positive_number(loess.span, "loess.span")
+  clip <- if (is.null(clip.max)) -1 else .check_positive_number(clip.max, "clip.max")
+  .check_flag(verbose, "verbose")
+
+  layer <- .counts_layer(object, assay)
+  n_feat <- nrow(layer$m)
+  if (n_hvg > n_feat) {
+    warning(sprintf("n_hvg (%d) reduced to the number of features (%d)", n_hvg, n_feat), call. = FALSE)
+    n_hvg <- n_feat
+  }
+  run <- .timed(.preprocess_native(layer$m, n_hvg, scale.factor, loess.span, clip))
+  res <- .preprocess_result(run$value, layer$m, run$seconds)
+
+  a <- object[[assay]]
+  v5 <- inherits(a, "Assay5")
+  SeuratObject::LayerData(a, layer = "data") <- res$data
+  # Feature meta data in Seurat's own column names, so HVFInfo() / VariableFeaturePlot() work.
+  stats <- res$hvg_stats
+  prefix <- if (v5) "vf_vst_counts_" else "vst."
+  cols <- paste0(prefix, c("mean", "variance", "variance.expected", "variance.standardized", "variable", "rank"))
+  if (v5) {
+    a[["var.features"]] <- NULL
+    a[["var.features.rank"]] <- NULL
+  }
+  for (k in seq_along(cols)) {
+    vals <- stats[[k]]
+    names(vals) <- rownames(stats)
+    a[[cols[k]]] <- vals
+  }
+  SeuratObject::VariableFeatures(a) <- res$hvg
+  object[[assay]] <- a
+  misc <- SeuratObject::Misc(object, slot = "scfast") %||% list()
+  misc$hvg_stats <- stats
+  misc$preprocess <- list(kernel = "preprocess", engine = scfast_info()$version, assay = assay,
+                          n_hvg = n_hvg, scale.factor = scale.factor, loess.span = loess.span, clip = res$clip,
+                          seconds = run$seconds, library_size = res$library_size,
+                          hvg_mean = res$hvg_mean, hvg_sd = res$hvg_sd)
+  SeuratObject::Misc(object, slot = "scfast") <- misc
+  if (verbose) {
+    message(sprintf("scfast preprocess: %d cells x %d features, %d variable features in %.2f s (one pass: normalise + vst + scaling stats)",
+                    length(layer$cells), n_feat, length(res$hvg), run$seconds))
+  }
   object <- SeuratObject::LogSeuratCommand(object = object)
   object
 }
