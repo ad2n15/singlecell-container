@@ -1,6 +1,7 @@
 import json
 import subprocess
 import sys
+import types
 import warnings
 from pathlib import Path
 
@@ -232,3 +233,69 @@ def test_engine_rust_harmony(slim, tmp_path):
     s = gpu_core.run(slim[0], tmp_path / "h.h5ad", batch_key="batch", engine="rust")
     assert s["harmony"] and "harmony" in s["timings_s"]
     assert read_exchange(tmp_path / "h.h5ad").obsm["X_harmony"].shape == (600, 30)
+
+
+# --engine rust on the GPU: scfast CUDA when scfast.device_info() reports it (docs/scfast-integration.md)
+
+
+class _FakeScfast:
+    """A stand-in scfast module: records the device each call received."""
+
+    def __init__(self, info=None, raise_info=None):
+        self._info = info
+        self._raise = raise_info
+        self.calls = []
+
+    def device_info(self):
+        if self._raise is not None:
+            raise self._raise
+        return self._info
+
+
+def test_scfast_cuda_available_reads_device_info():
+    class NoInfo:  # a CPU-only build has no device_info at all
+        pass
+
+    assert gpu_core.scfast_cuda_available(NoInfo()) == (False, "this build of scfast has no device_info() (CPU-only build)")
+    ok, why = gpu_core.scfast_cuda_available(_FakeScfast({}))
+    assert not ok and "without the cuda feature" in why
+    ok, why = gpu_core.scfast_cuda_available(_FakeScfast({"cuda_built": True}))
+    assert not ok and "no CUDA device is visible" in why
+    ok, why = gpu_core.scfast_cuda_available(_FakeScfast({"cuda_built": True, "cuda_available": False}))
+    assert not ok
+    ok, why = gpu_core.scfast_cuda_available(_FakeScfast({"cuda_built": True, "cuda_available": True, "device_name": "L4"}))
+    assert ok and why == "L4"
+    ok, why = gpu_core.scfast_cuda_available(_FakeScfast(raise_info=RuntimeError("libcuda missing")))
+    assert not ok and "libcuda missing" in why
+
+
+def test_engine_rust_gpu_uses_cuda_when_device_info_says_so(slim, tmp_path, monkeypatch):
+    scfast = pytest.importorskip("scfast")
+    seen = {}
+
+    def pca(X, n_comps, seed, device="auto"):
+        seen["pca"] = device
+        return scfast.pca(X, n_comps=n_comps, seed=seed)
+
+    def knn(emb, k, seed, device="auto"):
+        seen["knn"] = device
+        return scfast.knn(emb, k=k, seed=seed)
+
+    fake = types.SimpleNamespace(pca=pca, knn=knn, snn=scfast.snn, leiden=scfast.leiden,
+                                 device_info=lambda: {"cuda_built": True, "cuda_available": True})
+    monkeypatch.setattr(gpu_core, "_import_scfast", lambda: fake)
+    s = gpu_core.run(slim[0], tmp_path / "cuda.h5ad", device="gpu", engine="rust", seed=0)
+    assert s["engine"] == "rust" and s["device"] == "gpu" and s["scfast_device"] == "cuda"
+    assert seen == {"pca": "cuda", "knn": "cuda"}
+    assert read_exchange(tmp_path / "cuda.h5ad").uns["gpu_core"]["scfast_device"] == "cuda"
+    # --device auto also picks CUDA when it is there ...
+    seen.clear()
+    s = gpu_core.run(slim[0], tmp_path / "cuda2.h5ad", device="auto", engine="rust", seed=0)
+    assert s["device"] == "gpu" and seen == {"pca": "cuda", "knn": "cuda"}
+    # ... and stays on the CPU without it, while --device gpu is a clear error
+    fake.device_info = lambda: {"cuda_built": True, "cuda_available": False}
+    seen.clear()
+    s = gpu_core.run(slim[0], tmp_path / "cpu.h5ad", device="auto", engine="rust", seed=0)
+    assert s["device"] == "cpu" and s["scfast_device"] == "cpu" and seen == {"pca": "cpu", "knn": "cpu"}
+    with pytest.raises(gpu_core.DeviceError, match="no CUDA device is visible"):
+        gpu_core.run(slim[0], tmp_path / "err.h5ad", device="gpu", engine="rust")

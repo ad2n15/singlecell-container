@@ -25,3 +25,7 @@ numpy = "0.30"
 # GPU Leiden via cuGraph's C API (Phase 7), dlopen'ed at run time; the wheel still imports
 # without it. Build with `maturin build --features cugraph`.
 cugraph = ["scfast-core/cugraph"]
+# CUDA PCA / kNN (Phase 6): cudarc with dynamic loading, so the wheel imports without the
+# CUDA libraries and `device="auto"` falls back to the CPU. Build with
+# `maturin build --features cuda` (or `--features cuda,cugraph`).
+cuda = ["scfast-core/cuda"]

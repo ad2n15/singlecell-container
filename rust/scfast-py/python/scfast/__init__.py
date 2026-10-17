@@ -28,7 +28,7 @@ import numpy as np
 from . import _scfast
 from ._scfast import __version__
 
-__all__ = ["__version__", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn"]
+__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -69,15 +69,52 @@ def _seed(seed: Any) -> int:
     return _int("seed", seed, 0, _U64_MAX)
 
 
-def _check_device(device: Any) -> None:
-    if device in ("auto", "cpu"):
-        return
-    if device in ("cuda", "gpu"):
-        raise RuntimeError(
-            f"device={device!r}: this build of scfast has only the CPU backend "
-            "(the CUDA backend is Phase 6 in docs/RUST_ENGINE.md); use device='auto' or 'cpu'"
-        )
-    raise ValueError(f"device must be 'auto', 'cpu' or 'cuda', got {device!r}")
+def _resolve_device(device: Any) -> tuple[str, str]:
+    """(requested, resolved) for a PCA / kNN device string (Phase 6).
+
+    ``"auto"`` resolves to ``"cuda:0"`` only when this build has the ``cuda`` feature and a
+    device is usable, else ``"cpu"``. An unknown string is ``ValueError``; ``"cuda"`` /
+    ``"cuda:<i>"`` without a usable device is ``RuntimeError`` (message starting ``GPU:``).
+    """
+    if not isinstance(device, str):
+        raise ValueError(f"device must be 'auto', 'cpu', 'cuda' or 'cuda:<index>', got {device!r}")
+    requested = device.strip().lower()
+    try:
+        resolved = _scfast.device(requested)
+    except ValueError:
+        raise ValueError(f"device must be 'auto', 'cpu', 'cuda' or 'cuda:<index>', got {device!r}") from None
+    except RuntimeError as e:
+        raise RuntimeError(f"device={device!r}: {e}") from None
+    return requested, resolved
+
+
+def _with_cpu_fallback(requested: str, resolved: str, call: Any) -> Any:
+    """Run ``call(resolved)``; when the device came from ``"auto"`` and the GPU fails
+    (``RuntimeError`` whose message carries ``GPU:``, e.g. out of device memory), warn and
+    run again on the CPU. An explicit device is never retried."""
+    if resolved == "cpu" or requested != "auto":
+        return call(resolved)
+    try:
+        return call(resolved)
+    except RuntimeError as e:
+        if "GPU: " not in str(e):
+            raise
+        import warnings
+
+        warnings.warn(f"scfast: CUDA failed, falling back to the CPU: {e}", RuntimeWarning, stacklevel=3)
+        return call("cpu")
+
+
+def device_info() -> dict[str, Any]:
+    """CUDA state of this build (never raises).
+
+    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver,
+    NVRTC and cuBLAS load and a device is visible), ``device_count``, ``device_name``,
+    ``free_gb``, ``total_gb``, ``compute_capability`` (device 0; ``None`` when unavailable),
+    ``cuda_error`` (why CUDA is unavailable, else ``None``) and ``auto_device`` (what
+    ``device="auto"`` resolves to: ``"cpu"`` or ``"cuda:0"``).
+    """
+    return dict(_scfast.device_info())
 
 
 def _describe(x: Any) -> str:
@@ -162,8 +199,12 @@ def pca(
     oversample, power_iters
         Randomised-SVD accuracy settings (extra directions and subspace iterations).
     device
-        ``"auto"`` or ``"cpu"``. ``"cuda"`` raises ``RuntimeError`` until the CUDA backend
-        exists.
+        ``"auto"`` (CUDA when this build has the ``cuda`` feature and a device is usable,
+        else CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``. With ``"auto"`` a GPU
+        failure (e.g. out of device memory) falls back to the CPU with a ``RuntimeWarning``;
+        an explicit ``"cuda"`` that cannot be used raises ``RuntimeError``. On CUDA the
+        sparse products run on the device in single precision, so results match the CPU to
+        the parity thresholds rather than bitwise. See :func:`device_info`.
 
     Returns
     -------
@@ -174,17 +215,18 @@ def pca(
     stdev : float32 array (n_comps,)
         Component standard deviations d / sqrt(cells - 1) (Seurat ``Stdev``).
     """
-    _check_device(device)
+    requested, resolved = _resolve_device(device)
     n_rows, n_cols, indptr, indices, data = _csr_parts(X, "X")
     n_comps = _int("n_comps", n_comps, 1)
     if n_rows == 0 or n_cols == 0:
         raise ValueError(f"X is empty (shape {(n_rows, n_cols)})")
     if n_comps > min(n_rows, n_cols):
         raise ValueError(f"n_comps ({n_comps}) must not exceed min(cells, genes) = {min(n_rows, n_cols)}")
-    return _scfast.pca_csr(
-        n_rows, n_cols, indptr, indices, data,
-        n_comps, _seed(seed), bool(scale), _int("oversample", oversample), _int("power_iters", power_iters),
-    )
+    seed, scale = _seed(seed), bool(scale)
+    oversample, power_iters = _int("oversample", oversample), _int("power_iters", power_iters)
+    return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.pca_csr(
+        n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, dev,
+    ))
 
 
 def knn(
@@ -217,7 +259,9 @@ def knn(
         Seeds the HNSW insertion order. Exact results are deterministic; HNSW results are
         not bit-reproducible across runs (hnsw_rs inserts in parallel).
     device
-        ``"auto"`` or ``"cpu"``; see :func:`pca`.
+        ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
+        the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
+        ignored and ``k`` must be at most 129.
 
     Returns
     -------
@@ -229,7 +273,7 @@ def knn(
     """
     import scipy.sparse as sp
 
-    _check_device(device)
+    requested, resolved = _resolve_device(device)
     if sp.issparse(X):
         raise TypeError("X must be a dense array (e.g. PCA embeddings), got a scipy sparse matrix")
     a = np.asarray(X)
@@ -246,10 +290,11 @@ def knn(
     if method not in ("auto", "exact", "hnsw"):
         raise ValueError(f"method must be 'auto', 'exact' or 'hnsw', got {method!r}")
     a = np.ascontiguousarray(a, dtype=np.float32)  # no copy when already float32 C-order
-    return _scfast.knn(
-        a, k, method, _seed(seed), _int("auto_threshold", auto_threshold),
-        _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1),
-    )
+    seed, auto_threshold = _seed(seed), _int("auto_threshold", auto_threshold)
+    m, ef_construction, ef_search = _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1)
+    return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.knn(
+        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev,
+    ))
 
 
 def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:

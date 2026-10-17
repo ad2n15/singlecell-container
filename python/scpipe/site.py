@@ -523,31 +523,84 @@ def scfast_py_version() -> str | None:
     return str(getattr(scfast, "__version__", "unknown"))
 
 
-def resolve_engine(cfg: Mapping[str, Any] | None, *, scfastr: str | None, gpu_available: bool) -> tuple[str, str]:
+def scfastr_cuda() -> dict[str, bool]:
+    """CUDA state of the R package scfastR: ``{"built": bool, "available": bool}``.
+
+    Read from ``scfastR::scfast_info()`` fields ``cuda_built`` / ``cuda_available`` (a missing field,
+    a build without the CUDA feature, no Rscript, or no scfastR all give ``False``). ``available``
+    implies ``built``.
+    """
+    off = {"built": False, "available": False}
+    rs = os.environ.get("SCPIPE_RSCRIPT") or "Rscript"
+    if shutil.which(rs) is None:
+        return off
+    expr = ('if (nzchar(system.file(package = "scfastR"))) { i <- as.list(scfastR::scfast_info()); '
+            'f <- function(x) if (isTRUE(x)) "TRUE" else "FALSE"; '
+            'b <- if (is.null(i$cuda_built)) i$cuda else i$cuda_built; '
+            'cat(f(b), f(i$cuda_available), sep = " ") }')
+    try:
+        r = subprocess.run([rs, "--vanilla", "-e", expr], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return off
+    parts = r.stdout.strip().split()
+    if r.returncode != 0 or len(parts) != 2:
+        return off
+    built = parts[0] == "TRUE"
+    return {"built": built, "available": built and parts[1] == "TRUE"}
+
+
+def resolve_engine(cfg: Mapping[str, Any] | None, *, scfastr: str | None, gpu_available: bool,
+                   scfastr_cuda_available: bool = False) -> tuple[str, str]:
     """The engine a run would use, as ``(engine, reason)``; engine is ``scfast`` or ``seurat``.
 
-    ``auto`` picks scfast when scfastR is installed and the device plan is CPU (``device: cpu``, or
-    ``device: auto`` with no usable GPU), else seurat. ``engine: scfast`` without scfastR is an error
-    (``RuntimeError`` with an install hint); with ``device: gpu`` it is a config error already.
+    CPU plan (``device: cpu``, or ``device: auto`` with no usable GPU): ``auto`` picks scfast when
+    scfastR is installed, else seurat; ``engine: scfast`` without scfastR is an error (``RuntimeError``
+    with an install hint).
+
+    GPU plan (docs/scfast-integration.md "Pipeline wiring"): ``engine_gpu: rapids`` keeps the rapids
+    exchange (seurat); ``engine_gpu: scfast`` runs scfast in process on CUDA and is an error unless
+    scfastR was built with CUDA and a device is visible (``scfastr_cuda_available``); ``engine_gpu: auto``
+    picks scfast when that holds, else seurat. ``engine: seurat`` is always seurat; ``engine: scfast``
+    on a GPU plan that cannot run scfast on CUDA is an error.
     """
     cfg = cfg or {}
     engine = cfg.get("engine", "auto")
+    engine_gpu = cfg.get("engine_gpu", "auto")
     device = cfg.get("device", "auto")
+    install = ("engine: scfast needs the R package scfastR; install it with "
+               "`R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80)")
     if engine == "seurat":
         return "seurat", "engine: seurat"
-    if engine == "scfast":
-        if device == "gpu":
-            raise RuntimeError("engine: scfast has no GPU backend; it cannot be combined with device: gpu")
-        if scfastr is None:
-            raise RuntimeError("engine: scfast needs the R package scfastR; install it with "
-                               "`R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80)")
-        return "scfast", "engine: scfast"
     gpu_plan = device == "gpu" or (device == "auto" and gpu_available)
-    if gpu_plan:
-        return "seurat", "device plan is GPU (scfast has no CUDA backend)"
-    if scfastr is None:
-        return "seurat", "scfastR is not installed"
-    return "scfast", "scfastR is installed and the device plan is CPU"
+    cuda_ok = scfastr is not None and scfastr_cuda_available
+    if engine == "scfast" and device != "gpu":
+        # As before: an explicit scfast with device: auto is scfast (S2's own plan decides the device;
+        # on a GPU plan it then needs scfastR with CUDA, which the R side checks).
+        if scfastr is None:
+            raise RuntimeError(install)
+        if gpu_plan and cuda_ok and engine_gpu != "rapids":
+            return "scfast", "engine: scfast; device plan is GPU and scfastR has a usable CUDA device"
+        return "scfast", "engine: scfast"
+    if not gpu_plan:
+        if scfastr is None:
+            return "seurat", "scfastR is not installed"
+        return "scfast", "scfastR is installed and the device plan is CPU"
+    if engine_gpu == "rapids":
+        if engine == "scfast":
+            raise RuntimeError("engine: scfast has no GPU backend with engine_gpu: rapids; "
+                               "use device: cpu, engine_gpu: auto/scfast, or engine: auto/seurat")
+        return "seurat", "device plan is GPU and engine_gpu: rapids (exchange)"
+    if cuda_ok:
+        return "scfast", ("device plan is GPU and scfastR has a usable CUDA device"
+                          + ("; engine_gpu: scfast" if engine_gpu == "scfast" else " (engine_gpu: auto)"))
+    why = ("scfastR is not installed" if scfastr is None
+           else "scfastR was built without CUDA or no CUDA device is visible")
+    if engine_gpu == "scfast":
+        raise RuntimeError(f"engine_gpu: scfast needs scfastR built with CUDA and a visible device ({why}); "
+                           "use engine_gpu: auto/rapids or device: cpu")
+    if engine == "scfast":
+        raise RuntimeError(f"engine: scfast has no GPU backend here ({why}); it cannot be combined with device: gpu")
+    return "seurat", f"device plan is GPU and {why} (rapids exchange)"
 
 
 def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
@@ -655,6 +708,15 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     add("engine", "scfast (python)", py_ver is not None,
         py_ver or "not importable (optional; `maturin develop --release -m rust/scfast-py/Cargo.toml`)",
         required=False)
+    cuda = scfastr_cuda() if r_ver is not None else {"built": False, "available": False}
+    add("engine", "scfastR cuda built", cuda["built"],
+        "yes" if cuda["built"] else ("scfastR is not installed" if r_ver is None else
+                                     "no (optional; build scfastR with the cuda feature for engine_gpu: scfast)"),
+        required=False)
+    add("engine", "CUDA device visible (scfastR)", cuda["available"],
+        "yes" if cuda["available"] else ("n/a: scfastR not built with cuda" if not cuda["built"] else
+                                         "no CUDA device visible to scfastR"),
+        required=False)
     try:
         from .gpu_core import gpu_available as _gpu_ok
 
@@ -662,10 +724,13 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     except Exception:
         gpu_ok = False
     try:
-        eng, why = resolve_engine(cfg, scfastr=r_ver, gpu_available=gpu_ok)
-        add("engine", "engine (resolved)", True, f"{eng} ({why}; engine: {cfg.get('engine', 'auto')})", required=False)
+        eng, why = resolve_engine(cfg, scfastr=r_ver, gpu_available=gpu_ok, scfastr_cuda_available=cuda["available"])
+        add("engine", "engine (resolved)", True,
+            f"{eng} ({why}; engine: {cfg.get('engine', 'auto')}, engine_gpu: {cfg.get('engine_gpu', 'auto')})",
+            required=False)
     except RuntimeError as e:
-        add("engine", "engine (resolved)", False, str(e), required=cfg.get("engine") == "scfast")
+        add("engine", "engine (resolved)", False, str(e),
+            required=cfg.get("engine") == "scfast" or cfg.get("engine_gpu") == "scfast")
     # Open Targets
     ot = cfg.get("opentargets") or {}
     if ot.get("enabled", True) is False:

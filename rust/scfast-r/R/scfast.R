@@ -62,17 +62,41 @@
   invisible(object)
 }
 
-# CUDA is a later phase (docs/RUST_ENGINE.md section 6); "auto" means CPU in this build.
+# PCA / kNN device (docs/scfast-integration.md Phase 6). Validates the string and resolves
+# it to the device the kernels will run on: "cpu", or "cuda:<i>" when scfastR was built with
+# the `cuda` feature and a CUDA device is usable ("auto" picks it; an explicit "cuda" that is
+# not usable is an error). The requested string is kept as attribute "requested" so callers
+# can fall back to the CPU on a GPU failure only when the user asked for "auto".
 .check_device <- function(device) {
+  if (!is.null(attr(device, "requested"))) return(invisible(device)) # already resolved
   .check_string(device, "device")
   device <- tolower(device)
-  if (!device %in% c("auto", "cpu", "cuda")) {
-    stop("'device' must be \"auto\", \"cpu\" or \"cuda\"", call. = FALSE)
+  if (!grepl("^(auto|cpu|cuda|gpu)(:[0-9]+)?$", device) || device %in% c("auto:0", "cpu:0")) {
+    stop("'device' must be \"auto\", \"cpu\", \"cuda\" or \"cuda:<index>\"", call. = FALSE)
   }
-  if (device == "cuda" && !isTRUE(rs_info()$cuda)) {
-    stop("scfastR was built without CUDA support; use device = \"cpu\" or \"auto\"", call. = FALSE)
+  if (startsWith(device, "cuda") || startsWith(device, "gpu")) {
+    if (!isTRUE(rs_info()$cuda_built)) {
+      stop("scfastR was built without CUDA support; use device = \"cpu\" or \"auto\"", call. = FALSE)
+    }
   }
-  invisible("cpu")
+  resolved <- .rust(rs_device(device))
+  attr(resolved, "requested") <- device
+  invisible(resolved)
+}
+
+# Run `fn(device)`; when the device came from "auto" and the GPU fails (an "scfast <kernel>:
+# GPU: ..." error, e.g. out of device memory), warn and run again on the CPU.
+.with_cpu_fallback <- function(device, fn) {
+  requested <- attr(device, "requested") %||% device
+  device <- as.character(device)
+  if (device == "cpu" || requested != "auto") return(fn(device))
+  tryCatch(fn(device), scfast_error = function(e) {
+    msg <- conditionMessage(e)
+    if (!grepl("^scfast [a-z_]+: GPU: ", msg)) stop(e)
+    warning(sprintf("scfast: CUDA failed, falling back to the CPU: %s", sub("^scfast [a-z_]+: GPU: ", "", msg)),
+            call. = FALSE)
+    fn("cpu")
+  })
 }
 
 # Any sparse/dense numeric matrix -> dgCMatrix. A dgCMatrix (or subclass, e.g. Graph) is
@@ -113,20 +137,26 @@
 #' @param npcs Number of components.
 #' @param seed Random seed (non-negative whole number). Same seed, same result.
 #' @param oversample,power.iters Randomised SVD settings; `NULL` keeps the engine defaults.
+#' @param device `"auto"` (CUDA when scfastR was built with the `cuda` feature and a device
+#'   is usable, else CPU), `"cpu"`, `"cuda"` or `"cuda:<index>"`. With `"auto"`, a GPU
+#'   failure (e.g. out of device memory) falls back to the CPU with a warning. On CUDA the
+#'   sparse products run on the device in single precision (results match the CPU to the
+#'   parity thresholds, not bitwise).
 #' @return A list with `embeddings` (cells x npcs, `U * d` as in Seurat), `loadings`
-#'   (genes x npcs), `stdev` (`d / sqrt(n_cells - 1)`), and the per-gene `gene_mean` and
-#'   `gene_sd` used for scaling.
+#'   (genes x npcs), `stdev` (`d / sqrt(n_cells - 1)`), the per-gene `gene_mean` and
+#'   `gene_sd` used for scaling, and `device` (`"cpu"` or `"cuda:<index>"`).
 #' @export
-scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters = NULL) {
+scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters = NULL, device = "auto") {
   dgc <- .as_dgc(dgc, "dgc")
   npcs <- .check_count(npcs, "npcs")
   seed <- .check_seed(seed)
   if (!is.null(oversample)) .check_count(oversample, "oversample", min = 0)
   if (!is.null(power.iters)) .check_count(power.iters, "power.iters", min = 0)
+  device <- .check_device(device)
   if (npcs >= min(dim(dgc))) {
     stop(sprintf("'npcs' (%d) must be less than min(genes, cells) = %d", npcs, min(dim(dgc))), call. = FALSE)
   }
-  res <- .pca_native(dgc, npcs, seed, oversample, power.iters)
+  res <- .pca_native(dgc, npcs, seed, oversample, power.iters, device)
   pcs <- paste0("PC_", seq_len(ncol(res$embeddings)))
   dimnames(res$embeddings) <- list(colnames(dgc), pcs)
   dimnames(res$loadings) <- list(rownames(dgc), pcs)
@@ -134,9 +164,11 @@ scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters 
   res
 }
 
-.pca_native <- function(dgc, npcs, seed, oversample = NULL, power.iters = NULL) {
-  .rust(rs_pca_csc(dgc@p, dgc@i, dgc@x, nrow(dgc), ncol(dgc), as.integer(npcs), as.numeric(seed),
-                   as.integer(oversample %||% -1L), as.integer(power.iters %||% -1L)))
+.pca_native <- function(dgc, npcs, seed, oversample = NULL, power.iters = NULL, device = "cpu") {
+  .with_cpu_fallback(device, function(dev) {
+    .rust(rs_pca_csc(dgc@p, dgc@i, dgc@x, nrow(dgc), ncol(dgc), as.integer(npcs), as.numeric(seed),
+                     as.integer(oversample %||% -1L), as.integer(power.iters %||% -1L), dev))
+  })
 }
 
 #' k nearest neighbours of every row of a matrix
@@ -151,11 +183,15 @@ scfast_pca <- function(dgc, npcs = 30, seed = 0, oversample = NULL, power.iters 
 #'   bit-reproducible across runs; exact search is.
 #' @param auto.threshold Cell count where `"auto"` switches to HNSW; `NULL` keeps the
 #'   engine default.
-#' @return A list with `idx` (n x k integer, 1-based, the cell itself first) and `dist`
-#'   (n x k Euclidean distances).
+#' @param device `"auto"`, `"cpu"`, `"cuda"` or `"cuda:<index>"` (see [scfast_pca()]). On
+#'   CUDA the search is exact brute force (cuBLAS GEMM + top-k) at every size and `method`
+#'   is ignored; `k` must be at most 129.
+#' @return A list with `idx` (n x k integer, 1-based, the cell itself first), `dist`
+#'   (n x k Euclidean distances) and `device` (`"cpu"` or `"cuda:<index>"`).
 #' @export
 scfast_knn <- function(mat, k = 20, method = "auto", seed = 0, hnsw.m = 16,
-                       ef.construction = 200, ef.search = NULL, auto.threshold = NULL) {
+                       ef.construction = 200, ef.search = NULL, auto.threshold = NULL,
+                       device = "auto") {
   if (is.data.frame(mat)) mat <- as.matrix(mat)
   if (!is.matrix(mat) || !is.numeric(mat)) {
     stop("'mat' must be a numeric matrix (cells x dimensions)", call. = FALSE)
@@ -174,8 +210,11 @@ scfast_knn <- function(mat, k = 20, method = "auto", seed = 0, hnsw.m = 16,
   ef.construction <- .check_count(ef.construction, "ef.construction")
   ef.search <- .check_count(ef.search %||% max(64L, 2L * k), "ef.search")
   if (!is.null(auto.threshold)) .check_count(auto.threshold, "auto.threshold", min = 0)
-  res <- .rust(rs_knn(mat, nrow(mat), ncol(mat), k, method, seed, hnsw.m, ef.construction,
-                      ef.search, as.numeric(auto.threshold %||% -1)))
+  device <- .check_device(device)
+  res <- .with_cpu_fallback(device, function(dev) {
+    .rust(rs_knn(mat, nrow(mat), ncol(mat), k, method, seed, hnsw.m, ef.construction,
+                 ef.search, as.numeric(auto.threshold %||% -1), dev))
+  })
   rownames(res$idx) <- rownames(res$dist) <- rownames(mat)
   res
 }
@@ -277,8 +316,10 @@ scfast_leiden <- function(graph, resolution = 0.5, seed = 0, n.iter = 2, device 
 #' Engine information
 #'
 #' @return A list: package and engine versions, rayon thread count (set the environment
-#'   variable `RAYON_NUM_THREADS` before the first scfast call to change it), and whether
-#'   CUDA was compiled in.
+#'   variable `RAYON_NUM_THREADS` before the first scfast call to change it), and the CUDA
+#'   state: `cuda_built` (feature compiled in; `cuda` is the same value), `cuda_available`
+#'   (driver loads and a device is visible), `device_count`, `device_name`, `free_gb`,
+#'   `total_gb` (device 0) and `cuda_error` (why CUDA is unavailable, else `NULL`).
 #' @export
 scfast_info <- function() {
   c(list(package = as.character(utils::packageVersion("scfastR"))), rs_info())
@@ -365,7 +406,9 @@ scfast_info <- function() {
 #' @param npcs Number of components (capped at `min(features, cells) - 1`, as in Seurat).
 #' @param seed.use Random seed (`seed` also works, by partial matching).
 #' @param reduction.name,reduction.key Name and key of the stored reduction.
-#' @param device `"auto"`, `"cpu"` or `"cuda"` (CUDA is not built yet; `"auto"` = CPU).
+#' @param device `"auto"` (CUDA when scfastR was built with the `cuda` feature and a device
+#'   is usable, else CPU), `"cpu"`, `"cuda"` or `"cuda:<index>"`; see [scfast_pca()]. The
+#'   device used is recorded in `Misc(reduction)$scfast$device`.
 #' @param oversample,power.iters Randomised SVD accuracy knobs (extra random directions and
 #'   power iterations); `NULL` keeps the engine defaults (10 and 4). Raise them (e.g. 40 and
 #'   8) when the spectrum is flat beyond the leading components and later PCs must match
@@ -386,7 +429,7 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
   seed.use <- .check_seed(seed.use, "seed.use")
   .check_string(reduction.name, "reduction.name")
   .check_string(reduction.key, "reduction.key")
-  .check_device(device)
+  device <- .check_device(device)
   if (!is.null(oversample)) .check_count(oversample, "oversample", min = 0)
   if (!is.null(power.iters)) .check_count(power.iters, "power.iters", min = 0)
   .check_flag(verbose, "verbose")
@@ -398,7 +441,7 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
     warning(sprintf("npcs (%d) reduced to %d (min(features, cells) - 1)", npcs, max.pcs), call. = FALSE)
     npcs <- max.pcs
   }
-  run <- .timed(.pca_native(input$m, npcs, seed.use, oversample, power.iters))
+  run <- .timed(.pca_native(input$m, npcs, seed.use, oversample, power.iters, device))
   res <- run$value
   pcs <- paste0(reduction.key, seq_len(ncol(res$embeddings)))
   dimnames(res$embeddings) <- list(input$cells, pcs)
@@ -415,13 +458,13 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
       total.variance = length(input$features),
       scfast = list(kernel = "implicit_scaled_pca", engine = scfast_info()$version,
                     seed = seed.use, oversample = oversample, power.iters = power.iters,
-                    seconds = run$seconds,
+                    seconds = run$seconds, device = res$device,
                     gene_mean = res$gene_mean, gene_sd = res$gene_sd)
     )
   )
   if (verbose) {
-    message(sprintf("scfast PCA: %d cells x %d features, %d PCs in %.2f s (no ScaleData)",
-                    length(input$cells), length(input$features), npcs, run$seconds))
+    message(sprintf("scfast PCA: %d cells x %d features, %d PCs in %.2f s on %s (no ScaleData)",
+                    length(input$cells), length(input$features), npcs, run$seconds, res$device))
   }
   object[[reduction.name]] <- reduc
   object <- SeuratObject::LogSeuratCommand(object = object)
@@ -445,7 +488,8 @@ RunPCAFast <- function(object, assay = NULL, features = NULL, npcs = 30, seed.us
 #' @param graph.name `NULL` (default names), or two names (kNN graph, SNN graph). As in
 #'   Seurat, a single name stores only the kNN graph.
 #' @param random.seed Seed for HNSW (exact search ignores it).
-#' @param device `"auto"`, `"cpu"` or `"cuda"` (CUDA is not built yet).
+#' @param device `"auto"`, `"cpu"`, `"cuda"` or `"cuda:<index>"`; see [scfast_knn()]. The
+#'   SNN step always runs on the CPU.
 #' @param verbose Print progress messages.
 #' @return The Seurat object with the graphs added.
 #' @export
@@ -466,7 +510,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
     stop("'method' must be one of \"auto\", \"exact\", \"hnsw\"", call. = FALSE)
   }
   random.seed <- .check_seed(random.seed, "random.seed")
-  .check_device(device)
+  device <- .check_device(device)
   .check_flag(verbose, "verbose")
 
   reduc <- object[[reduction]]
@@ -495,7 +539,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
   }
 
   t0 <- proc.time()[["elapsed"]]
-  nn <- scfast_knn(data.use, k = k.param, method = method, seed = random.seed)
+  nn <- scfast_knn(data.use, k = k.param, method = method, seed = random.seed, device = device)
   t.knn <- proc.time()[["elapsed"]] - t0
   # Same construction as Seurat: row i has a 1 at each of its k neighbours (itself included).
   nn.graph <- Matrix::sparseMatrix(i = rep(seq_len(n), times = k.param), j = as.vector(nn$idx),
@@ -514,8 +558,8 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
     object[[graph.name[[ii]]]] <- graphs[[ii]]
   }
   if (verbose) {
-    message(sprintf("scfast neighbours: %d cells, k = %d, %d dims: kNN %.2f s, SNN %.2f s",
-                    n, k.param, length(dims), t.knn, t.snn))
+    message(sprintf("scfast neighbours: %d cells, k = %d, %d dims: kNN %.2f s on %s, SNN %.2f s",
+                    n, k.param, length(dims), t.knn, nn$device, t.snn))
   }
   object <- SeuratObject::LogSeuratCommand(object = object)
   object

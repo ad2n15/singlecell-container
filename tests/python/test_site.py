@@ -453,3 +453,105 @@ def test_doctor_checks_engine(tmp_path, monkeypatch):
     ch = by_name(S.doctor_checks({"engine": "auto", "device": "cpu"}))
     assert ch[("engine", "engine (resolved)")]["detail"].startswith("seurat")
     assert not any(c["required"] for k, c in ch.items() if k[0] == "engine")
+
+
+# GPU-plan engine resolution: engine_gpu and the scfastR CUDA state (docs/scfast-integration.md "Pipeline wiring")
+
+
+@pytest.mark.parametrize(
+    "cfg,cuda,expect",
+    [
+        ({"device": "gpu"}, True, "scfast"),
+        ({"device": "gpu"}, False, "seurat"),
+        ({"device": "auto"}, True, "scfast"),
+        ({"device": "gpu", "engine_gpu": "auto"}, True, "scfast"),
+        ({"device": "gpu", "engine_gpu": "rapids"}, True, "seurat"),
+        ({"device": "gpu", "engine_gpu": "scfast"}, True, "scfast"),
+        ({"device": "gpu", "engine": "seurat", "engine_gpu": "auto"}, True, "seurat"),
+        ({"device": "gpu", "engine": "scfast", "engine_gpu": "scfast"}, True, "scfast"),
+        ({"device": "gpu", "engine": "scfast"}, True, "scfast"),
+        ({"device": "cpu", "engine_gpu": "scfast"}, False, "scfast"),
+        ({"device": "cpu", "engine_gpu": "rapids"}, True, "scfast"),
+    ],
+)
+def test_resolve_engine_gpu_plan(cfg, cuda, expect):
+    eng, why = S.resolve_engine(cfg, scfastr="0.1.0", gpu_available=True, scfastr_cuda_available=cuda)
+    assert eng == expect
+    if expect == "scfast" and cfg.get("device") != "cpu":
+        assert "CUDA" in why
+
+
+def test_resolve_engine_gpu_plan_errors_and_defaults():
+    # default: a GPU plan without CUDA keeps the rapids exchange, with no CUDA info passed at all
+    assert S.resolve_engine({"device": "gpu"}, scfastr="0.1.0", gpu_available=True)[0] == "seurat"
+    assert S.resolve_engine({"device": "gpu"}, scfastr=None, gpu_available=True, scfastr_cuda_available=True)[0] == "seurat"
+    with pytest.raises(RuntimeError, match="engine_gpu: scfast needs scfastR built with CUDA"):
+        S.resolve_engine({"device": "gpu", "engine_gpu": "scfast"}, scfastr="0.1.0", gpu_available=True)
+    with pytest.raises(RuntimeError, match="engine_gpu: scfast needs scfastR built with CUDA"):
+        S.resolve_engine({"device": "gpu", "engine_gpu": "scfast"}, scfastr=None, gpu_available=True,
+                         scfastr_cuda_available=True)
+    with pytest.raises(RuntimeError, match="no GPU backend"):
+        S.resolve_engine({"device": "gpu", "engine": "scfast"}, scfastr="0.1.0", gpu_available=True)
+    with pytest.raises(RuntimeError, match="no GPU backend"):
+        S.resolve_engine({"device": "gpu", "engine": "scfast", "engine_gpu": "rapids"}, scfastr="0.1.0",
+                         gpu_available=True, scfastr_cuda_available=True)
+
+
+def test_scfastr_cuda_parses_scfast_info(tmp_path, monkeypatch):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    rs = bindir / "Rscript"
+
+    def fake(out: str, code: int = 0):
+        rs.write_text(f"#!/bin/sh\nprintf '%s' '{out}'\nexit {code}\n")
+        rs.chmod(0o755)
+
+    monkeypatch.setenv("SCPIPE_RSCRIPT", str(rs))
+    fake("TRUE TRUE")
+    assert S.scfastr_cuda() == {"built": True, "available": True}
+    fake("TRUE FALSE")
+    assert S.scfastr_cuda() == {"built": True, "available": False}
+    fake("FALSE FALSE")
+    assert S.scfastr_cuda() == {"built": False, "available": False}
+    fake("FALSE TRUE")  # available without built is never reported
+    assert S.scfastr_cuda() == {"built": False, "available": False}
+    fake("")  # scfastR not installed: the expression prints nothing
+    assert S.scfastr_cuda() == {"built": False, "available": False}
+    fake("TRUE TRUE", code=1)
+    assert S.scfastr_cuda() == {"built": False, "available": False}
+    monkeypatch.setenv("SCPIPE_RSCRIPT", str(bindir / "missing"))
+    assert S.scfastr_cuda() == {"built": False, "available": False}
+
+
+def test_scfastr_cuda_real_rscript_reports_no_cuda_here():
+    # this machine has no CUDA: whatever is installed, the answer is "not available" and never raises
+    c = S.scfastr_cuda()
+    assert set(c) == {"built", "available"} and c["available"] is False
+
+
+def test_doctor_checks_engine_cuda_lines(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    monkeypatch.setattr(S, "scfastr_version", lambda: "0.1.0")
+    monkeypatch.setattr(S, "scfast_py_version", lambda: None)
+    monkeypatch.setattr(S, "scfastr_cuda", lambda: {"built": True, "available": True})
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "gpu"}))
+    assert ch[("engine", "scfastR cuda built")]["ok"] and ch[("engine", "CUDA device visible (scfastR)")]["ok"]
+    assert ch[("engine", "engine (resolved)")]["detail"].startswith("scfast (device plan is GPU")
+    assert "engine_gpu: auto" in ch[("engine", "engine (resolved)")]["detail"]
+    monkeypatch.setattr(S, "scfastr_cuda", lambda: {"built": True, "available": False})
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "gpu"}))
+    assert ch[("engine", "scfastR cuda built")]["ok"] and not ch[("engine", "CUDA device visible (scfastR)")]["ok"]
+    assert ch[("engine", "engine (resolved)")]["detail"].startswith("seurat")
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "gpu", "engine_gpu": "scfast"}))
+    r = ch[("engine", "engine (resolved)")]
+    assert not r["ok"] and r["required"] and "engine_gpu: scfast" in r["detail"]
+    monkeypatch.setattr(S, "scfastr_cuda", lambda: {"built": False, "available": False})
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "cpu"}))
+    assert not ch[("engine", "scfastR cuda built")]["ok"] and not ch[("engine", "scfastR cuda built")]["required"]
+    assert not ch[("engine", "CUDA device visible (scfastR)")]["required"]
+    assert ch[("engine", "engine (resolved)")]["detail"].startswith("scfast")
+    # without scfastR the CUDA lines are off and Rscript is never asked
+    monkeypatch.setattr(S, "scfastr_version", lambda: None)
+    monkeypatch.setattr(S, "scfastr_cuda", lambda: (_ for _ in ()).throw(AssertionError("not called")))
+    ch = by_name(S.doctor_checks({"engine": "auto", "device": "cpu"}))
+    assert ch[("engine", "scfastR cuda built")]["detail"] == "scfastR is not installed"
