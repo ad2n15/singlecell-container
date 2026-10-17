@@ -9,7 +9,7 @@
 //!
 //! | Kernel          | Device memory                                        | Products |
 //! |-----------------|------------------------------------------------------|----------|
-//! | PCA (`pca/cuda.rs`) | CSR of the HVG matrix (f32 values, u32 columns, i64 row offsets), gene mean / 1/sd, one cells x l and a few genes x l f32 buffers | NVRTC CSR SpMM kernels `zv` (Z V) and `ztu` (Z^T U, scatter with atomics), mean / 1/sd correction fused in |
+//! | PCA (`pca/cuda.rs`) | CSR of the HVG matrix (f32 values, u32 columns, i64 row offsets), gene mean / 1/sd, one cells x l and a few genes x l f32 buffers, genes x genes f64 Gram | NVRTC `xtx` (X^T X, f64 atomics), CSR SpMM kernels `zv` (Z V) and `ztu` (Z^T U, scatter with atomics), mean / 1/sd correction fused in |
 //! | kNN (`knn/cuda.rs`) | centred cells x dims (f32), squared norms, block x cap candidate buffer | NVRTC `knn`: fused scores and top-k, 4 queries per thread, compiled per (dims, cap) |
 //!
 //! Dense steps of the randomised SVD (TSQR, the small SVD) and the exact re-ranking of kNN
@@ -206,6 +206,28 @@ extern "C" __global__ void ztu(const long long* __restrict__ indptr,
   }
 }
 
+// X^T X for CSR X (cells x genes): g[min(a, b) * p + max(a, b)] += X[i, a] X[i, b] over the
+// pairs of stored entries in each row (one block per row). Only the upper triangle is
+// written; g (genes x genes, f64) must be zeroed first. f64 atomics: the mean correction
+// that follows (X^T X - n mu mu^T) cancels digits, which f32 sums cannot spare.
+extern "C" __global__ void xtx(const long long* __restrict__ indptr,
+                               const unsigned int* __restrict__ indices,
+                               const float* __restrict__ vals,
+                               double* __restrict__ g,
+                               int p) {
+  const long long s = indptr[blockIdx.x], e = indptr[blockIdx.x + 1];
+  const int r = (int)(e - s);
+  for (int a = threadIdx.x; a < r; a += blockDim.x) {
+    const unsigned int ja = indices[s + a];
+    const double va = vals[s + a];
+    for (int b = a; b < r; ++b) {
+      const unsigned int jb = indices[s + b];
+      const unsigned int lo = min(ja, jb), hi = max(ja, jb);
+      atomicAdd(&g[(size_t)lo * p + hi], va * (double)vals[s + b]);
+    }
+  }
+}
+
 // Z^T U = diag(inv_sd) (X^T U - mu colsum^T): the mean / 1/sd correction, on device.
 // colsum[c] = sum_i U[i, c] comes from the host (it is exact there in f64).
 extern "C" __global__ void ztu_finish(const float* __restrict__ acc,
@@ -318,6 +340,7 @@ pub(crate) struct Gpu {
     pub zv: CudaFunction,
     pub ztu: CudaFunction,
     pub ztu_finish: CudaFunction,
+    pub xtx: CudaFunction,
     /// `knn` compiled per (dims, cap).
     knn: Mutex<HashMap<(usize, usize), CudaFunction>>,
     pub ordinal: usize,
@@ -354,7 +377,8 @@ impl Gpu {
         let zv = f("zv")?;
         let ztu = f("ztu")?;
         let ztu_finish = f("ztu_finish")?;
-        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, knn: Mutex::new(HashMap::new()), ordinal })
+        let xtx = f("xtx")?;
+        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, xtx, knn: Mutex::new(HashMap::new()), ordinal })
     }
 
     /// The `knn` kernel for `d` dims and `cap` candidates, and the reference points per
@@ -434,7 +458,7 @@ mod tests {
     /// Rust side loads is defined, and the compile-time constants agree.
     #[test]
     fn kernel_source_names_every_entry_point() {
-        for name in ["zv", "ztu", "ztu_finish"] {
+        for name in ["zv", "ztu", "ztu_finish", "xtx"] {
             assert!(KERNELS.contains(&format!("__global__ void {name}(")), "kernel {name} missing");
         }
         assert!(KNN_KERNEL.contains("__global__ void knn("));

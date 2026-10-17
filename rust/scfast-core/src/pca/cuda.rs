@@ -9,7 +9,9 @@
 //!   zeroes the genes x l accumulator, runs `ztu` (atomic scatter) and `ztu_finish` (mean
 //!   and 1/sd correction), downloads the genes x l result.
 //!
-//! All device buffers are allocated at construction for the fixed `l`, so the working set
+//! - `gram`: Z^T Z in one pass (`xtx` kernel), for the Gram path in `pca.rs`.
+//!
+//! All device buffers (but the Gram matrix) are allocated at construction for the fixed `l`, so the working set
 //! is known up front and checked against free memory; an allocation that still fails is
 //! reported as `Error::Gpu("out of device memory ...")`.
 
@@ -111,6 +113,32 @@ fn upload_chunked<T: DeviceRepr>(gpu: &Gpu, len: usize, chunk: impl Fn(&std::ops
     }
     gpu.sync(step)?;
     Ok(dev)
+}
+
+impl CudaScaledOp {
+    /// Z^T Z (genes x genes, f64) in one pass over X: X^T X on the device, then the mean and
+    /// 1/sd correction on the host, `diag(inv_sd) (X^T X - n mu mu^T) diag(inv_sd)`.
+    pub fn gram(&self) -> Result<Mat<f64>> {
+        let (n, p) = (self.n, self.p);
+        self.gpu.ensure_fits(8 * p * p, &format!("Gram matrix of {p} genes"))?;
+        let mut host = vec![0f64; p * p];
+        guard("CUDA PCA X^T X", || {
+            let mut g = self.gpu.alloc_zeros::<f64>(p * p, "alloc Gram matrix")?;
+            let pi = p as i32;
+            let cfg = cudarc::driver::LaunchConfig { grid_dim: (n as u32, 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+            // SAFETY: argument types and order match the `xtx` kernel; one block per row.
+            unsafe {
+                self.gpu.stream.launch_builder(&self.gpu.xtx).arg(&self.indptr).arg(&self.indices).arg(&self.vals).arg(&mut g).arg(&pi).launch(cfg)
+            }
+            .map_err(|e| drv_err("launch xtx", e))?;
+            self.gpu.download_into(&g, &mut host, "download X^T X")
+        })?;
+        let nf = n as f64;
+        Ok(Mat::from_fn(p, p, |a, b| {
+            let (lo, hi) = (a.min(b), a.max(b));
+            (host[lo * p + hi] - nf * self.mean[a] * self.mean[b]) * self.inv_sd[a] * self.inv_sd[b]
+        }))
+    }
 }
 
 impl super::Operator for CudaScaledOp {

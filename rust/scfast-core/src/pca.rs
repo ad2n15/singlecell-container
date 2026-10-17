@@ -150,7 +150,11 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
         #[cfg(feature = "cuda")]
         Device::Cuda(ordinal) => {
             let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, l, ordinal)?;
-            randomized_svd(&op, l, params.power_iters, params.seed)?
+            if p <= GRAM_MAX_GENES {
+                gram_svd(&op, l, params.power_iters, params.seed)?
+            } else {
+                randomized_svd(&op, l, params.power_iters, params.seed)?
+            }
         }
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => {
@@ -253,6 +257,44 @@ fn randomized_svd<O: Operator>(
 
 /// Embeddings `Q V_b[:, :k] diag(d_k signs)` as row-major f32, parallel over fixed row
 /// chunks (each a sequential faer product, so thread-count independent).
+/// Largest gene count for which the CUDA path forms the Gram matrix (8 p^2 bytes on the
+/// device; 0.5 GiB at this size).
+#[cfg(feature = "cuda")]
+const GRAM_MAX_GENES: usize = 8192;
+
+/// [`randomized_svd`] for the device: Z^T Z (genes x genes) in one pass over the data,
+/// subspace iteration on it on the host (each step equals one `apply_t` + `apply`, so the
+/// same `power_iters` gives the same accuracy), Rayleigh-Ritz on the l x l projection, and
+/// one `apply` for the cell scores. Avoids 2 (power_iters + 1) cells x l round trips and
+/// their host QR factorisations. Returns (U, V, S, I) so that `embed` gives Z V.
+#[cfg(feature = "cuda")]
+fn gram_svd(
+    op: &cuda::CudaScaledOp,
+    l: usize,
+    power_iters: usize,
+    seed: u64,
+) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
+    let g = op.gram()?;
+    let (n, p) = (op.nrows(), op.ncols());
+    let mut v = dense::gaussian(p, l, seed);
+    for _ in 0..=power_iters {
+        dense::orthonormalize(v.as_mut());
+        v = &g * &v;
+    }
+    dense::orthonormalize(v.as_mut());
+    let h = v.transpose() * &g * &v;
+    let (w, lambda, _) = dense::thin_svd(h.as_ref())?;
+    let vr = &v * &w;
+    let s: Vec<f64> = lambda.iter().map(|&x| x.max(0.0).sqrt()).collect();
+    let mut u = faer::Mat::<f64>::zeros(n, l);
+    op.apply(vr.as_ref(), u.as_mut())?;
+    for (c, &sc) in s.iter().enumerate() {
+        let inv = if sc > 0.0 { 1.0 / sc } else { 0.0 };
+        u.col_mut(c).iter_mut().for_each(|y| *y *= inv);
+    }
+    Ok((u, vr, s, faer::Mat::<f64>::identity(l, l)))
+}
+
 fn embed(q: faer::MatRef<'_, f64>, vb: faer::MatRef<'_, f64>, d: &[f64], signs: &[f64], k: usize) -> RowMajor {
     use rayon::prelude::*;
     const ROWS: usize = 1024;
