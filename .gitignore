@@ -17,6 +17,7 @@ __pycache__/
 # keep small test inputs and example sheets despite the *.csv / *.h5ad rules above
 !config/examples/*.csv
 !tests/fixtures/**/*.csv
+!tests/integration/stage_configs/*.csv
 !tests/fixtures/**/*.h5ad
 # Python caches
 __pycache__/

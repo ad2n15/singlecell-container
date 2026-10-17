@@ -78,7 +78,7 @@ install.packages(c("harmony", "qs2"))
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e "python[harmony,test]" pyyaml
+pip install -e "python[harmony,test]"
 # on a machine with an NVIDIA GPU (CUDA 12), for the GPU path:
 pip install -e "python[gpu]"
 ```

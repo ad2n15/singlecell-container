@@ -1,10 +1,11 @@
 # singlecell: agentic Seurat pipeline — design spec
 
-Status: **draft for review** · Version 0.4 · 17 Oct 2026
+Status: **draft for review** · Version 0.5 · 17 Oct 2026
+Changes in 0.5: stages are run by the built-in `scpipe` runner (Python, `state.json` checkpoints) instead of Nextflow; no hosted CI (tests run locally or on the HPC); stages S0–S2 are implemented (see `docs/stages-spec.md`).
 Changes in 0.4: runs directly on the Iridis X L4 **login node** (the only node with internet), without a SLURM job; accepts any dataset format and size; pluggable LLM providers with Claude Haiku 4.5 as default and a hard £30 budget guard.
 Changes in 0.3: everything runs on **one internet-connected node** (first target: an Iridis X L4 node). No node-to-node hand-offs. CPU ⇄ GPU switching within the node is kept.
 Changes in 0.2: first target site is University of Southampton Iridis X (SLURM + Apptainer); portability to any HPC.
-Scope: design only. No pipeline code has been written against this spec yet.
+Scope: design, plus the implemented parts: the exchange format (`docs/exchange-spec.md`) and stages S0–S2 (`docs/stages-spec.md`).
 
 ## 1. Goals
 
@@ -350,30 +351,31 @@ First target: **the Iridis X L4 login node, run directly** (Apptainer, no schedu
 | `slurm` (also `pbs`, `lsf`, `sge`) | One scheduler job on a compute node that has internet | A site's compute nodes have internet |
 | `split` | Heavy stages as offline scheduler jobs; agents and Open Targets on the internet node | A site doesn't allow compute on its internet node |
 
-In every mode Nextflow runs the stages with the `local` executor and `-resume` checkpoints. At a gate the run exits cleanly, and `scpipe approve` resumes it.
+In every mode the built-in `scpipe` runner executes the stages one after another and records each in `state.json` with a fingerprint of its inputs and settings, so a rerun skips finished stages. At a gate the run exits cleanly, and `scpipe approve` resumes it.
 
 ### 7.2 Site profile
 
-A new site is one file, `conf/sites/<site>.config`. A sketch for Iridis X (limits to be agreed with the Iridis team):
+A new site is one small YAML file, `conf/sites/<site>.yaml`, that supplies defaults for the `execution`, `resources` and `container` sections of `config.yaml`. Until `scpipe init-site` exists (build step 7), the same keys are set directly in `config.yaml`, as in `config/examples/config.yaml`. A sketch for Iridis X (limits to be agreed with the Iridis team):
 
-```groovy
-params.site = [
-  execution   : 'direct',             // direct | slurm | pbs | lsf | sge | split
-  max_threads : 8,                    // cap for a shared login node
-  max_memory  : '64 GB',
-  gpu_mem_cap : '20 GB',              // leave headroom on the shared L4
-  nice        : 10,
-  scratch     : '/scratch/$USER/scpipe'
-]
-process.executor = 'local'
-apptainer { enabled = true; autoMounts = true; runOptions = '--nv'; cacheDir = "$SCPIPE_CACHE/apptainer" }
+```yaml
+site: iridisx
+execution: direct            # direct | slurm | pbs | lsf | sge | split
+resources:
+  threads: 8                 # cap for a shared login node
+  max_memory_gb: 64
+  gpu_mem_cap_gb: 20         # leave headroom on the shared L4
+  nice: 10
+scratch: /scratch/$USER/scpipe
+container:
+  runtime: apptainer         # apptainer | singularity | docker | none
+  options: ["--nv"]
 ```
 
-The same pipeline runs with `-profile iridisx`, `-profile workstation` or `-profile docker`.
+The same pipeline runs at any site by pointing `config.yaml` at a different site file.
 
 ### 7.3 Making it easy for any user
 
-A thin `scpipe` command wraps Nextflow and the scheduler, so users never need to learn either:
+The `scpipe` command is the only thing users run. It drives the stages itself and submits to the scheduler when the site needs it:
 
 | Command | What it does |
 |---|---|
@@ -391,8 +393,8 @@ A thin `scpipe` command wraps Nextflow and the scheduler, so users never need to
 | No GPU | Runs every step with `device: cpu` (pure Seurat): slower, same stages and outputs |
 | A smaller or larger GPU | Picks the memory plan from section 5.1 based on detected GPU memory |
 | Several GPUs | Can use rapids-singlecell's Dask mode for very large datasets |
-| Singularity instead of Apptainer | Same image; Nextflow handles both |
-| Docker only | `-profile docker`, same image |
+| Singularity instead of Apptainer | Same image; the site file names the runtime |
+| Docker only | `container.runtime: docker`, same image |
 
 ### 7.5 Container
 
@@ -402,7 +404,7 @@ A thin `scpipe` command wraps Nextflow and the scheduler, so users never need to
 
 ### 7.6 Storage
 
-- **Run directory:** scratch, for Nextflow work files, exchange files and gate bundles.
+- **Run directory:** scratch, for stage outputs, `state.json`, exchange files and gate bundles.
 - **Results:** project storage.
 - **`refs/` cache:** downloaded once and shared across runs.
 
@@ -412,7 +414,7 @@ All three locations are set in the site file.
 
 - PBMC 3k as an end-to-end smoke test, runnable on any site in minutes.
 - A 50k-cell subset run in both CPU and GPU modes and compared (ARI) before any full run.
-- CI runs the PBMC test with `-profile docker,test` on every pull request.
+- No hosted CI (we decided not to use GitHub Actions). The unit tests and the end-to-end stage test run locally or on the HPC; `tests/README.md` lists the commands.
 
 ## 8. Repository layout (proposed)
 
@@ -422,9 +424,8 @@ R/                 Seurat stages, exchange format (R side), plotting theme
 python/            GPU steps, exchange format (Python side)
 agents/            QC, context, annotation, interpretation, reviewer; tool definitions; prompts
 opentargets/       GraphQL client, queries, cache
-workflow/          Nextflow pipeline, gate logic
-conf/sites/        one site file per HPC (iridisx.config first), plus workstation and docker profiles
-scpipe/            the scpipe command-line wrapper
+scpipe/ (python/)  runner, config, resources, QC rules engine, gate logic
+conf/sites/        one site file per HPC (iridisx.yaml first), plus workstation and docker examples
 containers/        recipe for the single image
 tests/             exchange round-trip tests, policy tests, PBMC smoke test
 docs/DESIGN.md     this document
@@ -437,7 +438,7 @@ docs/DESIGN.md     this document
 3. **QC agent + reviewer + gate mechanics**, the template for all later gates.
 4. **Evidence (S3), context agent, annotation agent.**
 5. **DGE (S4), Open Targets, interpretation agent.**
-6. **Final report, explorer, CI tests.**
+6. **Final report, explorer, local test suite.**
 7. **Portability:** `scpipe init-site` and `doctor`, plus a second site profile tested to prove the site-file approach.
 
 ## 10. Open questions
@@ -466,4 +467,4 @@ Still open:
 | LLM spend exceeds the £30 limit | Ledger-based hard stop before any call that would exceed it; rules-only fallback with a human gate |
 | A future user's chosen LLM handles tools poorly | `scpipe doctor` tool-use test; rules and reviewer still enforce policy in code |
 | Data leaves the cluster | Agents receive only aggregated tables and gene names; no counts or sample metadata beyond IDs |
-| Open Targets schema changes | Queries pinned per release; cached responses; schema check in CI |
+| Open Targets schema changes | Queries pinned per release; cached responses; schema check in the local test suite |

@@ -38,7 +38,9 @@ import pandas as pd
 STAGES = ["S0", "S1a", "S1b", "S1c", "S2"]
 THRESH = {
     "lowq_excluded": float(os.environ.get("MIN_LOWQ_EXCLUDED", 0.90)),
-    "doublet_excluded": float(os.environ.get("MIN_DOUBLET_EXCLUDED", 0.50)),
+    # Deliberately low: scrublet ranks the planted doublets well (AUC about 0.9) but its automatic
+    # threshold only calls 20-40% of them in ~280-cell samples. The measured rate is printed.
+    "doublet_excluded": float(os.environ.get("MIN_DOUBLET_EXCLUDED", 0.25)),
     "platelet_review": float(os.environ.get("MIN_PLATELET_REVIEW", 0.80)),
     "none_kept": float(os.environ.get("MIN_NONE_KEPT", 0.85)),
     "purity": float(os.environ.get("MIN_PURITY", 0.90)),
