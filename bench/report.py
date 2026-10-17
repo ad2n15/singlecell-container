@@ -198,8 +198,22 @@ def main(argv=None) -> int:
     if envs:
         e = json.loads(envs[0].read_text())
         gpu = ", ".join(g["name"] if isinstance(g, dict) else str(g) for g in e.get("gpus", [])) or "none"
+        commits = sorted({c for c in df.get("commit", pd.Series(dtype=str)).dropna().unique() if c})
         lines += [f"Node `{e.get('node')}` · {e.get('cpu_model')} · {e.get('logical_cpus')} logical CPUs · GPU: {gpu} · "
-                  f"commit `{e.get('commit')}`", ""]
+                  f"commit{'s' if len(commits) > 1 else ''} {', '.join(f'`{c}`' for c in commits) or 'unknown'}", ""]
+        if len(commits) > 1:
+            lines += ["**Warning:** records in this run come from more than one commit, so engines may not have run the "
+                      "same harness code. Rerun on a single commit for publishable numbers.", ""]
+        for p in envs:
+            if p.name.startswith("seurat_"):
+                s = json.loads(p.read_text())
+                backend = s.get("leiden_backend")
+                if backend:
+                    lines += [f"Seurat {s.get('packages', {}).get('Seurat', '?')} Leiden backend: {backend.split(' (')[0]}."
+                              + (" Seurat 5.0.x builds a dense cells × cells matrix for Leiden, which inflates its cluster-step "
+                                 "time and memory; compare cluster-step numbers with care." if "reticulate" in backend else ""),
+                              ""]
+                break
     unavailable = df[df["status"] == "unavailable"]["engine"].unique().tolist()
     failed = df[df["status"] == "error"][["engine", "cells", "step", "error"]].drop_duplicates()
     if unavailable:
