@@ -443,6 +443,11 @@ def llm_settings(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     if not raw:
         return None
     out = copy.deepcopy(LLM_DEFAULTS)
+    # The default api_key_env is Anthropic's; it must not leak into other providers.
+    user_default = {k: v for k, v in raw.items() if k in LLM_ROLE_KEYS}
+    user_default.update(raw.get("default") or {})
+    if user_default.get("provider") not in (None, "anthropic") and "api_key_env" not in user_default:
+        out["default"]["api_key_env"] = None
     for k, v in raw.items():
         if k in LLM_ROLE_KEYS:  # flat shorthand: llm: {provider: ..., model: ...} means llm.default
             out["default"][k] = v
@@ -450,8 +455,6 @@ def llm_settings(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
             out[k].update(v)
         else:
             out[k] = v
-    if out["default"].get("provider") != "anthropic":
-        out["default"].setdefault("api_key_env", None)
     return out
 
 

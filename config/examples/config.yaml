@@ -42,8 +42,8 @@ resources:
 doublets:
   method: scrublet              # scrublet | scdblfinder (needs the R package) | none
 
-# How S2 treats cells that S1c marked `review` (until the QC gate exists in
-# build step 3). keep is the conservative choice: nothing is lost, and the
+# How S2 treats cells that S1c (and the QC gate G1) marked `review`.
+# keep is the conservative choice: nothing is lost, and the
 # cells are easy to find and drop later (their reasons are in
 # S1/qc_decisions.tsv.gz).
 qc:
@@ -67,3 +67,59 @@ n_neighbors: 20
 
 clustering:
   resolution: 0.5               # Leiden resolution; changing it reruns only S2
+
+# ---------------------------------------------------------------------------
+# Site, gates, LLM, DGE, Open Targets, report (docs/USER_GUIDE.md section 2).
+# ---------------------------------------------------------------------------
+
+site: iridisx                   # a name in conf/sites/<name>.yaml, or a path; supplies defaults for
+                                # execution, resources, container, scheduler and scratch (this file wins per key)
+execution: direct               # direct | slurm | pbs | lsf | sge | split
+
+# Who gets the last word at each gate: auto (reviewer-approved agent proposal continues),
+# review (always stops for a human), escalate (always a human, no LLM calls).
+gates:
+  G1: auto                      # QC decisions
+  G2: review                    # tissue / disease context (speculative, so a human by default)
+  G3: auto                      # cluster annotation
+  G4: review                    # DGE interpretation
+
+# Omit this whole section for rules-only gates (every gate then waits for a human).
+llm:
+  default:
+    provider: anthropic         # anthropic | openai_compatible (vLLM, Ollama, ...) | mock (tests)
+    model: claude-haiku-4-5
+    api_key_env: ANTHROPIC_API_KEY   # the NAME of the environment variable; the key is never written anywhere
+    # base_url: http://localhost:11434/v1   # openai_compatible only
+  roles: {}                     # per-role overrides: qc_worker, context_worker, annotation_worker,
+                                # interpretation_worker, reviewer (e.g. a stronger model for the reviewer)
+  budget:
+    per_run_limit: 5            # GBP; a call that would cross a limit is not made
+    total_limit: 30             # GBP across all runs (ledger in ~/.scpipe/ledger.json)
+    usd_to_gbp: 0.78
+  replay: false                 # true: reuse logged outputs for identical prompts (no calls, no cost)
+
+# Pseudobulk differential expression (S4). Conditions and covariates are samples.csv columns.
+dge:
+  sample_col: sample_id
+  condition_col: condition
+  group_by: cell_type_broad     # or cluster
+  contrasts:
+    - {name: treated_vs_control, numerator: treated, denominator: control, covariates: [batch]}
+  min_cells_per_sample: 20
+  min_replicates: 2
+  method: deseq2                # limma_voom is the fallback when DESeq2 is missing
+  padj: 0.05
+  lfc: 0.5
+
+opentargets:
+  enabled: true
+  offline: false                # true: read the cache only, never the network
+  max_genes_per_direction: 50
+  cache_dir: refs/opentargets   # shared across runs; entries never expire
+
+report:
+  explorer_max_cells: 100000    # explorer.html subsamples above this
+  expr_genes: 200               # variable genes exported for colour-by-gene
+  expr_max_cells: 20000
+  top_markers: 10
