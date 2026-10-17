@@ -110,7 +110,7 @@ SAMPLE_BYTES = 1024**2
 
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "S0": ("object_format", "samples_resolved", "sample_columns"),
-    "S1a": ("object_format", "policy.protected_populations"),
+    "S1a": ("object_format", "doublets.method", "policy.protected_populations"),
     "S1b": ("doublets.method", "seed", "device"),
     "S1c": ("policy",),
     "S2": (

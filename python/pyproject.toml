@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scpipe"
 version = "0.1.0"
-description = "Seurat <-> AnnData exchange format and GPU core step for the singlecell pipeline"
+description = "scpipe: runner, QC engine, exchange format and GPU core step for the singlecell pipeline"
 requires-python = ">=3.10"
 dependencies = [
     "anndata>=0.10",
@@ -16,7 +16,13 @@ dependencies = [
     "pandas",
     "igraph",
     "leidenalg",
+    "pyyaml",
+    "scikit-learn",
+    "scikit-image",
 ]
+
+[project.scripts]
+scpipe = "scpipe.runner:main"
 
 [project.optional-dependencies]
 harmony = ["harmonypy"]
