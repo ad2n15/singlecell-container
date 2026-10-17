@@ -25,7 +25,8 @@ Doublets (``doublets.method``):
 
 Engine (top-level ``engine``, default ``auto``): when it is not ``seurat`` and
 S1a (the scfast path, ``R/stages/doublets_scfast.R``) already wrote
-``doublet_score``, ``doublet_call`` and ``pre_cluster``, S1b is a pass-through:
+``doublet_score``, ``doublet_call`` and ``pre_cluster``, S1b is a pass-through
+(with ``auto`` only if ``metrics_counts.h5ad`` is absent, as it is on that path):
 it only checks the table, logs the method, and leaves ``qc_metrics.tsv.gz``
 untouched (no ``metrics_counts.h5ad`` exists on that path). With
 ``engine: seurat``, or when the columns are missing (S1a resolved ``auto`` to
@@ -192,7 +193,9 @@ def run(run_dir: Path, cfg: dict[str, Any]) -> None:
     tsv = s1 / "qc_metrics.tsv.gz"
     method = (cfg.get("doublets") or {}).get("method", "scrublet")
     engine = cfg.get("engine") or "auto"
-    if tsv.exists() and engine != "seurat":
+    # scfast path: S1a wrote the columns and no h5ad. With engine auto, an h5ad next to the columns means
+    # the Seurat path produced them (S1b rerun on its own output), so that case keeps recomputing.
+    if tsv.exists() and engine != "seurat" and (engine == "scfast" or not h5.exists()):
         have = pd.read_csv(tsv, sep="\t", nrows=0).columns
         if all(c in have for c in S1B_COLUMNS):
             log(f"engine {engine}: S1a already wrote {', '.join(S1B_COLUMNS)} "
