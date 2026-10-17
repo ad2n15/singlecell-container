@@ -17,7 +17,7 @@
 
 scp_source_stages <- function(repo) {
   source(file.path(repo, "R", "exchange", "exchange.R"))
-  for (f in c("common.R", "s0_ingest.R", "s1a_metrics.R", "s2_core.R", "s3_evidence.R", "s4_dge.R", "s5_export.R"))
+  for (f in c("common.R", "s0_ingest.R", "doublets_scfast.R", "s1a_metrics.R", "s2_core.R", "s3_evidence.R", "s4_dge.R", "s5_export.R"))
     source(file.path(repo, "R", "stages", f))
   invisible(repo)
 }

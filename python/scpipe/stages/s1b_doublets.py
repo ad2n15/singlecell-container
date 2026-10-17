@@ -23,6 +23,14 @@ Doublets (``doublets.method``):
   (the R implementation is not part of build step 2).
 * ``none``: ``doublet_score`` NA, ``doublet_call`` FALSE.
 
+Engine (top-level ``engine``, default ``auto``): when it is not ``seurat`` and
+S1a (the scfast path, ``R/stages/doublets_scfast.R``) already wrote
+``doublet_score``, ``doublet_call`` and ``pre_cluster``, S1b is a pass-through:
+it only checks the table, logs the method, and leaves ``qc_metrics.tsv.gz``
+untouched (no ``metrics_counts.h5ad`` exists on that path). With
+``engine: seurat``, or when the columns are missing (S1a resolved ``auto`` to
+Seurat), the behaviour below applies.
+
 Pre-clustering: ``PRECLUSTER_N_HVG`` (2,000, or all genes if fewer)
 highly variable genes (scanpy ``seurat`` flavour on the log-normalised X),
 then ``scpipe.gpu_core.run`` on a temporary slim exchange file with 20 PCs,
@@ -182,10 +190,17 @@ def run(run_dir: Path, cfg: dict[str, Any]) -> None:
     s1 = run_dir / "S1"
     h5 = s1 / "metrics_counts.h5ad"
     tsv = s1 / "qc_metrics.tsv.gz"
+    method = (cfg.get("doublets") or {}).get("method", "scrublet")
+    engine = cfg.get("engine") or "auto"
+    if tsv.exists() and engine != "seurat":
+        have = pd.read_csv(tsv, sep="\t", nrows=0).columns
+        if all(c in have for c in S1B_COLUMNS):
+            log(f"engine {engine}: S1a already wrote {', '.join(S1B_COLUMNS)} "
+                f"(doublets.method={method}); S1b is a pass-through, {tsv.name} left unchanged")
+            return
     for p in (h5, tsv):
         if not p.exists():
             raise StageError(f"input {p} not found (S1a must run first)")
-    method = (cfg.get("doublets") or {}).get("method", "scrublet")
     device_setting = cfg.get("device", "auto")
     seed = int(cfg.get("seed", 0))
 

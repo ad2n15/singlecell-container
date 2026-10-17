@@ -31,6 +31,10 @@ gpu = ["rapids-singlecell"]
 test = ["pytest"]
 report = ["matplotlib"]
 llm = ["requests"]
+# Python bindings of the Rust engine: the scfast wheel is built from rust/scfast-py (not on PyPI):
+#   maturin develop --release -m rust/scfast-py/Cargo.toml
+# This extra only pulls in the build tool and umap-learn used by `gpu_core --engine rust`.
+scfast = ["maturin>=1.5", "umap-learn"]
 
 [tool.setuptools.packages.find]
 where = ["."]

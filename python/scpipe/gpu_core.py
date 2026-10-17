@@ -16,7 +16,13 @@ CLI::
 
     python -m scpipe.gpu_core --in slim.h5ad --out results.h5ad \
         [--n-pcs 30 --n-neighbors 15 --resolution 0.5 --batch-key batch \
-         --seed 0 --device auto --max-value 10 --run-id RUN]
+         --seed 0 --device auto --engine {rapids,scanpy,rust} --max-value 10 --run-id RUN]
+
+Engines: ``rapids`` (GPU, rapids-singlecell) and ``scanpy`` (CPU) are the two classic branches; with no
+``--engine`` the device picks one as before (gpu -> rapids, cpu -> scanpy). ``rust`` uses the Python module
+``scfast`` (rust/scfast-py) for PCA, kNN, SNN and Leiden; UMAP still comes from umap-learn. It is CPU
+only (``--device gpu`` is an error) and does not apply ``--max-value`` clipping. ``distances`` in the
+results are the kNN distances and ``connectivities`` the SNN (Jaccard) graph, not Scanpy's fuzzy weights.
 """
 
 from __future__ import annotations
@@ -32,10 +38,13 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from .exchange import ExchangeError, read_exchange, write_exchange
 
-__all__ = ["run", "gpu_available", "main"]
+__all__ = ["run", "gpu_available", "main", "ENGINES"]
+
+ENGINES = ("rapids", "scanpy", "rust")
 
 STAGE = "S2_gpu_core"
 CLUSTER_KEY = "leiden"
@@ -72,6 +81,19 @@ def _resolve_device(device: str) -> str:
     if device == "gpu" and not ok:
         raise DeviceError(f"device='gpu' requested but the GPU path is unavailable: {reason}")
     return "gpu" if ok else "cpu"
+
+
+def _import_scfast():
+    try:
+        import scfast
+    except ImportError as e:
+        raise RuntimeError(
+            "--engine rust needs the Python module scfast, which is not importable "
+            f"({type(e).__name__}: {e}); install it with "
+            "`pip install maturin && maturin develop --release -m rust/scfast-py/Cargo.toml` "
+            "(needs cargo >= 1.80), or use --engine scanpy / rapids"
+        ) from e
+    return scfast
 
 
 def _check_harmony_cpu() -> None:
@@ -122,13 +144,30 @@ def run(
     device: str = "auto",
     max_value: float | None = 10.0,
     run_id: str | None = None,
+    engine: str | None = None,
 ) -> dict[str, Any]:
     """Run the core embedding/clustering steps on a slim exchange file.
 
     Returns a summary dict: device, n_cells, n_genes, n_pcs (used), n_clusters,
     timings_s (per step), peak_host_rss_bytes and, on GPU, peak_gpu_pool_bytes.
     """
-    used = _resolve_device(device)
+    if engine is not None and engine not in ENGINES:
+        raise ValueError(f"engine must be one of {list(ENGINES)}, got {engine!r}")
+    if engine == "rust":
+        if device == "gpu":
+            raise DeviceError("engine 'rust' (scfast) has no GPU backend; use --device cpu or auto")
+        scfast = _import_scfast()  # fail before reading anything
+        used = "cpu"
+    else:
+        used = _resolve_device(device)
+        if engine == "rapids" and used not in ("gpu", "cpu-as-gpu"):
+            raise DeviceError("engine 'rapids' needs a usable GPU; use --engine scanpy or --device auto/gpu")
+        if engine == "scanpy" and used == "gpu":
+            used = "cpu"
+        if engine is None:
+            engine = "rapids" if used == "gpu" else "scanpy"
+        if used == "cpu-as-gpu":
+            engine = "scanpy"  # test-only override: the scanpy branch runs, reported as device cpu-as-gpu
     timings: dict[str, float] = {}
 
     @contextmanager
@@ -159,12 +198,49 @@ def run(
     rep = "X_harmony" if batch_key is not None else "X_pca"
     # Scaling with zero-centering densifies anyway (DESIGN 5.1: ~8 KB/cell at
     # 2,000 HVGs); do it explicitly so both branches start from dense float32.
-    if hasattr(adata.X, "toarray"):
-        adata.X = adata.X.toarray()
-    adata.X = np.asarray(adata.X, dtype=np.float32)
+    if engine != "rust":
+        if hasattr(adata.X, "toarray"):
+            adata.X = adata.X.toarray()
+        adata.X = np.asarray(adata.X, dtype=np.float32)
     gpu_pool_peak = None
 
-    if used == "gpu":
+    if engine == "rust":
+        import scipy.sparse as sp
+
+        # scfast.pca scales each gene implicitly (no dense scaled matrix, no max_value clipping).
+        X = sp.csr_matrix(adata.X, dtype=np.float32)
+        X.sum_duplicates()
+        X.sort_indices()
+        with timed("pca"):
+            pcs, _loadings, _sdev = scfast.pca(X, n_comps=n_comps, seed=seed)
+        adata.obsm["X_pca"] = np.asarray(pcs, dtype=np.float32)
+        if batch_key is not None:
+            with timed("harmony"):
+                adata.obsm["X_harmony"] = _harmony_cpu(adata, batch_key, seed)
+        emb = np.ascontiguousarray(adata.obsm[rep], dtype=np.float32)
+        k = int(min(n_neighbors, adata.n_obs))
+        with timed("neighbors"):
+            knn_idx, knn_dist = scfast.knn(emb, k=k, seed=seed)
+            snn = scfast.snn(knn_idx)
+            n = adata.n_obs
+            rows = np.repeat(np.arange(n), k - 1)
+            dist = sp.csr_matrix((np.asarray(knn_dist)[:, 1:].ravel(), (rows, np.asarray(knn_idx)[:, 1:].ravel())), shape=(n, n))
+            conn = snn.tolil()
+            conn.setdiag(0)
+            conn = conn.tocsr()
+            conn.eliminate_zeros()
+            adata.obsp["distances"] = dist.astype(np.float32)
+            adata.obsp["connectivities"] = conn.astype(np.float32)
+        with timed("leiden"):
+            labels = scfast.leiden(snn, resolution=resolution, seed=seed, n_iterations=2)
+            adata.obs[CLUSTER_KEY] = pd.Categorical([str(int(x)) for x in labels])
+        with timed("umap"):
+            import umap
+
+            adata.obsm["X_umap"] = np.asarray(
+                umap.UMAP(n_neighbors=k, random_state=seed, n_components=2).fit_transform(emb), dtype=np.float32
+            )
+    elif used == "gpu":
         import cupy as cp
         import rapids_singlecell as rsc
 
@@ -233,6 +309,7 @@ def run(
             "seed": int(seed),
             "max_value": float(max_value) if max_value is not None else -1.0,
             "use_rep": rep,
+            "engine": engine,
         }
         write_exchange(
             res,
@@ -247,6 +324,7 @@ def run(
 
     summary: dict[str, Any] = {
         "device": used,
+        "engine": engine,
         "n_cells": int(res.n_obs),
         "n_genes": int(adata.n_vars),
         "n_pcs": n_comps,
@@ -273,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch-key", default=None)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", choices=("auto", "gpu", "cpu"), default="auto")
+    p.add_argument("--engine", choices=ENGINES, default=None,
+                   help="rapids | scanpy | rust (scfast); default: by device (gpu -> rapids, cpu -> scanpy)")
     p.add_argument("--max-value", type=float, default=10.0)
     p.add_argument("--run-id", default=None)
     a = p.parse_args(argv)
@@ -288,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             device=a.device,
             max_value=a.max_value,
             run_id=a.run_id,
+            engine=a.engine,
         )
     except (DeviceError, ExchangeError, ValueError, RuntimeError) as e:
         print(json.dumps({"error": type(e).__name__, "message": str(e)}), file=sys.stderr)

@@ -1,6 +1,7 @@
 # scpipe single image (docs/DESIGN.md 7.5): CUDA 12 Ubuntu base, R 4.4+ with
 # Seurat 5, BPCells, presto, DESeq2, limma, leidenbase, hdf5r, harmony, and the
-# Python package with the [gpu,harmony] extras (rapids-singlecell, CellTypist).
+# Python package with the [gpu,harmony] extras (rapids-singlecell, CellTypist), plus the Rust
+# engine (scfastR for R, scfast for Python).
 #
 #   docker build -t scpipe:latest -f containers/Dockerfile .
 #   docker run --rm --gpus all -v $PWD:/work -v /scratch:/scratch scpipe:latest scpipe doctor
@@ -54,6 +55,18 @@ RUN pip install --no-cache-dir --upgrade pip wheel \
          "/opt/scpipe/python[gpu,harmony,test]" jinja2 matplotlib requests pyyaml celltypist \
          "cupy-cuda12x" "cudf-cu12" "cuml-cu12" "cugraph-cu12" \
     && python -c "import scpipe, rapids_singlecell, harmonypy, celltypist, jinja2, matplotlib"
+
+# Rust toolchain (cargo >= 1.80) for the scfast engine (docs/scfast-integration.md), then scfastR and scfast.
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && cargo --version
+COPY rust /opt/scpipe/rust
+RUN R CMD INSTALL /opt/scpipe/rust/scfast-r \
+    && Rscript -e 'stopifnot(requireNamespace("scfastR", quietly = TRUE))' \
+    && pip install --no-cache-dir maturin umap-learn \
+    && maturin build --release -m /opt/scpipe/rust/scfast-py/Cargo.toml -o /tmp/wheels \
+    && pip install --no-cache-dir /tmp/wheels/scfast-*.whl && rm -rf /tmp/wheels /opt/scpipe/rust/target \
+    && python -c "import scfast; print('scfast', scfast.__version__)"
 
 ENV SCPIPE_REPO_ROOT=/opt/scpipe \
     OMP_NUM_THREADS=8 \

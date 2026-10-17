@@ -274,3 +274,36 @@ def test_detect_format(tmp_path):
         p = tmp_path / name
         p.write_text("")
         assert C.detect_format(p) == fmt, name
+
+
+def test_engine_default_and_values(tmp_path):
+    proj = make_project(tmp_path)
+    assert C.load_config(proj / "config.yaml")["engine"] == "auto"
+    for v in ("auto", "scfast", "seurat"):
+        p = make_project(tmp_path / v, {"engine": v})
+        assert C.load_config(p / "config.yaml")["engine"] == v
+
+
+def test_engine_invalid_value(tmp_path):
+    proj = make_project(tmp_path, {"engine": "rapids"})
+    with pytest.raises(C.ConfigError, match="engine must be one of"):
+        C.load_config(proj / "config.yaml")
+
+
+def test_engine_scfast_gpu_conflict(tmp_path):
+    proj = make_project(tmp_path, {"engine": "scfast", "device": "gpu"})
+    with pytest.raises(C.ConfigError, match="engine: scfast has no GPU backend"):
+        C.load_config(proj / "config.yaml")
+    # auto and seurat are fine with device: gpu; scfast is fine with cpu/auto
+    for extra in ({"engine": "auto", "device": "gpu"}, {"engine": "seurat", "device": "gpu"},
+                  {"engine": "scfast", "device": "cpu"}, {"engine": "scfast", "device": "auto"}):
+        p = make_project(tmp_path / (extra["engine"] + extra["device"]), extra)
+        C.load_config(p / "config.yaml")
+
+
+def test_engine_in_stage_fingerprints_and_example():
+    from scpipe import runner as R
+
+    for st in ("S1a", "S1b", "S2"):
+        assert "engine" in R.STAGE_CONFIG_KEYS[st]
+    assert yaml.safe_load((REPO / "config" / "examples" / "config.yaml").read_text())["engine"] == "auto"

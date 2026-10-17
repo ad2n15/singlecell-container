@@ -5,7 +5,7 @@
 #
 # Same software list as containers/Dockerfile: CUDA 12 Ubuntu base, R 4.4+
 # with Seurat 5, BPCells, presto, DESeq2, limma, leidenbase, hdf5r, harmony;
-# Python 3.12 with the scpipe package [gpu,harmony] (rapids-singlecell,
+# Rust engine (scfastR, scfast); Python 3.12 with the scpipe package [gpu,harmony] (rapids-singlecell,
 # cupy/cudf/cuml for CUDA 12), CellTypist, jinja2, matplotlib. Not built in
 # tests. Run with --nv so the host driver is used; set container.runtime:
 # apptainer and container.image: /path/to/scpipe.sif in the site file.
@@ -22,11 +22,13 @@ From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
     conf /opt/scpipe/conf
     config /opt/scpipe/config
     docs /opt/scpipe/docs
+    rust /opt/scpipe/rust
 
 %environment
     export LANG=en_GB.UTF-8 LC_ALL=en_GB.UTF-8 TZ=Etc/UTC
     export PATH=/opt/scpipe-venv/bin:$PATH VIRTUAL_ENV=/opt/scpipe-venv
     export SCPIPE_REPO_ROOT=/opt/scpipe
+    export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
     export MPLCONFIGDIR=/tmp/mpl NUMBA_CACHE_DIR=/tmp/numba
 
 %post
@@ -62,6 +64,18 @@ From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
       "/opt/scpipe/python[gpu,harmony,test]" jinja2 matplotlib requests pyyaml celltypist \
       "cupy-cuda12x" "cudf-cu12" "cuml-cu12" "cugraph-cu12"
     python -c "import scpipe, rapids_singlecell, harmonypy, celltypist, jinja2, matplotlib"
+
+    # Rust engine (docs/scfast-integration.md): toolchain (cargo >= 1.80), scfastR for R, scfast for Python
+    export RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
+    curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+    cargo --version
+    R CMD INSTALL /opt/scpipe/rust/scfast-r
+    Rscript -e 'stopifnot(requireNamespace("scfastR", quietly = TRUE))'
+    pip install --no-cache-dir maturin umap-learn
+    maturin build --release -m /opt/scpipe/rust/scfast-py/Cargo.toml -o /tmp/wheels
+    pip install --no-cache-dir /tmp/wheels/scfast-*.whl
+    python -c "import scfast; print('scfast', scfast.__version__)"
+    rm -rf /tmp/wheels /opt/scpipe/rust/target
     rm -rf /var/lib/apt/lists/* /tmp/*
 
 %runscript
