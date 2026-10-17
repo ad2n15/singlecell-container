@@ -589,6 +589,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
 #' @param reduction Reduction to use.
 #' @param dims Dimensions of the reduction to use.
 #' @param n.neighbors Neighbours per cell, including the cell itself.
+#' @param nn.method kNN search, `"exact"`, `"hnsw"` or `"auto"` (see [scfast_knn()]).
 #' @param min.dist,spread Curve of the low-dimensional similarity.
 #' @param n.epochs `NULL`: 500 below 10,000 cells, else 200.
 #' @param negative.sample.rate,learning.rate SGD settings.
@@ -597,7 +598,7 @@ FindNeighborsFast <- function(object, reduction = "pca", dims = 1:10, k.param = 
 #' @param verbose Print progress messages.
 #' @return The Seurat object with the reduction added.
 #' @export
-RunUMAPFast <- function(object, reduction = "pca", dims = 1:10, n.neighbors = 30, min.dist = 0.3,
+RunUMAPFast <- function(object, reduction = "pca", dims = 1:10, n.neighbors = 30, nn.method = "exact", min.dist = 0.3,
                         spread = 1, n.epochs = NULL, negative.sample.rate = 5, learning.rate = 1,
                         seed.use = 42, reduction.name = "umap", reduction.key = "umap_", verbose = TRUE) {
   .check_seurat(object)
@@ -624,7 +625,7 @@ RunUMAPFast <- function(object, reduction = "pca", dims = 1:10, n.neighbors = 30
   ab <- .find_ab(spread, min.dist)
 
   run <- .timed({
-    nn <- scfast_knn(x / sqrt(rowSums(x^2)), k = k, seed = seed.use, device = "cpu")
+    nn <- scfast_knn(x / sqrt(rowSums(x^2)), k = k, method = nn.method, seed = seed.use, device = "cpu")
     .rust(rs_umap(nn$idx, nn$dist^2 / 2, x[, 1:2], n, k, ab[[1]], ab[[2]], n.epochs,
                   negative.sample.rate, learning.rate, seed.use))
   })
