@@ -1,11 +1,11 @@
 # singlecell: agentic Seurat pipeline — design spec
 
-Status: **draft for review** · Version 0.5 · 17 Oct 2026
+Status: **implemented** (as-built view in [`ARCHITECTURE.md`](ARCHITECTURE.md)) · Version 0.5 · 17 Oct 2026
 Changes in 0.5: stages are run by the built-in `scpipe` runner (Python, `state.json` checkpoints) instead of Nextflow; no hosted CI (tests run locally or on the HPC); stages S0–S2 are implemented (see `docs/stages-spec.md`).
 Changes in 0.4: runs directly on the Iridis X L4 **login node** (the only node with internet), without a SLURM job; accepts any dataset format and size; pluggable LLM providers with Claude Haiku 4.5 as default and a hard £30 budget guard.
 Changes in 0.3: everything runs on **one internet-connected node** (first target: an Iridis X L4 node). No node-to-node hand-offs. CPU ⇄ GPU switching within the node is kept.
 Changes in 0.2: first target site is University of Southampton Iridis X (SLURM + Apptainer); portability to any HPC.
-Scope: design, plus the implemented parts: the exchange format (`docs/exchange-spec.md`) and stages S0–S2 (`docs/stages-spec.md`).
+Scope: the design behind the implementation; all seven build steps (section 9) are implemented. The contracts are `exchange-spec.md`, `stages-spec.md` and `agents-spec.md`; the as-built overview is `ARCHITECTURE.md`.
 
 ## 1. Goals
 
