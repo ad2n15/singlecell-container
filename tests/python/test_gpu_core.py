@@ -1,0 +1,171 @@
+import json
+import subprocess
+import sys
+import warnings
+from pathlib import Path
+
+import anndata as ad
+import numpy as np
+import pandas as pd
+import pytest
+import scanpy as sc
+import scipy.sparse as sp
+
+from scpipe import gpu_core
+from scpipe.exchange import counts_checksum, read_exchange, validate_exchange, write_exchange
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _synthetic(n_cells=600, n_genes=400, n_groups=3, seed=0):
+    rng = np.random.default_rng(seed)
+    groups = np.repeat(np.arange(n_groups), n_cells // n_groups)
+    base = rng.gamma(2.0, 1.0, size=n_genes)
+    mu = np.tile(base, (n_groups, 1))
+    for g in range(n_groups):
+        markers = rng.choice(n_genes, 40, replace=False)
+        mu[g, markers] *= 8.0
+    lam = mu[groups] * rng.gamma(10.0, 0.1, size=(n_cells, n_genes))  # NB = gamma-Poisson
+    counts = sp.csr_matrix(rng.poisson(lam).astype(np.int32))
+    obs = pd.DataFrame(
+        {
+            "truth": pd.Categorical([f"g{g}" for g in groups]),
+            "batch": pd.Categorical(np.where(np.arange(n_cells) % 2 == 0, "b1", "b2")),
+        },
+        index=[f"CELL_{i:05d}-1" for i in range(n_cells)],
+    )
+    var = pd.DataFrame(index=[f"GENE_{i}" if i % 5 else f"MT_like_{i}" for i in range(n_genes)])
+    a = ad.AnnData(X=counts.astype(np.float32), obs=obs, var=var)
+    a.layers["counts"] = counts
+    sc.pp.normalize_total(a, target_sum=1e4)
+    sc.pp.log1p(a)
+    sc.pp.highly_variable_genes(a, n_top_genes=200)
+    return a
+
+
+@pytest.fixture(scope="module")
+def slim(tmp_path_factory):
+    a = _synthetic()
+    p = tmp_path_factory.mktemp("gc") / "slim.h5ad"
+    write_exchange(a, p, "slim", run_id="test-run", stage="S1_qc", config_hash="cfg")
+    return p, counts_checksum(a.layers["counts"]), a
+
+
+def test_run_cpu(slim, tmp_path):
+    p, checksum, a = slim
+    out = tmp_path / "results.h5ad"
+    summary = gpu_core.run(p, out, n_pcs=30, device="cpu", seed=0)
+    assert summary["device"] == "cpu"
+    assert summary["n_cells"] == 600
+    assert summary["n_clusters"] >= 2
+    assert summary["n_pcs"] == 30
+    for step in ("read", "scale", "pca", "neighbors", "leiden", "umap", "write"):
+        assert step in summary["timings_s"]
+    assert summary["peak_host_rss_bytes"] > 0
+    json.dumps(summary)
+
+    assert validate_exchange(out) == []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        r = ad.read_h5ad(out)
+    assert r.shape == (600, 0)
+    assert list(r.obs_names) == list(a.obs_names)
+    assert r.obsm["X_pca"].shape == (600, 30) and r.obsm["X_pca"].dtype == np.float32
+    assert r.obsm["X_umap"].shape == (600, 2)
+    assert "X_harmony" not in r.obsm
+    assert r.obsp["connectivities"].shape == (600, 600)
+    assert r.obsp["distances"].shape == (600, 600)
+    assert isinstance(r.obs["leiden"].dtype, pd.CategoricalDtype)
+    ex = r.uns["exchange"]
+    assert ex["mode"] == "results"
+    assert ex["cluster_key"] == "leiden"
+    assert ex["source_counts_checksum"] == checksum
+    assert ex["run_id"] == "test-run" and ex["stage"] == "S2_gpu_core" and ex["config_hash"] == "cfg"
+    # clusters recover the planted groups
+    ct = pd.crosstab(r.obs["leiden"], a.obs["truth"])
+    purity = ct.max(axis=1).sum() / ct.to_numpy().sum()
+    assert purity > 0.9
+
+
+def test_run_is_deterministic(slim, tmp_path):
+    p, _, _ = slim
+    gpu_core.run(p, tmp_path / "a.h5ad", device="cpu", seed=1)
+    gpu_core.run(p, tmp_path / "b.h5ad", device="cpu", seed=1)
+    a, b = read_exchange(tmp_path / "a.h5ad"), read_exchange(tmp_path / "b.h5ad")
+    assert list(a.obs["leiden"]) == list(b.obs["leiden"])
+    np.testing.assert_allclose(a.obsm["X_umap"], b.obsm["X_umap"])
+
+
+def test_n_pcs_capped(tmp_path):
+    a = _synthetic(n_cells=60, n_genes=40)
+    a.var["highly_variable"] = False
+    a.var.iloc[:12, a.var.columns.get_loc("highly_variable")] = True
+    p = tmp_path / "s.h5ad"
+    write_exchange(a, p, "slim")
+    s = gpu_core.run(p, tmp_path / "r.h5ad", n_pcs=50, n_neighbors=10, device="cpu")
+    assert s["n_pcs"] == 11
+    assert read_exchange(tmp_path / "r.h5ad").obsm["X_pca"].shape == (60, 11)
+
+
+def test_run_harmony_cpu(slim, tmp_path):
+    pytest.importorskip("harmonypy")
+    p, checksum, _ = slim
+    s = gpu_core.run(p, tmp_path / "h.h5ad", batch_key="batch", device="cpu")
+    assert s["harmony"] and "harmony" in s["timings_s"]
+    r = read_exchange(tmp_path / "h.h5ad")
+    assert r.obsm["X_harmony"].shape == r.obsm["X_pca"].shape
+    assert r.uns["exchange"]["source_counts_checksum"] == checksum
+
+
+def test_bad_batch_key(slim, tmp_path):
+    with pytest.raises(ValueError, match="batch_key"):
+        gpu_core.run(slim[0], tmp_path / "x.h5ad", batch_key="nope", device="cpu")
+
+
+def test_rejects_non_slim(tmp_path):
+    a = _synthetic(n_cells=60, n_genes=40)
+    p = tmp_path / "full.h5ad"
+    write_exchange(a, p, "full")
+    with pytest.raises(Exception, match="slim"):
+        gpu_core.run(p, tmp_path / "r.h5ad", device="cpu")
+
+
+def test_device_gpu_raises_without_gpu(slim, tmp_path):
+    ok, _ = gpu_core.gpu_available()
+    if ok:
+        pytest.skip("a GPU is available here")
+    with pytest.raises(gpu_core.DeviceError, match="gpu"):
+        gpu_core.run(slim[0], tmp_path / "g.h5ad", device="gpu")
+    assert not (tmp_path / "g.h5ad").exists()
+
+
+def test_auto_falls_back_to_cpu(slim, tmp_path):
+    ok, _ = gpu_core.gpu_available()
+    s = gpu_core.run(slim[0], tmp_path / "auto.h5ad", device="auto")
+    assert s["device"] == ("gpu" if ok else "cpu")
+
+
+def test_bad_device(slim, tmp_path):
+    with pytest.raises(ValueError):
+        gpu_core.run(slim[0], tmp_path / "x.h5ad", device="tpu")
+
+
+def test_cli(slim, tmp_path):
+    out = tmp_path / "cli.h5ad"
+    env_path = str(REPO / "python")
+    proc = subprocess.run(
+        [sys.executable, "-m", "scpipe.gpu_core", "--in", str(slim[0]), "--out", str(out),
+         "--n-pcs", "20", "--resolution", "0.3", "--device", "cpu", "--seed", "0"],
+        capture_output=True, text=True, env={"PYTHONPATH": env_path, "PATH": "/usr/bin:/bin"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    summary = json.loads(proc.stdout)
+    assert summary["device"] == "cpu" and summary["n_pcs"] == 20
+    assert validate_exchange(out) == []
+    if not gpu_core.gpu_available()[0]:
+        proc = subprocess.run(
+            [sys.executable, "-m", "scpipe.gpu_core", "--in", str(slim[0]), "--out", str(out), "--device", "gpu"],
+            capture_output=True, text=True, env={"PYTHONPATH": env_path, "PATH": "/usr/bin:/bin"},
+        )
+        assert proc.returncode == 2
+        assert "DeviceError" in proc.stderr
