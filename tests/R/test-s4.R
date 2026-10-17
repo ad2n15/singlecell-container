@@ -123,7 +123,8 @@ default_dge <- function(...) {
   d <- list(sample_col = "sample_id", condition_col = "condition", group_by = "cell_type_broad",
             contrasts = list(list(name = "treated_vs_control", numerator = "treated", denominator = "control",
                                   covariates = list("batch"))),
-            min_cells_per_sample = 20L, min_replicates = 2L, method = "deseq2", padj = 0.05, lfc = 0.5)
+            # 10, not the config default 20: NK has 33 donor_A cells, so its pseudo-samples hold ~16 cells
+            min_cells_per_sample = 10L, min_replicates = 2L, method = "deseq2", padj = 0.05, lfc = 0.5)
   over <- list(...)
   for (k in names(over)) d[[k]] <- over[[k]]
   d

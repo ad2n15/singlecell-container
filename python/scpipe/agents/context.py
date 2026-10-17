@@ -6,8 +6,10 @@ Tools (plain Python, input-validated):
 * ``get_cluster_evidence(cluster)`` - markers, signatures, CellTypist votes for one cluster
 * ``get_signature_table()`` - cluster x signature-set score table
 * ``search_entity(text, entity)`` - Open Targets entity search for EFO IDs
-  (``scpipe.opentargets.search_entity`` when importable and configured, else
-  ``[]`` with ``note: offline``)
+  through an ``OpenTargetsClient`` built from the bundle's ``opentargets``
+  settings (``enabled``, ``offline``, ``cache_dir``: the same file cache S4
+  uses); disabled, unreachable or a cache miss in offline mode gives ``[]``
+  with a ``note`` starting ``offline`` and the prompt says to use null IDs
 * ``propose_context(tissue, disease_candidates, celltypist_model, rationale)`` -
   the proposal tool; validated by :func:`scpipe.gates.g2_context.policy_check`.
   A rejected proposal returns ``accepted: false`` with the violations to the
@@ -64,8 +66,24 @@ def render_bundle_message(bundle: Mapping[str, Any], intro: str,
     return "\n".join(lines)
 
 
-def search_entity(text: str, entity: str) -> dict[str, Any]:
-    """Open Targets entity search; offline-safe. Tissues are not indexed by Open Targets (UBERON ids stay null)."""
+def _ot_client(settings: Mapping[str, Any] | None):
+    """An Open Targets client from the bundle's ``opentargets`` settings (G2 bundle), or the module default."""
+    from scpipe import opentargets as OT  # type: ignore
+
+    if not settings:
+        return OT.client._client()  # raises OpenTargetsError when configure() was never called
+    return OT.OpenTargetsClient(settings.get("cache_dir"), offline=bool(settings.get("offline", False)),
+                                timeout=float(settings.get("timeout_s", 30)), retries=int(settings.get("retries", 3)))
+
+
+def search_entity(text: str, entity: str, settings: Mapping[str, Any] | None = None,
+                  client: Any | None = None) -> dict[str, Any]:
+    """Open Targets entity search; offline-safe. Tissues are not indexed by Open Targets (UBERON ids stay null).
+
+    ``settings`` is the G2 bundle's ``opentargets`` block (``enabled``, ``offline``, ``cache_dir``); without it
+    the module-level client configured with ``scpipe.opentargets.configure`` is used. Every failure (no client,
+    no network, cache miss in offline mode) comes back as ``hits: []`` with a ``note`` starting ``offline``.
+    """
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be a non-empty string")
     if entity not in ENTITY_TYPES:
@@ -73,17 +91,19 @@ def search_entity(text: str, entity: str) -> dict[str, Any]:
     if entity not in _OT_ENTITIES:
         return {"query": text, "entity": entity, "hits": [],
                 "note": "Open Targets does not index tissues; leave uberon_id null unless you know it"}
+    if settings and not settings.get("enabled", True):
+        return {"query": text, "entity": entity, "hits": [], "note": "offline: Open Targets disabled in the config; use null IDs"}
     try:
-        from scpipe.opentargets import search_entity as _ot_search  # type: ignore
+        c = client if client is not None else _ot_client(settings)
+        hits = c.search_entity(text.strip(), entity)
     except ImportError:
         return {"query": text, "entity": entity, "hits": [], "note": "offline: Open Targets client not available; use null IDs"}
-    try:
-        hits = _ot_search(text.strip(), entity)
     except Exception as exc:  # noqa: BLE001 - network / cache / configuration errors never crash the gate
         return {"query": text, "entity": entity, "hits": [], "note": f"offline: {type(exc).__name__}: {exc}"}
     if hits is None:
         return {"query": text, "entity": entity, "hits": [], "note": "offline: not in the Open Targets cache; use null IDs"}
-    return {"query": text, "entity": entity, "hits": list(hits)[:10]}
+    out = [{k: h.get(k) for k in ("id", "name", "score", "entity", "description") if k in h} for h in list(hits)[:10]]
+    return {"query": text, "entity": entity, "hits": out}
 
 
 class ContextAgent(Agent):
@@ -95,6 +115,16 @@ class ContextAgent(Agent):
 
     def build_tools(self, bundle: Mapping[str, Any]) -> list[dict[str, Any]]:
         clusters = {str(c["cluster"]): c for c in bundle.get("clusters", [])}
+        ot_settings = bundle.get("opentargets") or None
+        ot_cache: dict[str, Any] = {}
+
+        def _search(text: str, entity: str) -> dict:
+            if "client" not in ot_cache and ot_settings and ot_settings.get("enabled", True):
+                try:
+                    ot_cache["client"] = _ot_client(ot_settings)  # one client (one file cache) per agent run
+                except Exception:  # noqa: BLE001 - reported per call by search_entity
+                    ot_cache["client"] = None
+            return search_entity(text, entity, ot_settings, ot_cache.get("client"))
 
         def list_clusters() -> list[dict]:
             return [{"cluster": cid, "n_cells": c.get("n_cells"), "pct_cells": c.get("pct_cells"),
@@ -131,7 +161,7 @@ class ContextAgent(Agent):
                      {"type": "object", "properties": {}, "required": []}, get_signature_table),
             tool("search_entity", "Resolve a disease name to an EFO id via Open Targets search (entity 'disease'). Empty hits with a note when offline: then use null IDs.",
                      {"type": "object", "properties": {"text": {"type": "string"}, "entity": {"type": "string", "enum": list(ENTITY_TYPES)}},
-                      "required": ["text", "entity"]}, search_entity),
+                      "required": ["text", "entity"]}, _search),
             tool("propose_context", "Submit the G2 proposal. Rejected (with violations) if it breaks policy; you then get one retry.",
                      {"type": "object", "properties": {
                          "tissue": {"type": "object", "properties": {"label": {"type": "string"}, "uberon_id": {"type": ["string", "null"]},

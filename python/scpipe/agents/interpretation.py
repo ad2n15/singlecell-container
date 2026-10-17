@@ -5,8 +5,9 @@ Tools (plain Python, input-validated):
 * ``list_contrasts()`` - contrast x group rows with DE counts and skip reasons
 * ``get_dge_top(contrast, group, direction, n)`` - top DE genes (n <= 50) with log2fc/padj
   and whether Open Targets evidence exists for each
-* ``get_target_evidence(gene)`` - every Open Targets evidence record for a gene
-  (across contrasts/groups/directions), each with its ``evidence_id``
+* ``get_target_evidence(gene)`` - the Open Targets evidence records for a gene,
+  one per ``evidence_id`` with the contrast/group/direction contexts the gene
+  is DE in (a record found under several groups is listed once)
 * ``propose_interpretation(contrasts, rationale)`` - the proposal tool; validated by
   :func:`scpipe.gates.g4_interpretation.policy_check` after
   :func:`scpipe.gates.g4_interpretation.normalize_proposal` labels every text
@@ -44,13 +45,18 @@ class InterpretationAgent(Agent):
         for c in bundle.get("contrasts", []):
             for g in c.get("groups", []):
                 groups[(str(c["contrast"]), str(g["group"]))] = g
-        evidence_by_gene: dict[str, list[dict]] = {}
+        # One record per (gene, evidence_id); the same Open Targets record found under several
+        # contrast/group/direction blocks is listed once, with every context the gene is DE in.
+        evidence_by_gene: dict[str, dict[str, dict]] = {}
         for (cname, gname), g in groups.items():
             for dirn in G4.DIRECTIONS:
                 for rec in (g.get("opentargets") or {}).get(dirn, []):
+                    gene = str(rec.get("gene"))
                     for e in rec.get("evidence") or []:
-                        evidence_by_gene.setdefault(str(rec.get("gene")), []).append(
-                            dict(e, contrast=cname, group=gname, direction=dirn, log2fc=rec.get("log2fc")))
+                        eid = str(e.get("evidence_id"))
+                        entry = evidence_by_gene.setdefault(gene, {}).setdefault(eid, dict(e, contexts=[]))
+                        entry["contexts"].append({"contrast": cname, "group": gname, "direction": dirn,
+                                                  "log2fc": rec.get("log2fc")})
         gene_dirs = bundle.get("gene_directions") or {}
 
         def _group(contrast: str, group: str) -> dict:
@@ -87,7 +93,7 @@ class InterpretationAgent(Agent):
         def get_target_evidence(gene: str) -> dict:
             if not isinstance(gene, str) or not gene.strip():
                 raise ValueError("gene must be a non-empty string")
-            recs = evidence_by_gene.get(gene.strip(), [])
+            recs = list(evidence_by_gene.get(gene.strip(), {}).values())
             return {"gene": gene, "n_evidence": len(recs), "evidence": recs,
                     "note": None if recs else "no Open Targets evidence recorded for this gene"}
 

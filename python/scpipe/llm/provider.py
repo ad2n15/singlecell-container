@@ -50,6 +50,8 @@ __all__ = [
 JSON_TOOL = "respond_json"
 PROVIDERS = ("anthropic", "openai_compatible", "mock", "bedrock", "vertex")
 DEFAULT_MODEL = "claude-haiku-4-5"
+FLAT_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
+             "temperature", "json_mode", "default_usage")
 
 
 class ProviderError(RuntimeError):
@@ -172,6 +174,9 @@ def parse_json_text(text: str) -> Any:
 def role_settings(cfg_llm: Mapping[str, Any], role: str) -> dict[str, Any]:
     """``llm.default`` with ``llm.roles.<role>`` layered on top."""
     base = dict(cfg_llm.get("default") or {})
+    for k in FLAT_KEYS:  # llm: {provider: ..., model: ...} is a shorthand for llm.default
+        if k in cfg_llm and k not in base:
+            base[k] = cfg_llm[k]
     base.setdefault("provider", "anthropic")
     base.setdefault("model", DEFAULT_MODEL)
     if base["provider"] == "anthropic":

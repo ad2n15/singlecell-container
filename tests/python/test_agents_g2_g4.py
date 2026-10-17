@@ -62,14 +62,20 @@ def llm_cfg(role: str, script: list[dict], reviewer: list[dict] | None = None) -
 
 
 def tool_results(provider) -> list[dict]:
-    """Every tool_result block the provider saw, parsed."""
+    """Every tool_result block the provider saw, parsed, in conversation order.
+
+    Each provider call carries the whole conversation so far, so the last call
+    holds every result the model was shown (an accepted proposal's result ends
+    the loop and is never sent back, so it is not here).
+    """
     out = []
-    for c in provider.calls:
-        for m in c["messages"]:
-            if m["role"] == "user" and isinstance(m["content"], list):
-                for b in m["content"]:
-                    if b.get("type") == "tool_result":
-                        out.append(dict(b, parsed=json.loads(b["content"])))
+    if not provider.calls:
+        return out
+    for m in provider.calls[-1]["messages"]:
+        if m["role"] == "user" and isinstance(m["content"], list):
+            for b in m["content"]:
+                if b.get("type") == "tool_result":
+                    out.append(dict(b, parsed=json.loads(b["content"])))
     return out
 
 
@@ -268,11 +274,40 @@ def test_g2_tools_validate_inputs(run_dir):
 
 
 def test_g2_search_entity_offline():
-    r = search_entity("COVID-19", "disease")
+    r = search_entity("COVID-19", "disease")  # no settings, module client never configured
     assert r["hits"] == [] and r["note"].startswith("offline")
     assert search_entity("blood", "tissue")["hits"] == []
     with pytest.raises(ValueError):
         search_entity("x", "planet")
+
+
+def test_g2_search_entity_uses_bundle_settings(run_dir, tmp_path, monkeypatch):
+    from scpipe.opentargets import OpenTargetsClient
+
+    cfg = {"opentargets": {"enabled": True, "offline": True, "cache_dir": "ot_cache"}, "config_dir": str(tmp_path)}
+    b = G2.build_bundle(run_dir, cfg)
+    assert b["opentargets"] == {"enabled": True, "offline": True, "cache_dir": str(tmp_path / "ot_cache"), "timeout_s": 30.0, "retries": 3}
+    # offline + empty cache: a miss, reported as offline, no network
+    r = search_entity("systemic lupus erythematosus", "disease", b["opentargets"])
+    assert r["hits"] == [] and "not in the Open Targets cache" in r["note"]
+    # disabled in config
+    assert "disabled" in search_entity("x", "disease", dict(b["opentargets"], enabled=False))["note"]
+    # a hit from the client is passed on with its id (the agent's tool shares one client per run)
+    seen = []
+
+    def fake(self, text, entity, size=10):
+        seen.append((self.cache_dir, self.offline, text, entity))
+        return [{"id": "EFO_0002690", "name": "systemic lupus erythematosus", "score": 93.7, "entity": "disease",
+                 "description": "x", "object": {"ignored": True}}]
+
+    monkeypatch.setattr(OpenTargetsClient, "search_entity", fake)
+    prov = mock_provider("context_worker", [
+        {"tool_calls": [call("search_entity", text="lupus", entity="disease"), call("search_entity", text="SLE", entity="disease")]},
+        {"tool_calls": [GOOD_G2]}])
+    ContextAgent(prov).run(b)
+    hits = tool_results(prov)[0]["parsed"]["hits"]
+    assert hits == [{"id": "EFO_0002690", "name": "systemic lupus erythematosus", "score": 93.7, "entity": "disease", "description": "x"}]
+    assert len(seen) == 2 and seen[0][0] == Path(tmp_path / "ot_cache") and seen[0][1] is True and seen[1][2] == "SLE"
 
 
 def test_g2_policy_violation_rejected_then_retry(run_dir):
@@ -352,8 +387,9 @@ def test_g3_happy_path(run_dir):
     results = tool_results(prov)
     listed = results[0]["parsed"]
     assert [r["cluster"] for r in listed] == ["1", "4"] and listed[1]["votes"]["celltypist"] == "CD8 T cell"
-    lk = results[-2]["parsed"]
+    lk = results[-1]["parsed"]  # lookup_cell_type("nk cell"): case-insensitive hit
     assert lk["found"] and lk["label"] == "NK cell" and lk["cl_id"] == "CL:0000623"
+    assert results[-2]["parsed"]["label"] == "CD8 T cell"
 
 
 def test_g3_relabel_consensus_cluster_rejected(run_dir):
@@ -414,7 +450,11 @@ def test_g4_happy_path(run_dir):
     assert top["genes"][4]["has_opentargets_evidence"] and not top["genes"][0]["has_opentargets_evidence"]
     ev = results[3]["parsed"]
     assert ev["n_evidence"] == 2 and {e["evidence_id"] for e in ev["evidence"]} == {"OT-JAK1-drug-baricitinib", "OT-JAK1-tract-SM"}
-    assert results[4]["parsed"]["n_evidence"] == 2  # ISG15 cited in T cell and B cell
+    isg = results[4]["parsed"]
+    assert isg["n_evidence"] == 2  # two distinct records; the disease one is listed once although it is DE in two groups
+    by_id = {e["evidence_id"]: e for e in isg["evidence"]}
+    assert {c["group"] for c in by_id["OT-ISG15-disease-EFO_0007479"]["contexts"]} == {"T cell", "B cell"}
+    assert [c["group"] for c in by_id["OT-ISG15-tract-SM"]["contexts"]] == ["T cell"]
 
 
 def test_g4_unknown_evidence_id_rejected(run_dir):
@@ -483,6 +523,91 @@ def test_run_gate_review_mode_waits(run_dir, gate, role, good):
     assert not (run_dir / "gates" / gate / "decision.json").exists()
 
 
+def test_reviewer_sees_policy_and_evidence_but_not_rationale(run_dir, monkeypatch):
+    """Real protocol: the reviewer gets the gate's policy and the proposal content, never the worker's rationale."""
+    from scpipe.llm import mock_provider as mp
+
+    seen = []
+    orig = mp.MockProvider.complete
+
+    def spy(self, **kw):
+        seen.append((self.role, kw["system"], kw["messages"]))
+        return orig(self, **kw)
+
+    monkeypatch.setattr(mp.MockProvider, "complete", spy)
+    cfg = {"llm": llm_cfg("context_worker", [{"tool_calls": [GOOD_G2]}]), "gates": {"G2": "auto"}}
+    res = _compat.run_gate("G2", run_dir, cfg)
+    assert res["continue"] and res["review"]["verdict"] == "approve"
+    rev = [s for s in seen if s[0] == "reviewer"]
+    assert len(rev) == 1
+    text = rev[0][2][0]["content"][0]["text"]
+    assert "PBMC lineages only" not in text and "platelets present" not in text  # the rationale
+    assert "only clusters whose consensus" not in text and "at most 5" in text  # G2's policy, not G3's
+    assert '"peripheral blood"' in text and "UBERON_0000178" in text  # the proposal content
+    assert INJECTION not in rev[0][1]  # the metadata hint never reaches a system prompt
+    assert json.loads((run_dir / "gates" / "G2" / "review.json").read_text())["reviewer"]["model"] == "mock-model"
+
+
+def test_reviewer_request_changes_gives_one_revision(run_dir):
+    """request_changes -> the worker gets the findings in the same conversation and proposes again."""
+    first = call("propose_context", tissue={"label": "peripheral blood", "uberon_id": "UBERON_0000178", "confidence": 0.9},
+                 disease_candidates=[{"label": "healthy", "efo_id": None, "confidence": 0.9, "evidence": "no disease signature"}],
+                 celltypist_model="Immune_All_Low.pkl", rationale="first")
+    reviewer = [{"json": {"verdict": "request_changes", "findings": [{"severity": "warn", "text": "interferon score is high in cluster 5; 'healthy' at 0.9 is too confident"}]}},
+                {"json": {"verdict": "approve", "findings": [{"severity": "info", "text": "revised confidence is defensible"}]}}]
+    cfg = {"llm": llm_cfg("context_worker", [{"tool_calls": [first]}, {"tool_calls": [GOOD_G2]}], reviewer), "gates": {"G2": "auto"}}
+    res = _compat.run_gate("G2", run_dir, cfg)
+    assert res["continue"] and res["review"]["verdict"] == "approve" and len(res["review"]["rounds"]) == 1
+    assert res["proposal"]["rationale"].startswith("PBMC") and res["proposal"]["n_calls"] == 2
+    dec = json.loads((run_dir / "gates" / "G2" / "decision.json").read_text())
+    assert dec["decision"]["disease_candidates"][0]["label"] == "viral infection signature"
+
+
+def test_reviewer_escalate_waits_for_human_then_approve(run_dir):
+    reviewer = [{"json": {"verdict": "escalate", "findings": [{"severity": "block", "text": "look at this"}]}}]
+    cfg = {"llm": llm_cfg("annotation_worker", [{"tool_calls": [call("propose_labels", clusters=GOOD_G3_ROWS, rationale="r")]}], reviewer),
+           "gates": {"G3": "auto"}}
+    res = _compat.run_gate("G3", run_dir, cfg)
+    gate_dir = run_dir / "gates" / "G3"
+    assert not res["continue"] and (gate_dir / "pending.json").exists() and not (gate_dir / "decision.json").exists()
+    assert json.loads((gate_dir / "pending.json").read_text())["approve"].startswith("scpipe approve --run-dir")
+    html = (gate_dir / "report.html").read_text()
+    assert "Annotation (consensus vs proposal)" in html and "CD8 T cell" in html
+    from scpipe.gates import approve
+
+    dec = approve("G3", run_dir, cfg, by="alice")
+    assert dec["decided_by"] == "human:alice" and dec["changes_vs_proposal"] == []
+    assert {r["cluster"]: r["status"] for r in dec["decision"]["clusters"]}["1"] == "agent"
+    assert not (gate_dir / "pending.json").exists()
+    # an edited decision that relabels a consensus cluster is refused
+    bad = json.loads(json.dumps(dec["decision"]))
+    bad["clusters"][0].update(label_fine="hepatocyte", label_broad="hepatocyte", cl_id="CL:0000182", status="agent")
+    (run_dir / "edited.json").write_text(json.dumps(bad))
+    from scpipe.gates import GateError
+
+    with pytest.raises(GateError, match="consensus cluster"):
+        approve("G3", run_dir, cfg, from_file=run_dir / "edited.json", by="alice")
+    # resume: the gate honours the human decision taken on this bundle and continues
+    res2 = _compat.run_gate("G3", run_dir, {"gates": {"G3": "auto"}})
+    assert res2["continue"] and res2["decision"]["decided_by"] == "human:alice"
+
+
+@pytest.mark.parametrize("gate,module", [("G2", "scpipe.gates.g2_context"), ("G3", "scpipe.gates.g3_annotation"),
+                                         ("G4", "scpipe.gates.g4_interpretation")])
+def test_gate_stage_cli_exit_codes(run_dir, gate, module):
+    """The runner calls ``python -m <module> --run-dir D``: 0 to continue, 3 while waiting for a human."""
+    import subprocess
+    import yaml
+
+    (run_dir / "config").mkdir()
+    env = dict(__import__("os").environ, PYTHONPATH=str(REPO / "python"))
+    for mode, code in (("auto", 0), ("review", 3)):
+        (run_dir / "config" / "config.resolved.yaml").write_text(yaml.safe_dump({"run_id": "t", "gates": {gate: mode}}))
+        r = subprocess.run([sys.executable, "-m", module, "--run-dir", str(run_dir)], env=env, capture_output=True, text=True)
+        assert r.returncode == code, r.stdout + r.stderr
+    assert (run_dir / "gates" / gate / "pending.json").exists()
+
+
 def test_max_tool_calls_is_twelve(run_dir):
     many = [{"tool_calls": [call("list_clusters")] * 6}, {"tool_calls": [call("list_clusters")] * 6},
             {"tool_calls": [call("list_clusters")]}, {"text": "done"}]
@@ -502,8 +627,10 @@ def _load_shim_fallback():
     try:
         spec = importlib.util.spec_from_file_location("_compat_fallback", _compat.__file__)
         mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod  # dataclasses resolve string annotations through sys.modules
         spec.loader.exec_module(mod)  # type: ignore[union-attr]
     finally:
+        sys.modules.pop("_compat_fallback", None)
         for k, v in hidden.items():
             if v is None:
                 sys.modules.pop(k, None)

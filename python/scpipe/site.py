@@ -156,7 +156,7 @@ def https_reachable(url: str, timeout: float = 5.0) -> tuple[bool, str]:
 
 def detect_site(check_internet: bool = True, cfg: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """What this node offers. Pure detection; never raises."""
-    llm_cfg = (cfg or {}).get("llm") or {}
+    llm_cfg = (_llm_section(cfg or {}) or {}).get("default") or {}
     provider = llm_cfg.get("provider") or "anthropic"
     llm_url = llm_cfg.get("base_url") or LLM_ENDPOINTS.get(provider) or LLM_ENDPOINTS["anthropic"]
     d: dict[str, Any] = {
@@ -466,6 +466,33 @@ def submit_split(cfg: Mapping[str, Any], run_dir: Path, stage_ids: list[str], *,
 # --------------------------------------------------------------------------
 
 
+def _llm_section(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    """``llm:`` with defaults filled in (``config.llm_settings`` when present), or None when unset.
+
+    Accepts both the DESIGN 4.8 shape (``llm.default.provider``) and the older
+    flat shape (``llm.provider``), which is folded into ``default``.
+    """
+    raw = cfg.get("llm")
+    if not raw or not isinstance(raw, Mapping):
+        return None
+    fn = getattr(cfgmod, "llm_settings", None)
+    if callable(fn):
+        try:
+            out = fn(cfg)
+            if out is not None:
+                return dict(out)
+        except Exception:
+            pass
+    out: dict[str, Any] = {"default": dict(raw.get("default") or {}), "roles": dict(raw.get("roles") or {}),
+                           "budget": dict(raw.get("budget") or {}), "replay": raw.get("replay", False)}
+    for k in ("provider", "model", "api_key_env", "base_url"):
+        if k in raw and k not in out["default"]:
+            out["default"][k] = raw[k]
+    if "ledger_path" in raw:
+        out["ledger_path"] = raw["ledger_path"]
+    return out
+
+
 def _llm_provider_module():
     try:
         from . import llm  # noqa: F401  (written by another developer; may not exist yet)
@@ -509,16 +536,26 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         img_ok = img is None or str(img).startswith(("docker://", "oras://", "library://")) or Path(str(img)).exists() or rt == "docker"
         add("site", "container", w is not None and img_ok,
             f"{rt}: {w or 'not on PATH'}; image {img or 'none'}{'' if img_ok else ' (not found)'}")
-    # LLM
-    llm_cfg = cfg.get("llm") or {}
-    provider = llm_cfg.get("provider") or "anthropic"
-    if provider == "mock":
-        add("llm", "provider", True, "mock (tests; no network)", required=False)
+    # LLM (config shape of DESIGN 4.8: llm.default.{provider,model,api_key_env,base_url}, llm.roles, llm.budget)
+    llm_cfg = _llm_section(cfg)
+    if llm_cfg is None:
+        add("llm", "provider", True, "llm: not configured (gates run rules-only with a human review)", required=False)
+        llm_cfg = {}
+        provider = None
     else:
-        key_env = llm_cfg.get("api_key_env") or DEFAULT_KEY_ENV.get(provider, "ANTHROPIC_API_KEY")
+        provider = (llm_cfg.get("default") or {}).get("provider") or "anthropic"
+    if provider is None:
+        pass
+    elif provider == "mock":
+        add("llm", "provider", True, "mock (tests; no network)", required=False)
+    elif provider in ("bedrock", "vertex"):
+        add("llm", "provider", False, f"{provider}: not implemented yet (use anthropic or openai_compatible)", required=False)
+    else:
+        dflt = llm_cfg.get("default") or {}
+        key_env = dflt.get("api_key_env") or DEFAULT_KEY_ENV.get(provider, "ANTHROPIC_API_KEY")
         have_key = bool(os.environ.get(key_env))
         add("llm", "api key", have_key, f"${key_env} is {'set' if have_key else 'not set'} (provider {provider})", required=False)
-        base = llm_cfg.get("base_url") or LLM_ENDPOINTS.get(provider)
+        base = dflt.get("base_url") or LLM_ENDPOINTS.get(provider)
         if base:
             ok, note = https_reachable(base)
             add("llm", "endpoint", ok, f"{base}: {note}", required=False)
@@ -539,6 +576,7 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
                         f"ok: stop_reason={getattr(resp, 'stop_reason', '?')}, tool_calls={len(used or [])}", required=False)
                 except Exception as e:
                     add("llm", "tool-use test", False, f"failed: {str(e)[:200]}", required=False)
+    if provider is not None:
         # Budget: the total ledger shared across runs (scpipe.llm.ledger: {"runs": {run_id: gbp}})
         budget = llm_cfg.get("budget") or {}
         ledger_path = os.path.expanduser(str(budget.get("ledger_path") or llm_cfg.get("ledger_path") or "~/.scpipe/ledger.json"))

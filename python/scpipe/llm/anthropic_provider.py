@@ -64,7 +64,10 @@ class AnthropicProvider(Provider):
         return body
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
-        import requests
+        try:
+            import requests
+        except ImportError as e:  # not a hard dependency of scpipe (pip install requests / scpipe[llm])
+            raise ProviderError("the 'requests' package is needed for LLM providers: pip install requests") from e
 
         url = f"{self.base_url}/v1/messages"
         last: str = "no attempt"

@@ -70,9 +70,9 @@ class G1Gate:
             if not p.exists():
                 raise GateError(f"input {p} not found (S1a-S1c must run first)")
         try:
-            self.policy = qc.load_policy(policy_path)
+            self.policy_obj = qc.load_policy(policy_path)
             metrics = qc.read_metrics(self.metrics_path)
-            self.ctx = QCContext(metrics, self.policy)
+            self.ctx = QCContext(metrics, self.policy_obj)
         except qc.QCError as e:
             raise GateError(f"QC policy or metrics: {e}") from e
         self.notes: list[str] = []
@@ -119,7 +119,7 @@ class G1Gate:
         return self.policy_obj_dict()
 
     def policy_obj_dict(self) -> dict[str, Any]:
-        d = self.policy.to_dict()
+        d = self.policy_obj.to_dict()
         d["proposal_rules"] = {
             "hard_limits": "may only be as strict as or stricter than the policy's",
             "n_mads": "between 1 and 10",
@@ -151,7 +151,7 @@ class G1Gate:
                    "table_decided_by": applied_by, "baseline_file": f"S1/{BASELINE_NAME}",
                    "thresholds": norm["thresholds"], "n_review_cells": len(norm.get("review_cells") or []),
                    "counts": dec.counts_total(), "counts_per_sample": dec.counts_per_sample(),
-                   "counts_per_reason": dec.counts_per_reason(), "policy_hash": self.policy.hash}
+                   "counts_per_reason": dec.counts_per_reason(), "policy_hash": self.policy_obj.hash}
         write_json(summary, gate_dir / "qc_summary.json")
 
     def report_sections(self, bundle, proposal, review, decision) -> list[tuple[str, str]]:

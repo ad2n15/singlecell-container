@@ -64,6 +64,7 @@ __all__ = [
     "prepare_run_dir",
     "load_resolved",
     "get_key",
+    "llm_settings",
     "sha256_file",
     "canonical_json",
     "detect_format",
@@ -143,6 +144,9 @@ LLM_DEFAULTS: dict[str, Any] = {
     "replay": False,
 }
 LLM_PROVIDERS = ("anthropic", "openai_compatible", "mock", "bedrock", "vertex")
+# Per-role settings (llm.default, llm.roles.<role>); also accepted flat under llm: as a shorthand for llm.default.
+LLM_ROLE_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
+                 "temperature", "json_mode", "default_usage")
 GATE_MODES = ("auto", "review", "escalate")
 
 EXECUTION_MODES = ("direct", "slurm", "pbs", "lsf", "sge", "split")
@@ -431,6 +435,94 @@ def _check_opentargets(cfg: dict[str, Any], problems: list[str]) -> None:
          f"opentargets.cache_dir must be a non-empty path, got {o['cache_dir']!r}")
     need(_is_num(o["timeout_s"]) and o["timeout_s"] > 0, f"opentargets.timeout_s must be > 0, got {o['timeout_s']!r}")
     need(_is_int(o["retries"]) and o["retries"] >= 0, f"opentargets.retries must be an integer >= 0, got {o['retries']!r}")
+
+
+def llm_settings(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The ``llm`` section with :data:`LLM_DEFAULTS` filled in, or ``None`` when unset (rules-only gates)."""
+    raw = cfg.get("llm")
+    if not raw:
+        return None
+    out = copy.deepcopy(LLM_DEFAULTS)
+    for k, v in raw.items():
+        if k in LLM_ROLE_KEYS:  # flat shorthand: llm: {provider: ..., model: ...} means llm.default
+            out["default"][k] = v
+        elif isinstance(out.get(k), dict) and isinstance(v, Mapping):
+            out[k].update(v)
+        else:
+            out[k] = v
+    if out["default"].get("provider") != "anthropic":
+        out["default"].setdefault("api_key_env", None)
+    return out
+
+
+def _check_llm(cfg: dict[str, Any], problems: list[str]) -> None:
+    """Validate the optional ``llm`` section (DESIGN 4.8, agents-spec section 3); the key itself is never read."""
+    raw = cfg.get("llm")
+    if raw is None:
+        return
+    if not isinstance(raw, Mapping):
+        problems.append(f"llm must be a mapping (default, roles, budget, replay), got {type(raw).__name__}")
+        return
+    unknown = sorted(set(raw) - {"default", "roles", "budget", "replay", "ledger_path", "script"} - set(LLM_ROLE_KEYS))
+    if unknown:
+        problems.append(f"llm: unknown key(s) {unknown} (allowed: default, roles, budget, replay, ledger_path)")
+    flat = {k: raw[k] for k in LLM_ROLE_KEYS if k in raw}
+
+    def check_role(where: str, s: Any, is_default: bool) -> None:
+        if s is None:
+            return
+        if not isinstance(s, Mapping):
+            problems.append(f"{where} must be a mapping (provider, model, api_key_env, ...)")
+            return
+        prov = s.get("provider")
+        if prov is not None and (not isinstance(prov, str) or prov not in LLM_PROVIDERS):
+            problems.append(f"{where}.provider must be one of {list(LLM_PROVIDERS)}, got {prov!r}")
+        for k in ("model", "api_key_env", "base_url"):
+            v = s.get(k)
+            if v is not None and not (isinstance(v, str) and v.strip()):
+                problems.append(f"{where}.{k} must be a non-empty string, got {v!r}")
+        env = s.get("api_key_env")
+        if isinstance(env, str) and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env):
+            problems.append(f"{where}.api_key_env must be the NAME of an environment variable, got {env!r}")
+        for k in ("max_tokens", "timeout_s", "max_retries"):
+            v = s.get(k)
+            if v is not None and not (_is_num(v) and v > 0):
+                problems.append(f"{where}.{k} must be a positive number, got {v!r}")
+        t = s.get("temperature")
+        if t is not None and not (_is_num(t) and 0 <= t <= 2):
+            problems.append(f"{where}.temperature must be a number from 0 to 2, got {t!r}")
+
+    if flat:
+        check_role("llm", flat, True)
+    check_role("llm.default", raw.get("default"), True)
+    roles = raw.get("roles")
+    if roles is not None:
+        if not isinstance(roles, Mapping):
+            problems.append("llm.roles must be a mapping of role name to settings")
+        else:
+            for r, s in roles.items():
+                check_role(f"llm.roles.{r}", s, False)
+    b = raw.get("budget")
+    if b is not None:
+        if not isinstance(b, Mapping):
+            problems.append("llm.budget must be a mapping (total_limit, per_run_limit, warn_at_pct, usd_to_gbp, ledger_path)")
+        else:
+            for k in ("total_limit", "per_run_limit", "usd_to_gbp"):
+                v = b.get(k)
+                if v is not None and not (_is_num(v) and v > 0):
+                    problems.append(f"llm.budget.{k} must be a positive number, got {v!r}")
+            w = b.get("warn_at_pct")
+            if w is not None and not (_is_num(w) and 0 < w <= 100):
+                problems.append(f"llm.budget.warn_at_pct must be a number in (0, 100], got {w!r}")
+            cur = b.get("currency")
+            if cur is not None and cur != "GBP":
+                problems.append(f"llm.budget.currency must be GBP (limits are in GBP), got {cur!r}")
+            lp = b.get("ledger_path")
+            if lp is not None and not (isinstance(lp, str) and lp.strip()):
+                problems.append(f"llm.budget.ledger_path must be a path, got {lp!r}")
+    rp = raw.get("replay")
+    if rp is not None and not isinstance(rp, bool):
+        problems.append(f"llm.replay must be true or false, got {rp!r}")
 
 
 def _check_contrasts(cfg: dict[str, Any], header: list[str], records: list[dict[str, str]], problems: list[str]) -> None:

@@ -6,6 +6,7 @@
     {% if g.mode %}<span class="pill {{ g.mode }}">{{ g.mode }}</span>{% endif %}
     {% if g.verdict %}<span class="pill {{ g.verdict }}">reviewer: {{ g.verdict }}</span>{% endif %}
     {% if g.fallback %}<span class="pill warn">fallback: rules baseline</span>{% endif %}
+    {% if g.pending %}<span class="pill warn">waiting for a human</span>{% endif %}
   {% endif %}
 </h3>
 {% if not g.present %}
@@ -17,7 +18,7 @@
   <dt>reviewer</dt><dd>{{ g.reviewer or "—" }}</dd>
   <dt>policy check</dt><dd>{% if g.policy_check %}{{ "ok" if g.policy_check.ok else "violations: " ~ (g.policy_check.violations | join("; ")) }}{% else %}—{% endif %}</dd>
   <dt>files</dt><dd>{% for k, v in g.files.items() %}<span class="pill {{ 'done' if v else '' }}">{{ k }}.json{% if not v %} missing{% endif %}</span> {% endfor %}
-    {% if g.has_report %}<a href="{{ g.dir }}/report.html">gate report</a>{% endif %}</dd>
+    {% if g.has_report and not full %}<a href="{{ g.report_href }}">gate report</a>{% endif %}</dd>
 </dl>
 {% if g.rationale %}<p><b>Rationale (agent, advisory):</b> {{ g.rationale }}</p>{% endif %}
 {% if g.findings %}

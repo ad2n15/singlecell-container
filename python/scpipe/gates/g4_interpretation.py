@@ -265,7 +265,54 @@ def policy_check(proposal: Mapping[str, Any], bundle: Mapping[str, Any]) -> tupl
     return (not v), v
 
 
+def policy(bundle: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """The policy as shown to the reviewer (what :func:`policy_check` enforces, in words)."""
+    return {
+        "gate": GATE,
+        "hypotheses": "every statement is a hypothesis, never a finding; each hypothesis text says so",
+        "direction": "up/down comes from our DGE table for that contrast/group; a cited gene must be DE there with that direction",
+        "evidence": "evidence_ids are cited only from the Open Targets summary (evidence_ids in the bundle); "
+                    "an empty list is allowed only when the hypothesis rests on the expression change alone",
+        "skipped_groups": "a group with a skipped_reason gets a one-line summary and no hypotheses",
+        "completeness": "one entry per contrast/group, each with a non-empty summary; no contrast/group twice",
+        "outside_knowledge": "no drug or trial claims beyond the evidence records; general biology only as a hypothesis",
+    }
+
+
+def report_sections(bundle: Mapping[str, Any], proposal: Mapping[str, Any], review: Mapping[str, Any] | None,
+                    decision: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    from scpipe.gates.report import esc, table
+
+    content = (decision or {}).get("decision") or proposal.get("proposal") or {}
+    counts = [{"contrast": c["contrast"], "group": g["group"], "n_up": g.get("n_up"), "n_down": g.get("n_down"),
+               "n_tested": g.get("n_tested"), "skipped_reason": g.get("skipped_reason"),
+               "genes with evidence": sum(1 for d in DIRECTIONS for r in (g.get("opentargets") or {}).get(d, []) if r.get("evidence"))}
+              for c in bundle.get("contrasts") or [] for g in c.get("groups") or []]
+    parts = []
+    for c in content.get("contrasts") or []:
+        if not isinstance(c, Mapping):
+            continue
+        parts.append(f"<h3>{esc(c.get('contrast'))} / {esc(c.get('group'))}</h3><p>{esc(c.get('summary'))}</p>")
+        hyps = [{"gene": h.get("gene"), "direction": h.get("direction"), "evidence_ids": ", ".join(h.get("evidence_ids") or []),
+                 "text": h.get("text")} for h in c.get("hypotheses") or [] if isinstance(h, Mapping)]
+        parts.append(table(hyps) if hyps else "<p><em>no hypotheses</em></p>")
+    return [("DGE per contrast x group", table(counts)),
+            ("Interpretation (every statement is a hypothesis)", "".join(parts) or "<p><em>none</em></p>"),
+            ("Open Targets", f"<p>{bundle.get('n_evidence', 0)} evidence record(s)"
+                             f"{' (offline cache)' if bundle.get('opentargets_offline') else ''}</p>")]
+
+
 def make_worker(provider, ledger=None, **kw):
     from scpipe.agents.interpretation import InterpretationAgent
 
     return InterpretationAgent(provider, ledger, **kw)
+
+
+def main(argv: list[str] | None = None) -> int:
+    from scpipe.gates.protocol import gate_main
+
+    return gate_main(GATE, argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

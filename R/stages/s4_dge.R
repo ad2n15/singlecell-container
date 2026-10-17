@@ -37,10 +37,10 @@
 #   tested (n_tested counts the rest); they are absent from the DGE table.
 # * method deseq2: DESeq2 with Wald test, results(contrast = c(condition,
 #   numerator, denominator)). method limma_voom (also the fallback when
-#   DESeq2 is not installed, or when DESeq2 fails on a group): limma::voom on
-#   library-size-normalised counts (no edgeR TMM factors; edgeR is not
-#   required), lmFit + eBayes; baseMean is the mean library-size-normalised
-#   count, lfcSE = sqrt(s2.post) * stdev.unscaled.
+#   DESeq2 is not installed, or when DESeq2 fails on a group): limma::voom with
+#   effective library sizes from median-of-ratios size factors (computed here;
+#   no edgeR TMM factors, edgeR is not required), lmFit + eBayes; baseMean is
+#   the mean size-factor-normalised count, lfcSE = sqrt(s2.post) * stdev.unscaled.
 # * direction: up if padj < dge.padj and log2fc >= dge.lfc; down if padj < dge.padj
 #   and log2fc <= -dge.lfc; otherwise ns (NA padj counts as ns).
 
@@ -189,7 +189,9 @@ s4_pseudobulk <- function(obj, group, sample, assay = "RNA") {
   if (nrow(units) > 1) {
     obj$scpipe_pb <- factor(pb_of_cell, levels = units$pb_id)
     agg <- tryCatch(suppressMessages(
-      Seurat::AggregateExpression(obj, assays = assay, group.by = "scpipe_pb", layer = "counts", verbose = FALSE)[[assay]]),
+      # AggregateExpression always sums the counts layer; passing layer= is a
+      # duplicate-argument error in Seurat 5.0.x.
+      Seurat::AggregateExpression(obj, assays = assay, group.by = "scpipe_pb", verbose = FALSE)[[assay]]),
       error = function(e) { scp_warn_log("AggregateExpression failed (", conditionMessage(e), "); summing counts directly"); NULL })
     if (!is.null(agg) && (!all(units$pb_id %in% colnames(agg)) || nrow(agg) != nrow(obj[[assay]]))) {
       scp_warn_log("AggregateExpression returned unexpected dimensions; summing counts directly")
@@ -258,9 +260,25 @@ s4_run_deseq2 <- function(counts, coldata, formula, cond_col, numerator, denomin
              stringsAsFactors = FALSE)
 }
 
+#' Median-of-ratios size factors (DESeq2's estimateSizeFactors, written out so
+#' the limma path needs neither DESeq2 nor edgeR). Robust to a few very highly
+#' expressed genes shifting the library composition, which plain library-size
+#' scaling is not. Falls back to library size when fewer than 10 genes are
+#' non-zero in every sample.
+s4_size_factors <- function(counts) {
+  lib <- colSums(counts)
+  pos <- rowSums(counts > 0) == ncol(counts)
+  if (sum(pos) < 10) return(lib / exp(mean(log(lib))))
+  lg <- log(counts[pos, , drop = FALSE])
+  gm <- rowMeans(lg)
+  sf <- apply(lg, 2, function(col) exp(stats::median(col - gm)))
+  sf / exp(mean(log(sf)))
+}
+
 s4_run_limma_voom <- function(counts, coldata, formula, cond_col, numerator, denominator) {
   if (!scp_has_pkg("limma")) scp_stop("limma is not installed")
-  lib <- colSums(counts)
+  sf <- s4_size_factors(counts)
+  lib <- sf * mean(colSums(counts))      # effective library sizes (geometric mean of sf is 1)
   design <- stats::model.matrix(formula, coldata)
   coef <- paste0(cond_col, numerator)
   if (!(coef %in% colnames(design))) scp_stop("limma: coefficient ", coef, " not in the design (", paste(colnames(design), collapse = ", "), ")")
@@ -268,7 +286,7 @@ s4_run_limma_voom <- function(counts, coldata, formula, cond_col, numerator, den
   fit <- limma::eBayes(limma::lmFit(v, design))
   tt <- limma::topTable(fit, coef = coef, number = Inf, sort.by = "none")
   lfcSE <- sqrt(fit$s2.post) * fit$stdev.unscaled[, coef]
-  norm <- sweep(counts, 2, lib / mean(lib), "/")
+  norm <- sweep(counts, 2, sf, "/")
   data.frame(gene = rownames(tt), baseMean = as.numeric(rowMeans(norm)[rownames(tt)]), log2fc = as.numeric(tt$logFC),
              lfcSE = as.numeric(lfcSE[rownames(tt)]), pvalue = as.numeric(tt$P.Value), padj = as.numeric(tt$adj.P.Val),
              stringsAsFactors = FALSE)

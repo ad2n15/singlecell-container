@@ -30,6 +30,7 @@ harmony = ["harmonypy"]
 gpu = ["rapids-singlecell"]
 test = ["pytest"]
 report = ["matplotlib"]
+llm = ["requests"]
 
 [tool.setuptools.packages.find]
 where = ["."]

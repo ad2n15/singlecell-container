@@ -105,6 +105,7 @@ __all__ = [
 
 STATE_FILE = "state.json"
 STATE_SCHEMA = 1
+GATE_WAITING = 3  # exit code of a gate stage (and of scpipe run/resume) while a human decision is pending
 LOG_TAIL = 20
 FULL_HASH_LIMIT = 64 * 1024**2
 SAMPLE_BYTES = 1024**2
@@ -118,6 +119,8 @@ STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "S1a": ("object_format", "doublets.method", "policy.protected_populations"),
     "S1b": ("doublets.method", "seed", "device", "resources.gpu_mem_cap_gb"),
     "S1c": ("policy",),
+    # G1 = the QC gate (scpipe.gates.g1_qc): rules baseline, optional LLM worker + reviewer, human approval.
+    "G1": ("policy", "gates.G1", "llm"),
     "S2": (
         "object_format",
         "normalization",
@@ -216,6 +219,13 @@ def default_stages() -> list[Stage]:
         Stage("S1c", "python", _py_stage("scpipe.stages.s1c_qc"), STAGE_CONFIG_KEYS["S1c"],
               inputs=("S1/qc_metrics.tsv.gz", "config/qc_policy.yaml"),
               outputs=("S1/qc_decisions.tsv.gz", "S1/qc_summary.json")),
+        # G1 reads S1c's decisions (the baseline) and rewrites S1/qc_decisions.tsv.gz through the rules
+        # engine when a decision differs from it, so it is listed as a G1 output (S2 then depends on G1).
+        # Exit code 3 = waiting for `scpipe approve`; `scpipe resume` reruns the gate, which applies it.
+        Stage("G1", "python", _py_stage("scpipe.gates.g1_qc"), STAGE_CONFIG_KEYS["G1"],
+              inputs=("S1/qc_metrics.tsv.gz", "S1/qc_decisions.tsv.gz", "config/qc_policy.yaml"),
+              outputs=("gates/G1/decision.json", "gates/G1/bundle.json", "gates/G1/proposal.json",
+                       "gates/G1/review.json", "gates/G1/report.html", "S1/qc_decisions.tsv.gz")),
         Stage("S2", "R", _r_stage("S2"), STAGE_CONFIG_KEYS["S2"],
               inputs=(OBJ, "S1/qc_decisions.tsv.gz"), outputs=(OBJ2, "S2/summary.json")),
         # S3 = the R evidence step (markers, cluster summary, signatures), then CellTypist (skipped with a
@@ -608,7 +618,8 @@ def _plan(stages: Sequence[Stage], until: int, ctx: RunContext, state: dict[str,
         if is_gate(st) and (no_gates or rec.get("status") == "skipped"):
             continue
         if rec.get("status") != "done":
-            reasons[st.id] = {"failed": "previous attempt failed", "running": "previous attempt did not finish"}.get(
+            reasons[st.id] = {"failed": "previous attempt failed", "running": "previous attempt did not finish",
+                              "waiting": "applying the human decision (or still waiting for one)"}.get(
                 rec.get("status"), "not run yet")
             start = i
             break
@@ -748,6 +759,16 @@ def run_pipeline(
                         code = rec["exit_code"] = 1
                         with open(log_path, "a") as fh:
                             fh.write(f"# scpipe: stage exited 0 but did not write: {', '.join(absent)}\n")
+                if code == GATE_WAITING and is_gate(st):
+                    # The gate wrote its report and waits for a human (docs/agents-spec.md section 2).
+                    rec["status"] = "waiting"
+                    rec["note"] = "waiting for human approval"
+                    save_state(run_dir, state)
+                    say(f"  [{st.id:>4}] WAITING for approval after {_fmt_s(wall)}; "
+                        f"report: {run_dir / 'gates' / st.id / 'report.html'}")
+                    say(f"scpipe: review the gate, then: scpipe approve --run-dir {run_dir} --stage {st.id} "
+                        f"[--from-file edited.json] [--by NAME]\n        and continue with: scpipe resume --run-dir {run_dir}")
+                    return GATE_WAITING
                 if code != 0:
                     rec["status"] = "failed"
                     save_state(run_dir, state)
@@ -810,6 +831,10 @@ def status_text(run_dir: str | Path, stages: Sequence[Stage] | None = None) -> s
         if r.get("status") in ("failed", "running"):
             lines.append(f"\nlast lines of logs/{sid}.log ({r['status']}):")
             lines += [f"  | {x}" for x in tail(run_dir / "logs" / f"{sid}.log", 10)]
+        elif r.get("status") == "waiting":
+            lines.append(f"\n{sid} is waiting for a human decision: see {run_dir / 'gates' / sid / 'report.html'}, then\n"
+                         f"  scpipe approve --run-dir {run_dir} --stage {sid} [--from-file edited.json] [--by NAME]\n"
+                         f"  scpipe resume --run-dir {run_dir}")
     if _runner_alive(run_dir):
         lines.append("\na runner is active in this run directory")
     return "\n".join(lines)
@@ -1103,6 +1128,12 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--config", default=None)
     d.add_argument("--run-dir", default=None)
     d.add_argument("--json", action="store_true")
+    ap = sub.add_parser("approve", help="record a human decision at a gate (G1-G4), then `scpipe resume`")
+    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--stage", required=True, metavar="GATE", help="G1, G2, G3 or G4")
+    ap.add_argument("--from-file", default=None, metavar="JSON",
+                    help="an edited decision (the proposal.json content, or {\"decision\": {...}}); default: the proposal as is")
+    ap.add_argument("--by", default=None, metavar="NAME", help="who approves (default: $SCPIPE_APPROVER or the login name)")
     return p
 
 
@@ -1188,6 +1219,22 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
             else:
                 _print_doctor(rep, out)
             return 0 if rep["ok"] else 1
+        if a.cmd == "approve":
+            from . import gates as gatesmod
+
+            rd = Path(a.run_dir).expanduser().resolve()
+            resolved = cfgmod.load_resolved(rd)
+            try:
+                dec = gatesmod.approve(a.stage, rd, resolved, from_file=a.from_file, by=a.by)
+            except gatesmod.GateError as e:
+                raise RunnerError(str(e)) from e
+            ch = dec.get("changes_vs_proposal") or []
+            print(f"scpipe: {dec['gate']} approved by {dec['decided_by']} at {dec['decided_utc']}"
+                  + (f" with {len(ch)} change(s) vs the proposal:" if ch else " (proposal unchanged)"), file=out)
+            for c in ch:
+                print(f"  - {c}", file=out)
+            print(f"scpipe: continue with: scpipe resume --run-dir {rd}", file=out)
+            return 0
     except ConfigError as e:
         print(f"scpipe: {e}", file=out)
         return 2

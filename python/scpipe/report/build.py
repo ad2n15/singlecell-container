@@ -376,9 +376,12 @@ def _gate(gdir: Path, gate: str) -> dict[str, Any]:
     dec = files["decision"] or {}
     rev = files["review"] or {}
     prop = files["proposal"] or {}
+    pending = _json(gdir / "pending.json")  # written by the gates package while a human decision is awaited
+    present = present or pending is not None
     return {
         "gate": gate, "title": GATE_TITLES.get(gate, gate), "present": present, "dir": str(gdir),
-        "has_report": (gdir / "report.html").exists(),
+        "has_report": (gdir / "report.html").exists(), "report_href": f"../gates/{gdir.name}/report.html",
+        "pending": pending is not None and not dec,
         "mode": dec.get("mode"), "decided_by": dec.get("decided_by"), "decided_utc": dec.get("decided_utc"),
         "changes": dec.get("changes_vs_proposal") or [],
         "verdict": rev.get("verdict"), "findings": rev.get("findings") or [], "reviewer": (rev.get("reviewer") or {}).get("model"),

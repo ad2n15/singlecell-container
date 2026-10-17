@@ -76,6 +76,12 @@ def _scpipe(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, "-m", "scpipe", *args], capture_output=True, text=True, env=env)
 
 
+def _run_until_s3(cfg: Path, rd: Path) -> subprocess.CompletedProcess:
+    # --no-gates: this is an S3 test; the gates (G1 before S2) are covered by their own tests and would
+    # stop the run (exit 3, human review) when no LLM is configured.
+    return _scpipe("run", "--config", str(cfg), "--run-dir", str(rd), "--until", "S3", "--no-gates")
+
+
 @pytest.fixture(scope="module")
 def run_dir(tmp_path_factory) -> Path:
     reuse = os.environ.get("SCPIPE_S3_TEST_RUN")
@@ -86,7 +92,7 @@ def run_dir(tmp_path_factory) -> Path:
         work = tmp_path_factory.mktemp("s3run")
         cfg = _write_conf(work)
         rd = work / "run"
-    r = _scpipe("run", "--config", str(cfg), "--run-dir", str(rd), "--until", "S3")
+    r = _run_until_s3(cfg, rd)
     if r.returncode != 0:
         logs = "\n".join(f"--- {p.name}\n" + p.read_text()[-3000:] for p in sorted((rd / "logs").glob("*.log")))
         pytest.fail(f"scpipe run --until S3 failed:\n{r.stdout}\n{r.stderr}\n{logs}")
@@ -260,14 +266,14 @@ def test_consensus_step_alone_is_idempotent(run_dir, s3):
 
 def test_rerun_skips_s3_and_annotation_change_reruns_only_s3(run_dir):
     cfg_file = Path(yaml.safe_load((run_dir / "config" / "config.resolved.yaml").read_text())["config_file"])
-    r = _scpipe("run", "--config", str(cfg_file), "--run-dir", str(run_dir), "--until", "S3")
+    r = _run_until_s3(cfg_file, run_dir)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "[  S3] skip" in r.stdout, r.stdout
     # a changed annotation setting reruns S3 only (the edited copy sits next to the original so the
     # relative sample paths stay valid)
     edited = cfg_file.with_name("cpu_edited_s3.yaml")
     edited.write_text(cfg_file.read_text() + "\nannotation:\n  min_confidence: 0.7\n")
-    r = _scpipe("run", "--config", str(edited), "--run-dir", str(run_dir), "--until", "S3")
+    r = _run_until_s3(edited, run_dir)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "[  S2] skip" in r.stdout and "[  S3] run" in r.stdout, r.stdout
     assert json.loads((run_dir / "S3" / "evidence_bundle.json").read_text())["annotation"]["min_confidence"] == 0.7
