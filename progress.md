@@ -23,7 +23,8 @@ Constraints from the user (2026-10-17):
   2. Python pca defaults (10/4) too inaccurate; block Krylov SVD replaces randomised SVD, default 10/6 (a10115e): more accurate AND faster (1.12 s vs 1.41 s at 100k).
   3. bench used scanpy seurat_v3 HVGs; now scfast.preprocess (Seurat vst) (ae357a8): ARI 0.85 -> 0.94.
   Now: PC sim 0.999, kNN 0.906, ARI 0.947, all gates pass.
-  4. Remaining: scfast loess uses surface="direct"; Seurat uses "interpolate" -> 2/2000 HVGs differ -> kNN 0.906 instead of ~0.977. Delegated (loess agent).
+  4. scfast loess used surface="direct"; Seurat uses "interpolate" (2/2000 HVGs differed). Ported by loess agent, merged: HVGs 2000/2000 = Seurat, fit within 6e-12 of R.
+  Final PBMC 3k vs Seurat: PC sim 0.99995, kNN 0.976, ARI 0.936 (scanpy: 0.9997 / 0.968 / 0.818).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
