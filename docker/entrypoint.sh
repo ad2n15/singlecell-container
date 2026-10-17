@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Container entry point: test | bench | all | shell
+# Container entry point: test | bench | pipeline | all | shell
 #   test   tests/run_all.sh (every stage; STAGES="rust pytest" to pick some, SKIP="bench-smoke" to omit)
 #   bench  synthetic benchmark: CELLS=100000 GENES=5000 TYPES=10 THREADS=$(nproc) REPS=3
 #          ENGINES=seurat,scanpy,scfast-cpu NAME=run_$CELLS SKIP_UMAP=0 TIMEOUT=7200
+#   pipeline  every step's tables and plots for your own data: INPUT_FILE=/input/<file>.h5
+#          (docker/run.sh mounts it), ENGINE=scfast-cpu|scanpy, NAME=pipeline_<file>,
+#          optional MAX_GENES MAX_MT SKIP_UMAP=1 UMAP_EPOCHS=100 UMAP_INIT=pca
 #   all    test, then bench
 #   shell  interactive bash
 set -uo pipefail
@@ -26,10 +29,24 @@ run_bench() {
   echo "== done: bench/results/$NAME/report.md"
 }
 
+run_pipeline() {
+  [[ -n "${INPUT_FILE:-}" && -e "$INPUT_FILE" ]] || { echo "set INPUT (docker/run.sh) to a 10x .h5, .h5ad or matrix folder" >&2; exit 2; }
+  name="${NAME:-pipeline_$(basename "${INPUT_FILE%.*}" | cut -c1-40)}"
+  args=(--input "$INPUT_FILE" --out "bench/results/$name" --engine "${ENGINE:-scfast-cpu}")
+  [[ -n "${MAX_GENES:-}" ]] && args+=(--max-genes "$MAX_GENES")
+  [[ -n "${MAX_MT:-}" ]] && args+=(--max-mt "$MAX_MT")
+  [[ "${SKIP_UMAP:-0}" == 1 ]] && args+=(--skip-umap)
+  [[ -n "${UMAP_EPOCHS:-}" ]] && args+=(--umap-epochs "$UMAP_EPOCHS")
+  [[ -n "${UMAP_INIT:-}" ]] && args+=(--umap-init "$UMAP_INIT")
+  python bench/pipeline_steps.py "${args[@]}"
+  echo "== outputs in bench/results/$name (summary.md lists every step's folder)"
+}
+
 case "$mode" in
   test)  run_tests ;;
   bench) run_bench ;;
+  pipeline) run_pipeline ;;
   all)   run_tests; rc=$?; run_bench; exit $(( rc || $? )) ;;
   shell) exec bash ;;
-  *) echo "usage: test | bench | all | shell" >&2; exit 2 ;;
+  *) echo "usage: test | bench | pipeline | all | shell" >&2; exit 2 ;;
 esac
