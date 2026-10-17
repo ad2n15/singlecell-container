@@ -17,3 +17,4 @@ __pycache__/
 # benchmark runs (commit a chosen baseline with git add -f)
 bench/results/
 __pycache__/
+rust/target/

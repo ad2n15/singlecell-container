@@ -1,0 +1,17 @@
+[package]
+name = "scfast-py"
+description = "Python bindings for scfast (PyO3); built with maturin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "scfast"
+crate-type = ["cdylib"]
+
+[dependencies]
+scfast-core.workspace = true
+# abi3-py310: one wheel for every CPython >= 3.10.
+pyo3 = { version = "0.30", features = ["abi3-py310"] }
+numpy = "0.30"
