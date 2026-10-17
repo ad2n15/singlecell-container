@@ -5,6 +5,13 @@ Reads a ``slim`` exchange file and writes a ``results`` exchange file
 installed and a CUDA device is visible; otherwise on CPU with scanpy. Both
 branches perform the same steps with the same parameters.
 
+Test-only override: with the environment variable ``SCPIPE_ALLOW_CPU_AS_GPU=1``,
+``device="gpu"`` on a machine without a usable GPU runs the CPU branch instead
+of failing, and the summary (and ``uns["gpu_core"]["device"]``) reports
+``device: "cpu-as-gpu"``. It exists so the GPU path of the pipeline (exchange
+write -> gpu_core -> merge) can be exercised end to end on CPU-only machines;
+never set it in production runs.
+
 CLI::
 
     python -m scpipe.gpu_core --in slim.h5ad --out results.h5ad \
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import resource
 import sys
 import time
@@ -59,6 +67,8 @@ def _resolve_device(device: str) -> str:
     if device == "cpu":
         return "cpu"
     ok, reason = gpu_available()
+    if device == "gpu" and not ok and os.environ.get("SCPIPE_ALLOW_CPU_AS_GPU") == "1":
+        return "cpu-as-gpu"  # test-only override, see module docstring
     if device == "gpu" and not ok:
         raise DeviceError(f"device='gpu' requested but the GPU path is unavailable: {reason}")
     return "gpu" if ok else "cpu"
@@ -140,7 +150,7 @@ def run(
     if batch_key is not None:
         if batch_key not in adata.obs.columns:
             raise ValueError(f"batch_key {batch_key!r} is not an obs column")
-        if used == "cpu":
+        if used != "gpu":
             _check_harmony_cpu()
 
     n_comps = int(min(n_pcs, min(adata.n_vars, adata.n_obs) - 1))

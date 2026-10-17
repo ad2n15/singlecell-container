@@ -1,0 +1,410 @@
+"""Tests for portability (docs/agents-spec.md section 8, DESIGN 7): scpipe.site, the site files,
+scheduler templates and submission with a fake sbatch/bsub on PATH, split mode, init-site and the
+doctor extras. All offline (SCPIPE_DOCTOR_OFFLINE=1)."""
+
+import io
+import json
+import os
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+import yaml
+
+from scpipe import config as C
+from scpipe import runner as R
+from scpipe import site as S
+
+from test_runner import dummy_stages, project  # noqa: F401  (fixture)
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    monkeypatch.setenv("SCPIPE_DOCTOR_OFFLINE", "1")
+
+
+def fake_scheduler(tmp_path, monkeypatch, name="sbatch", reply="Submitted batch job 4242", stdin=False):
+    """A fake submit command on PATH that records its arguments (and stdin) and prints a job id."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    log = tmp_path / f"{name}.calls"
+    body = f'#!/bin/sh\necho "$@" >> {log}\n' + (f"cat >> {log}\n" if stdin else "") + f'echo "{reply}"\n'
+    exe = bindir / name
+    exe.write_text(body)
+    exe.chmod(exe.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return log
+
+
+def no_scheduler(tmp_path, monkeypatch):
+    """A PATH with only the interpreter's directory: no sbatch/qsub/bsub anywhere."""
+    bindir = tmp_path / "nobin"
+    bindir.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", str(bindir))
+    monkeypatch.setattr(S, "detect_scheduler", lambda: None)
+
+
+def resolved(proj):
+    cfg = C.load_config(str(proj / "config.yaml"))
+    return C.prepare_run_dir(cfg)
+
+
+# --------------------------------------------------------------------------
+# Detection and site drafting
+# --------------------------------------------------------------------------
+
+
+def test_detect_scheduler(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    monkeypatch.undo()
+    monkeypatch.setenv("SCPIPE_DOCTOR_OFFLINE", "1")
+    bindir = tmp_path / "nobin"
+    monkeypatch.setenv("PATH", str(bindir))
+    assert S.detect_scheduler() is None
+    fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    assert S.detect_scheduler() == "slurm"
+
+
+def test_detect_site_never_raises_and_is_offline(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    det = S.detect_site(check_internet=True)
+    assert det["scheduler"] is None and det["cpus"] >= 1 and det["container_runtime"] in ("none", "docker", "apptainer", "singularity")
+    assert det["internet"]["checked"] and det["internet"]["llm"]["ok"] is False and "skipped" in det["internet"]["llm"]["detail"]
+    det2 = S.detect_site(check_internet=False)
+    assert det2["internet"]["llm"] is None
+
+
+def test_draft_site_workstation_and_hpc():
+    det = {"cpus": 16, "memory_gb": 128.0, "scheduler": None, "gpu": {"present": True, "total_gb": 24.0, "name": "L4"},
+           "container_runtime": "none", "internet": {"checked": True, "llm": {"ok": True}}, "scratch_candidates": ["/tmp"]}
+    ws = S.draft_site(det)
+    assert ws["site"] == "workstation" and ws["execution"] == "direct"
+    assert ws["resources"]["threads"] == 16 and ws["resources"]["nice"] == 0 and ws["resources"]["gpu_mem_cap_gb"] == 20
+    assert ws["scheduler"]["cpus"] is None and ws["scheduler"]["gpus"] == 1
+    det.update(scheduler="slurm", container_runtime="apptainer", scratch_candidates=["/scratch"])
+    hpc = S.draft_site(det, "mycluster")
+    assert hpc["site"] == "mycluster" and hpc["execution"] == "direct"
+    assert hpc["resources"]["threads"] == 8 and hpc["resources"]["nice"] == 10 and hpc["resources"]["max_memory_gb"] == 64
+    assert hpc["scratch"] == "/scratch/$USER/scpipe" and hpc["container"] == {"runtime": "apptainer", "image": None, "options": ["--nv"]}
+    # a scheduler but no route to the LLM endpoint from this node: suggest split
+    det["internet"] = {"checked": True, "llm": {"ok": False}}
+    assert S.draft_site(det)["execution"] == "split"
+    # nothing detected at all
+    bare = S.draft_site({})
+    assert bare["execution"] == "direct" and bare["resources"]["threads"] == 1 and bare["container"]["runtime"] == "none"
+    text = S.site_yaml_text(hpc, det)
+    assert yaml.safe_load(text) == hpc and text.startswith("#")
+
+
+@pytest.mark.parametrize("name", ["iridisx", "workstation", "docker"])
+def test_shipped_site_files_are_valid(name):
+    path = REPO / "conf" / "sites" / f"{name}.yaml"
+    assert S.validate_site_file(path) == []
+    data = S.load_site_file(path)
+    assert data["site"] == name and data["execution"] in C.EXECUTION_MODES
+    assert set(data) <= set(C.SITE_SECTIONS) | {"site"}
+
+
+def test_validate_site_file_reports_problems(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text("site: x\nexecution: cloud\nresources: {threads: 2, bogus: 1}\nfoo: 1\ncontainer: 3\n")
+    probs = S.validate_site_file(p)
+    assert any("execution" in x for x in probs) and any("bogus" in x for x in probs)
+    assert any("unknown site key 'foo'" in x for x in probs) and any("container must be a mapping" in x for x in probs)
+    assert S.validate_site_file(tmp_path / "missing.yaml")
+
+
+def test_init_site_cli(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    out = io.StringIO()
+    dest = tmp_path / "sites" / "here.yaml"
+    assert R.main(["init-site", "--write", str(dest), "--name", "here", "--no-internet-check"], out=out) == 0
+    assert dest.exists() and f"site: {dest}" in out.getvalue()
+    assert S.validate_site_file(dest) == []
+    site = yaml.safe_load(dest.read_text())
+    assert site["site"] == "here" and site["execution"] == "direct"
+    assert "# internet: not checked" in dest.read_text()
+    # printed instead of written; JSON detection
+    out = io.StringIO()
+    assert R.main(["init-site", "--no-internet-check"], out=out) == 0
+    assert yaml.safe_load(out.getvalue())["site"] == "workstation"
+    out = io.StringIO()
+    assert R.main(["init-site", "--json"], out=out) == 0
+    det = json.loads(out.getvalue())
+    assert det["scheduler"] is None and "gpu" in det and det["internet"]["llm"]["ok"] is False
+    # a site file drafted here loads through config.yaml (site: <path>)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "samples.csv").write_text("sample_id,path\nA,a.h5ad\n")
+    (proj / "a.h5ad").write_text("x")
+    (proj / "config.yaml").write_text(yaml.safe_dump({"project": "p", "run_dir": str(tmp_path / "run"), "samples": "samples.csv",
+                                                      "site": str(dest), "resources": {"threads": 1}}))
+    cfg = C.load_config(str(proj / "config.yaml"))
+    assert cfg["site"] == str(dest) and cfg["resources"]["threads"] == 1  # config.yaml wins per key
+    assert cfg["resources"]["nice"] == site["resources"]["nice"] and cfg["execution"] == "direct"
+
+
+def test_site_file_by_name_supplies_defaults(project):
+    (project / "config.yaml").write_text((project / "config.yaml").read_text() + "site: iridisx\n")
+    cfg = C.load_config(str(project / "config.yaml"))
+    assert cfg["site"] == "iridisx" and cfg["site_source"].endswith("conf/sites/iridisx.yaml")
+    assert cfg["container"]["runtime"] == "apptainer" and cfg["scheduler"]["partition"] == "gpu"
+    assert cfg["resources"]["threads"] == 3  # from config.yaml, not the site file
+
+
+# --------------------------------------------------------------------------
+# Batch scripts and submission
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sched,marker", [("slurm", "#SBATCH --job-name="), ("pbs", "#PBS -N "), ("lsf", "#BSUB -J "), ("sge", "#$ -N ")])
+def test_render_batch_script(project, sched, marker):
+    cfg = resolved(project)
+    cfg["scheduler"] = dict(cfg["scheduler"], partition="gpu", account="acc1", time="1-02:30:00", gpus=1, extra=["--qos=low"])
+    rd = Path(cfg["run_dir"])
+    txt = S.render_batch_script(cfg, rd, sched, until="S2", no_gates=True)
+    assert txt.startswith("#!/usr/bin/env bash") and marker in txt
+    assert "gpu" in txt and "acc1" in txt and "--qos=low" in txt
+    assert f"-m scpipe resume --run-dir {rd} --execution direct --until S2 --no-gates" in txt
+    assert "set -euo pipefail" in txt and f"export PYTHONPATH={REPO / 'python'}" in txt
+    assert "SCPIPE_REPO_ROOT=" in txt and "ANTHROPIC_API_KEY" not in txt
+    if sched == "lsf":
+        assert "#BSUB -W 26:30" in txt
+    elif sched == "slurm":
+        assert "--time=1-02:30:00" in txt and "--gres=gpu:1" in txt and "--cpus-per-task=3" in txt and "--mem=12G" in txt
+    elif sched == "pbs":
+        assert "walltime=1-02:30:00" in txt and ":ngpus=1" in txt
+    plain = S.render_batch_script(cfg, rd, sched)
+    assert "--until" not in plain and "--no-gates" not in plain
+    with pytest.raises(C.ConfigError):
+        S.render_batch_script(cfg, rd, "nqs")
+
+
+def test_container_prefix(project):
+    cfg = resolved(project)
+    rd = Path(cfg["run_dir"])
+    assert S.container_prefix(cfg, rd) == ""
+    cfg["container"] = {"runtime": "apptainer", "image": "/img/scpipe.sif", "options": ["--nv"]}
+    pre = S.container_prefix(cfg, rd)
+    assert pre.startswith("apptainer exec --nv --bind") and pre.endswith("/img/scpipe.sif") and str(rd) in pre
+    assert "apptainer exec --nv" in S.render_batch_script(cfg, rd, "slurm")
+    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/scpipe:1", "options": ["--gpus", "all"]}
+    assert S.container_prefix(cfg, rd).startswith("docker run --rm --gpus all -v")
+
+
+def test_submit_slurm_with_fake_sbatch(project, tmp_path, monkeypatch):
+    log = fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    cfg = resolved(project)
+    rd = Path(cfg["run_dir"])
+    out = io.StringIO()
+    rec = S.submit(cfg, rd, "slurm", out=out)
+    script = rd / "submit" / "slurm.sh"
+    assert script.exists() and rec["script"] == str(script) and rec["job_id"] == "4242"
+    assert log.read_text().strip() == str(script)                     # sbatch <script>
+    assert script.stat().st_mode & stat.S_IXUSR
+    last = json.loads((rd / "submit" / "last_job.json").read_text())
+    assert last["job_id"] == "4242" and last["scheduler"] == "slurm" and last["mode"] == "slurm"
+    assert "submitted slurm job 4242" in out.getvalue() and "scpipe status --run-dir" in out.getvalue()
+
+
+def test_submit_lsf_reads_script_from_stdin(project, tmp_path, monkeypatch):
+    log = fake_scheduler(tmp_path, monkeypatch, "bsub", reply="Job <77> is submitted to queue <normal>.", stdin=True)
+    cfg = resolved(project)
+    rec = S.submit(cfg, Path(cfg["run_dir"]), "lsf", out=io.StringIO())
+    assert rec["job_id"] == "77"
+    assert "#BSUB -J scpipe-t" in log.read_text()                      # script content arrived on stdin
+
+
+def test_submit_without_command_or_with_failure(project, tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    cfg = resolved(project)
+    with pytest.raises(C.ConfigError, match="not on PATH"):
+        S.submit(cfg, Path(cfg["run_dir"]), "slurm", out=io.StringIO())
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir(exist_ok=True)
+    (bindir / "qsub").write_text("#!/bin/sh\necho 'qsub: no partition' >&2\nexit 1\n")
+    (bindir / "qsub").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    with pytest.raises(C.ConfigError, match="qsub failed"):
+        S.submit(cfg, Path(cfg["run_dir"]), "pbs", out=io.StringIO())
+
+
+def test_run_with_execution_slurm_submits_instead_of_running(project, tmp_path, monkeypatch):
+    log = fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml"), "--execution", "slurm"], stages=dummy_stages(), out=out)
+    assert code == 0, out.getvalue()
+    rd = Path(yaml.safe_load((project / "config.yaml").read_text())["run_dir"])
+    assert (rd / "submit" / "slurm.sh").exists() and "Submitted" not in out.getvalue()
+    assert "submitted slurm job 4242" in out.getvalue()
+    assert not (rd / "calls.log").exists()                            # no stage ran here
+    assert (rd / "config" / "config.resolved.yaml").exists()         # the run dir is prepared for the job
+    st = json.loads((rd / "state.json").read_text()) if (rd / "state.json").exists() else {"stages": {}}
+    assert not any(v.get("status") == "done" for v in st.get("stages", {}).values())
+    # the job's command line resumes the same run directory in direct mode
+    txt = (rd / "submit" / "slurm.sh").read_text()
+    assert f"scpipe resume --run-dir {rd} --execution direct" in txt
+    # ... which is what the job would do: run it here as the job would
+    out = io.StringIO()
+    code = R.main(["resume", "--run-dir", str(rd), "--execution", "direct"], stages=dummy_stages(), out=out)
+    assert code == 0, out.getvalue()
+    st = json.loads((rd / "state.json").read_text())
+    assert all(st["stages"][s]["status"] == "done" for s in ("S0", "S1a", "S1b", "S1c", "S2"))
+    # sbatch was called exactly once
+    assert len(log.read_text().splitlines()) == 1
+
+
+def test_execution_from_config_and_site_file(project, tmp_path, monkeypatch):
+    fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    site = tmp_path / "site.yaml"
+    site.write_text("site: t\nexecution: slurm\nscheduler: {partition: batch, time: '02:00:00'}\n")
+    (project / "config.yaml").write_text((project / "config.yaml").read_text() + f"site: {site}\n")
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml")], stages=dummy_stages(), out=out)
+    assert code == 0, out.getvalue()
+    rd = Path(yaml.safe_load((project / "config.yaml").read_text())["run_dir"])
+    txt = (rd / "submit" / "slurm.sh").read_text()
+    assert "#SBATCH --partition=batch" in txt and "#SBATCH --time=02:00:00" in txt
+    # --execution direct overrides the site file and runs here
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml"), "--execution", "direct"], stages=dummy_stages(), out=out)
+    assert code == 0 and (rd / "calls.log").exists()
+
+
+def test_split_mode_submits_heavy_stages_with_no_gates(project, tmp_path, monkeypatch):
+    log = fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml"), "--execution", "split"], stages=dummy_stages(), out=out)
+    assert code == 0, out.getvalue()
+    rd = Path(yaml.safe_load((project / "config.yaml").read_text())["run_dir"])
+    txt = (rd / "submit" / "slurm.sh").read_text()
+    assert "--until S2 --no-gates" in txt                              # last heavy stage of the dummy registry
+    last = json.loads((rd / "submit" / "last_job.json").read_text())
+    assert last["mode"] == "split" and last["until"] == "S2" and last["no_gates"] is True
+    assert "then, on this node" in out.getvalue() and "scpipe resume --run-dir" in out.getvalue()
+    assert len(log.read_text().splitlines()) == 1
+    # the heavy stages before S5, skipping gates
+    assert S.heavy_until(["S0", "S1a", "S1b", "S1c", "G1", "S2", "S3", "G2", "G3", "S4", "G4", "S5"]) == "S4"
+    assert S.heavy_until(["S0", "G1", "S5"]) == "S0"
+
+
+def test_split_mode_needs_a_scheduler(project, tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml"), "--execution", "split"], stages=dummy_stages(), out=out)
+    assert code == 2 and "needs a scheduler" in out.getvalue()
+    out = io.StringIO()
+    code = R.main(["run", "--config", str(project / "config.yaml"), "--execution", "pbs"], stages=dummy_stages(), out=out)
+    assert code == 2 and "not on PATH" in out.getvalue()
+
+
+# --------------------------------------------------------------------------
+# doctor extras
+# --------------------------------------------------------------------------
+
+
+def by_name(checks):
+    return {(c["group"], c["name"]): c for c in checks}
+
+
+def test_doctor_checks_without_llm(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    ch = by_name(S.doctor_checks({}))
+    assert ch[("site", "site file")]["ok"] and "init-site" in ch[("site", "site file")]["detail"]
+    assert ch[("site", "execution")]["ok"] and ch[("site", "container")]["ok"]
+    assert ch[("llm", "provider")]["ok"] and "not configured" in ch[("llm", "provider")]["detail"]
+    assert ("llm", "tool-use test") not in ch and ("llm", "budget") not in ch
+    assert ch[("opentargets", "api")]["ok"] is False and "skipped" in ch[("opentargets", "api")]["detail"]
+    assert all(not c["required"] for k, c in ch.items() if k[0] in ("llm", "opentargets"))
+
+
+def test_doctor_checks_llm_without_key_skips_tool_test(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("MY_KEY", raising=False)
+    ledger = tmp_path / "ledger.json"
+    ledger.write_text(json.dumps({"runs": {"r1": 1.25, "r2": 0.5}}))
+    cfg = {"llm": {"default": {"provider": "anthropic", "model": "claude-haiku-4-5", "api_key_env": "MY_KEY"},
+                   "budget": {"total_limit": 30, "ledger_path": str(ledger)}},
+           "opentargets": {"offline": True, "cache_dir": "/c"}}
+    ch = by_name(S.doctor_checks(cfg))
+    assert ch[("llm", "api key")]["ok"] is False and "$MY_KEY is not set" in ch[("llm", "api key")]["detail"]
+    assert ch[("llm", "tool-use test")]["ok"] and ch[("llm", "tool-use test")]["detail"] == "skipped (no API key)"
+    assert "api.anthropic.com" in ch[("llm", "endpoint")]["detail"]
+    assert ch[("llm", "budget")]["ok"] and "GBP 1.75 of 30.00" in ch[("llm", "budget")]["detail"]
+    assert ch[("opentargets", "api")]["ok"] and "offline" in ch[("opentargets", "api")]["detail"]
+    # over budget
+    ledger.write_text(json.dumps({"runs": {"r1": 31}}))
+    assert by_name(S.doctor_checks(cfg))[("llm", "budget")]["ok"] is False
+    # the older flat shape is accepted too
+    ch = by_name(S.doctor_checks({"llm": {"provider": "openai_compatible", "base_url": "http://localhost:11434/v1"}}))
+    assert "OPENAI_API_KEY" in ch[("llm", "api key")]["detail"] and "localhost:11434" in ch[("llm", "endpoint")]["detail"]
+
+
+def test_doctor_checks_llm_mock_and_tool_use(tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "mock"}}}))
+    assert ch[("llm", "provider")]["ok"] and "mock" in ch[("llm", "provider")]["detail"]
+    # with a key, the 1-token tool-use test runs through scpipe.llm.get_provider when it exists;
+    # a provider that fails must give a failed, non-required check rather than an exception
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(S, "_llm_provider_module", lambda: None)
+    ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "anthropic"}}}))
+    assert ch[("llm", "tool-use test")]["ok"] and "skipped" in ch[("llm", "tool-use test")]["detail"]
+
+    class Boom:
+        @staticmethod
+        def get_provider(cfg_llm, role):
+            raise RuntimeError("no network here")
+
+    monkeypatch.setattr(S, "_llm_provider_module", lambda: Boom)
+    ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "anthropic"}}}))
+    c = ch[("llm", "tool-use test")]
+    assert c["ok"] is False and not c["required"] and "no network here" in c["detail"]
+
+    class Fake:
+        @staticmethod
+        def get_provider(cfg_llm, role):
+            class P:
+                def complete(self, **kw):
+                    assert kw["tools"] and kw["max_tokens"] <= 16
+                    return type("R", (), {"tool_calls": [{"name": "ping"}], "text": "", "stop_reason": "tool_use"})()
+
+            return P()
+
+    monkeypatch.setattr(S, "_llm_provider_module", lambda: Fake)
+    ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "anthropic"}}}))
+    assert ch[("llm", "tool-use test")]["ok"] and "tool_calls=1" in ch[("llm", "tool-use test")]["detail"]
+
+
+def test_doctor_checks_execution_and_site(project, tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    cfg = resolved(project)
+    cfg["execution"] = "slurm"
+    ch = by_name(S.doctor_checks(cfg))
+    assert ch[("site", "execution")]["ok"] is False and "sbatch" in ch[("site", "execution")]["detail"]
+    fake_scheduler(tmp_path, monkeypatch, "sbatch")
+    assert by_name(S.doctor_checks(cfg))[("site", "execution")]["ok"]
+    cfg["execution"] = "split"
+    monkeypatch.setattr(S, "detect_scheduler", lambda: "slurm")
+    assert by_name(S.doctor_checks(cfg))[("site", "execution")]["ok"]
+    cfg["container"] = {"runtime": "apptainer", "image": "/nope.sif"}
+    c = by_name(S.doctor_checks(cfg))[("site", "container")]
+    assert c["ok"] is False and ("not on PATH" in c["detail"] or "not found" in c["detail"])
+    cfg["site"], cfg["site_source"] = "iridisx", str(REPO / "conf" / "sites" / "iridisx.yaml")
+    assert by_name(S.doctor_checks(cfg))[("site", "site file")]["ok"]
+    cfg["site_source"] = str(tmp_path / "missing.yaml")
+    assert by_name(S.doctor_checks(cfg))[("site", "site file")]["ok"] is False
+
+
+def test_doctor_cli_includes_portability_checks(project, tmp_path, monkeypatch):
+    no_scheduler(tmp_path, monkeypatch)
+    rep = R.doctor(str(project / "config.yaml"))
+    groups = {c["group"] for c in rep["checks"]}
+    assert {"site", "llm", "opentargets"} <= groups
+    out = io.StringIO()
+    R._print_doctor(rep, out)
+    assert "site:" in out.getvalue() and "llm:" in out.getvalue()
