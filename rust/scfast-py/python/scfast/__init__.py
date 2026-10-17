@@ -380,7 +380,7 @@ def leiden(
     seed
         Random seed; the same seed and graph give identical labels.
     n_iterations
-        Leiden iterations (Seurat ``n.iter``), at least 1. On cuGraph this is ``max_level``.
+        Leiden iterations (Seurat ``n.iter``), at least 1. cuGraph has no such knob: it runs to ``max_level`` 100.
     device
         ``"auto"`` (cuGraph Leiden when this build has the ``cugraph`` feature and a CUDA
         device is usable, else the CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"`` (an
