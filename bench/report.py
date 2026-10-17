@@ -21,10 +21,10 @@ import common  # noqa: E402
 
 BASELINE = "seurat"
 # Fixed order: an engine keeps its colour and marker in every chart and run.
-ENGINE_ORDER = ["seurat", "scanpy", "rapids", "scfast-cpu", "scfast-gpu"]
-COLORS = {"seurat": "#2a78d6", "scanpy": "#eb6834", "rapids": "#1baf7a",
+ENGINE_ORDER = ["seurat", "scanpy", "scanpy-gpu", "rapids", "scfast-cpu", "scfast-gpu"]
+COLORS = {"seurat": "#2a78d6", "scanpy": "#eb6834", "scanpy-gpu": "#1baf7a", "rapids": "#1baf7a",
           "scfast-cpu": "#eda100", "scfast-gpu": "#e87ba4"}
-MARKERS = {"seurat": "o", "scanpy": "s", "rapids": "^", "scfast-cpu": "D", "scfast-gpu": "v"}
+MARKERS = {"seurat": "o", "scanpy": "s", "scanpy-gpu": "^", "rapids": "^", "scfast-cpu": "D", "scfast-gpu": "v"}
 STEP_ORDER = ["read", "to_gpu", "normalize", "hvg", "scale", "pca", "neighbors", "cluster", "umap", "to_cpu"]
 COMPUTE_STEPS = ["normalize", "hvg", "scale", "pca", "neighbors", "cluster", "umap"]
 

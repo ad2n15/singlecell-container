@@ -10,9 +10,9 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-INPUT="" NAME="" SIZES="all" ENGINES="seurat,scanpy,rapids,scfast-cpu,scfast-gpu"
+INPUT="" NAME="" SIZES="all" ENGINES="seurat,scanpy,scanpy-gpu,scfast-cpu,scfast-gpu"
 REPS=3 THREADS="" LABELS="" TIMEOUT=7200 PREP_ARGS=() RUN_ARGS=()
-PYTHON="${PYTHON:-python3}" RSCRIPT="${RSCRIPT:-Rscript}"
+PYTHON="${PYTHON:-python3}" RAPIDS_PYTHON="${RAPIDS_PYTHON:-$PYTHON}" RSCRIPT="${RSCRIPT:-Rscript}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,15 +41,21 @@ if [[ -n "$THREADS" ]]; then
   RUN_ARGS+=(--threads "$THREADS")
 fi
 
-if [[ "${SKIP_PREP:-0}" == "1" ]]; then
+if [[ "${SKIP_PREP:-0}" == "1" ]] && [[ -d "$RUN/data" ]] && compgen -G "$RUN/data/n*" >/dev/null; then
   echo "== prep skipped (SKIP_PREP=1; using existing $RUN/data)"
 else
-  echo "== prep -> $RUN/data"
+  if [[ "${SKIP_PREP:-0}" == "1" ]]; then
+    echo "== prep -> $RUN/data (SKIP_PREP ignored; missing or empty $RUN/data)"
+  else
+    echo "== prep -> $RUN/data"
+  fi
   "$PYTHON" "$HERE/prep.py" --input "$INPUT" --out "$RUN/data" --sizes "$SIZES" \
     ${LABELS:+--labels "$LABELS"} "${PREP_ARGS[@]}"
 fi
 
-mapfile -t DATASETS < <(cd "$RUN/data" && ls -d n* | sort -t n -k2 -n)
+[[ -d "$RUN/data" ]] || { echo "prep failed: no $RUN/data" >&2; exit 1; }
+mapfile -t DATASETS < <(cd "$RUN/data" && ls -d n* 2>/dev/null | sort -t n -k2 -n)
+[[ ${#DATASETS[@]} -gt 0 ]] || { echo "prep produced no datasets under $RUN/data" >&2; exit 1; }
 IFS=',' read -r -a ENGINE_LIST <<< "$ENGINES"
 declare -A STOPPED=()
 
@@ -59,6 +65,11 @@ for ds in "${DATASETS[@]}"; do
     echo "== $eng $ds"
     if [[ "$eng" == "seurat" ]]; then
       cmd=("$RSCRIPT" "$HERE/run_seurat.R")
+    elif [[ "$eng" == "rapids" || "$eng" == "scanpy-gpu" ]]; then
+      cmd=("$RAPIDS_PYTHON" "$HERE/run_py.py" --engine "$eng")
+    elif [[ "$eng" == "scfast-gpu" ]]; then
+      # Host venv (maturin scfast + CUDA toolkit); not the rapids Apptainer image.
+      cmd=("$PYTHON" "$HERE/run_py.py" --engine "$eng")
     else
       cmd=("$PYTHON" "$HERE/run_py.py" --engine "$eng")
     fi

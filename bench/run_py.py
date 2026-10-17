@@ -2,9 +2,10 @@
 
 Engines:
   scanpy      Scanpy on CPU
-  rapids      rapids-singlecell on GPU (CuPy / RAPIDS)
+  scanpy-gpu  Scanpy workflow on GPU (rapids-singlecell / CuPy)
+  rapids      alias for scanpy-gpu (same implementation)
   scfast-cpu  scfast Rust engine, CPU backend   (records 'unavailable' until built)
-  scfast-gpu  scfast Rust engine, CUDA backend  (records 'unavailable' until built)
+  scfast-gpu  scfast Rust engine, CUDA backend (PCA / kNN / Leiden on GPU; UMAP on CPU)
 
 Steps (same names and parameters as bench/run_seurat.R): read, normalize, hvg,
 scale, pca, neighbors, cluster, umap; GPU engines add to_gpu / to_cpu transfers.
@@ -26,7 +27,7 @@ T_PROCESS = time.perf_counter()
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402  (stdlib-only import; numpy not loaded yet)
 
-ENGINES = ("scanpy", "rapids", "scfast-cpu", "scfast-gpu")
+ENGINES = ("scanpy", "scanpy-gpu", "rapids", "scfast-cpu", "scfast-gpu")
 
 
 def parse(argv=None):
@@ -153,27 +154,36 @@ class Unavailable(RuntimeError):
     pass
 
 
+def _seurat_leiden_seed(seed: int) -> int:
+    """leidenbase (Seurat >= 5.1) requires seed >= 1; bench default is 0."""
+    return seed if seed >= 1 else 1
+
+
 def make_engine(name: str):
     if name == "scanpy":
         return ScanpyEngine()
-    if name == "rapids":
-        return RapidsEngine()
-    try:
-        import scfast  # noqa: F401
-    except ImportError as e:
-        raise Unavailable(f"scfast is not built ({e}); see rust/scfast-py") from e
-    if name == "scfast-gpu":
-        raise Unavailable("scfast CUDA backend is not implemented yet (Phase 6)")
-    return ScfastEngine()
+    if name in ("rapids", "scanpy-gpu"):
+        return ScanpyGpuEngine()
+    if name in ("scfast-cpu", "scfast-gpu"):
+        try:
+            import scfast  # noqa: F401
+        except ImportError as e:
+            raise Unavailable(f"scfast is not built ({e}); see rust/scfast-py") from e
+        if name == "scfast-gpu":
+            info = scfast.device_info()
+            if not info.get("cuda_available"):
+                err = info.get("cuda_error") or "no CUDA device"
+                raise Unavailable(
+                    f"scfast CUDA not available (cuda_built={info.get('cuda_built')}; {err}); "
+                    "build with: maturin develop --release --features cuda,cugraph -m rust/scfast-py"
+                ) from None
+            return ScfastGpuEngine()
+        return ScfastEngine()
+    raise Unavailable(f"unknown engine {name!r}")
 
 
 class ScfastEngine(ScanpyEngine):
-    """Scanpy for I/O, normalisation and HVGs; scfast for scale+PCA, kNN+SNN and Leiden.
-
-    'scale' is a no-op: scfast's PCA scales implicitly, which is the point of it. The
-    SNN graph is stored in obsp["connectivities"] so UMAP runs on the same graph Seurat
-    would use, and the kNN distances in obsp["distances"] so the parity outputs line up.
-    """
+    """Scanpy for I/O, norm, HVGs, and Seurat-style ScaleData (clip 10); scfast for PCA/kNN/SNN/Leiden."""
 
     device = "cpu"
 
@@ -188,15 +198,28 @@ class ScfastEngine(ScanpyEngine):
     def scale(self, a, cfg):
         b = a[:, a.var.highly_variable].copy()
         del b.layers["counts"]
+        # Seurat ScaleData(scale.max=10); implicit scfast PCA does not clip (rust/scfast-core pca.rs).
+        self.sc.pp.scale(b, max_value=10)
         return b
 
-    def pca(self, a, cfg):
+    def _scfast_pca(self, a, cfg, device: str = "auto"):
         import scipy.sparse as sp
 
-        emb, load, sdev = self.scfast.pca(sp.csr_matrix(a.X), n_comps=cfg.n_pcs, seed=cfg.seed)
+        emb, load, sdev = self.scfast.pca(
+            sp.csr_matrix(a.X),
+            n_comps=cfg.n_pcs,
+            seed=cfg.seed,
+            scale=False,
+            oversample=30,
+            power_iters=10,
+            device=device,
+        )
         a.obsm["X_pca"] = emb
         a.varm["PCs"] = load
         a.uns["pca"] = {"variance": (sdev.astype("float64") ** 2)}
+
+    def pca(self, a, cfg):
+        self._scfast_pca(a, cfg, device="cpu")
 
     def neighbors(self, a, cfg):
         import numpy as np
@@ -217,9 +240,88 @@ class ScfastEngine(ScanpyEngine):
     def cluster(self, a, cfg):
         import pandas as pd
 
-        labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
-                                    n_iterations=2)
+        labels = self.scfast.leiden(
+            a.obsp["snn"],
+            resolution=cfg.resolution,
+            seed=_seurat_leiden_seed(cfg.seed),
+            n_iterations=2,
+            device="cpu",  # "auto" picks cuGraph when CUDA is loaded; not Seurat-parity yet
+        )
         a.obs["cluster"] = pd.Categorical(labels.astype(str))
+
+
+class ScanpyGpuEngine(RapidsEngine):
+    """Scanpy-compatible steps on GPU via rapids-singlecell."""
+
+    device = "gpu"
+
+    def startup(self):
+        versions = super().startup()
+        versions["scanpy_gpu_backend"] = "rapids-singlecell"
+        return versions
+
+
+class ScfastGpuEngine(ScfastEngine):
+    """Same workflow as scfast-cpu; PCA, kNN and Leiden run on CUDA via the Rust backend."""
+
+    device = "gpu"
+    _scfast_device = "cuda"
+
+    def startup(self):
+        versions = super().startup()
+        info = self.scfast.device_info()
+        versions["scfast_device_info"] = info
+        versions["scfast_gpu_backend"] = "scfast-cuda"
+        self._cp = None
+        self._pool = None
+        try:
+            import cupy as cp
+
+            cp.zeros(1)
+            cp.cuda.Device().synchronize()
+            self._cp = cp
+            self._pool = cp.get_default_memory_pool()
+            versions["cupy"] = cp.__version__
+        except ImportError:
+            versions["cupy"] = None
+        return versions
+
+    def sync(self):
+        if self._cp is not None:
+            self._cp.cuda.Device().synchronize()
+
+    def gpu_mem(self):
+        if self._pool is not None:
+            return int(self._pool.total_bytes())
+        return None
+
+    def to_gpu(self, a):
+        return None  # scfast transfers host CSR / embeddings internally
+
+    def to_cpu(self, a):
+        return None
+
+    def pca(self, a, cfg):
+        self._scfast_pca(a, cfg, device=self._scfast_device)
+
+    def neighbors(self, a, cfg):
+        import numpy as np
+        import scipy.sparse as sp
+
+        from scanpy.neighbors import _connectivity
+
+        emb = np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims])
+        idx, dist = self.scfast.knn(emb, k=cfg.k, method="exact", device=self._scfast_device)
+        n = idx.shape[0]
+        rows = np.repeat(np.arange(n), cfg.k - 1)
+        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
+        a.obsp["snn"] = self.scfast.snn(idx)
+        a.obsp["connectivities"] = _connectivity.umap(idx, dist, n_obs=n, n_neighbors=cfg.k)
+        a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
+                              "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
+
+    def cluster(self, a, cfg):
+        super().cluster(a, cfg)
 
 
 # ---------------------------------------------------------------- main

@@ -247,7 +247,9 @@ def run(
         X.sum_duplicates()
         X.sort_indices()
         with timed("pca"):
-            pcs, _loadings, _sdev = scfast.pca(X, n_comps=n_comps, seed=seed, device=scfast_device)
+            pcs, _loadings, _sdev = scfast.pca(
+                X, n_comps=n_comps, seed=seed, oversample=30, power_iters=10, device=scfast_device
+            )
         adata.obsm["X_pca"] = np.asarray(pcs, dtype=np.float32)
         if batch_key is not None:
             with timed("harmony"):

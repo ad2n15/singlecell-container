@@ -13,12 +13,7 @@ module load apptainer
 module load gocryptfs/2.4.0 2>/dev/null || module load gocryptfs 2>/dev/null || true
 APPT_BIN="$(command -v apptainer)"
 
-# SIF images (override if needed)
-export SIF_R_EXPORT="${SIF_R_EXPORT:-/iridisfs/ddnb/images/ddnb_r_full.sif}"
-export SIF_R_BENCH="${SIF_R_BENCH:-/iridisfs/ddnb/images/ddnb_r_full.sif}"
 export SIF_PY_BENCH="${SIF_PY_BENCH:-/iridisfs/ddnb/images/celltuner_py_container_v2.sif}"
-# Optional GPU engine (needs rapids-singlecell inside the image; often off)
-export SIF_GPU="${SIF_GPU:-/iridisfs/ddnb/images/bionemo-framework_nightly.sif}"
 
 export RDS=/iridisfs/ddnb/data/Onek1k/b3e8792e-a31b-404b-a866-250c43bc06d5.rds
 export BENCH_ROOT=/scratch/${USER}/bench/onek1k_b3e8792e
@@ -38,9 +33,15 @@ log "host: $(hostname)  user: $USER  pwd: $(pwd)"
 REPO="$(pwd)"
 # shellcheck source=bench/apptainer_bench_lib.sh
 source "${REPO}/bench/apptainer_bench_lib.sh"
+export SIF_GPU_BENCH="${SIF_GPU_BENCH:-$(apptainer_bench_rsc_sandbox)}"
+apptainer_bench_ensure_r_export_image
+apptainer_bench_ensure_r_image
+apptainer_bench_ensure_gpu_image
 export BENCH_VENV="${BENCH_VENV:-/scratch/${USER}/bench/venv}"
 
 read -r -a APPT_EXTRA <<< "${APPTAINER_EXTRA:---unsquash}"
+apptainer_bench_init_apptainer_tmp
+log "APPTAINER_TMPDIR=${APPTAINER_TMPDIR}"
 
 BIND=(
   --bind "${REPO}:${REPO}"
@@ -50,11 +51,18 @@ BIND=(
 
 appt_r() {
   local img="$1"; shift
-  "$APPT_BIN" exec "${APPT_EXTRA[@]}" "${BIND[@]}" "$img" "$@"
+  # shellcheck disable=SC2046
+  "$APPT_BIN" exec $(apptainer_bench_exec_flags "${img}") "${BIND[@]}" "$img" "$@"
 }
 
-for f in "$SIF_R_EXPORT" "$SIF_R_BENCH" "$SIF_PY_BENCH"; do
+for f in "$SIF_PY_BENCH"; do
   [[ -f "$f" ]] || { log "ERROR: missing image: $f"; exit 1; }
+done
+for f in "$SIF_R_EXPORT" "$SIF_R_BENCH"; do
+  [[ -f "$f" || -d "$f" ]] || {
+    log "ERROR: missing R image: $f (expected $(apptainer_bench_r_sif))"
+    exit 1
+  }
 done
 log "images: export=$SIF_R_EXPORT seurat=$SIF_R_BENCH python=$SIF_PY_BENCH"
 log "apptainer: $APPT_BIN  extra: ${APPT_EXTRA[*]}"
@@ -159,18 +167,27 @@ fi
 BENCH_DATA="${BENCH_DATA:-${TENX}}"
 
 export WRAP="${BENCH_ROOT}/wrappers"
+ENGINES="${ENGINES:-$(apptainer_bench_default_engines)}"
+export ENGINES
+apptainer_bench_default_install_rapids "${ENGINES}"
+
 apptainer_bench_bootstrap_venv
-apptainer_bench_bootstrap_scfast
+if apptainer_bench_engines_need_scfast "${ENGINES}"; then
+  apptainer_bench_bootstrap_scfast
+else
+  log "skip scfast Rust build (ENGINES has no scfast-cpu)"
+fi
+apptainer_bench_bootstrap_rapids
 apptainer_bench_bootstrap_leidenbase
 apptainer_bench_write_wrappers
 
 export PATH="${WRAP}:${PATH}"
 export RSCRIPT="${WRAP}/Rscript"
 export PYTHON="${WRAP}/python3"
-
-# rapids only if you set ENGINES including rapids AND the GPU image has rapids-singlecell
-ENGINES="${ENGINES:-seurat,scanpy,scfast-cpu}"
-log "START benchmark engines=${ENGINES} sizes=${SIZES:-10000,50000,100000}"
+export RAPIDS_PYTHON="${BENCH_RAPIDS_PYTHON:-${WRAP}/python3-gpu}"
+[[ -x "${RAPIDS_PYTHON}" ]] || export RAPIDS_PYTHON="${WRAP}/python3"
+apptainer_bench_require_gpu_python "${ENGINES}" || exit 1
+log "START benchmark engines=${ENGINES} sizes=${SIZES:-10000,50000,100000} gpu=${SIF_GPU_BENCH:-none}"
 log "bench output: ${REPO}/bench/results/onek1k_b3e8792e/"
 
 if [[ -d "${REPO}/bench/results/onek1k_b3e8792e/data/n10000" ]]; then

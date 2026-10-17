@@ -151,12 +151,15 @@ write_outputs <- function(obj, outdir) {
              file.path(outdir, "meta.json"))
 }
 
-# Seurat 5.0.x calls Python leidenalg; with leidenbase installed, cluster via leidenbase instead.
+# leidenbase (and Seurat >= 5.1 Leiden) require seed >= 1; bench default is 0.
+seurat_leiden_seed <- function(seed) {
+  s <- as.integer(seed)
+  if (s < 1L) 1L else s
+}
+
+# Prefer leidenbase on the SNN graph (avoids reticulate / leidenalg on Seurat 5.0.x).
 seurat_find_clusters_leiden <- function(obj, resolution, seed, n.iter) {
-  if (packageVersion("Seurat") >= "5.1.0") {
-    return(FindClusters(obj, algorithm = 4, resolution = resolution, random.seed = seed,
-                        n.iter = n.iter, verbose = FALSE))
-  }
+  leiden_seed <- seurat_leiden_seed(seed)
   if (requireNamespace("leidenbase", quietly = TRUE) && requireNamespace("igraph", quietly = TRUE)) {
     gname <- paste0(DefaultAssay(obj), "_snn")
     snn <- obj@graphs[[gname]]
@@ -165,12 +168,12 @@ seurat_find_clusters_leiden <- function(obj, resolution, seed, n.iter) {
     res <- leidenbase::leiden_find_partition(
       g, partition_type = "RBConfigurationVertexPartition",
       edge_weights = igraph::E(g)$weight, resolution_parameter = resolution,
-      seed = as.integer(seed), num_iter = as.integer(n.iter)
+      seed = leiden_seed, num_iter = as.integer(n.iter)
     )
     obj$seurat_clusters <- factor(res$membership)
     return(obj)
   }
-  FindClusters(obj, algorithm = 4, resolution = resolution, random.seed = seed,
+  FindClusters(obj, algorithm = 4, resolution = resolution, random.seed = leiden_seed,
                n.iter = n.iter, verbose = FALSE)
 }
 

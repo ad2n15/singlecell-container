@@ -71,11 +71,8 @@ const CUGRAPH_SUCCESS: ErrCode = 0;
 type Bool = c_int;
 const FALSE: Bool = 0;
 const TRUE: Bool = 1;
-/// `cugraph_data_type_id_t`: `INT32 = 0, INT64 = 1, FLOAT32 = 2, FLOAT64 = 3, SIZE_T = 4`.
+/// `cugraph_data_type_id_t` (layout depends on RAPIDS version; see `dtypes_for_graph_create`).
 type DType = c_int;
-const DTYPE_INT32: DType = 0;
-const DTYPE_INT64: DType = 1;
-const DTYPE_FLOAT32: DType = 2;
 
 /// `cugraph_graph_properties_t { bool_t is_symmetric; bool_t is_multigraph; }`.
 #[repr(C)]
@@ -191,6 +188,15 @@ enum GraphCreate {
     V2410(FnGraphCreateSg2410),
 }
 
+fn dtypes_for_graph_create(create: &GraphCreate) -> (DType, DType, DType) {
+    // RAPIDS 24.10+ / 26.x: INT8=0, INT16=1, INT32=2, INT64=3, …, FLOAT32=8 (cugraph_c/types.h).
+    // Older cuGraph: INT32=0, INT64=1, FLOAT32=2.
+    match create {
+        GraphCreate::V2410(_) => (2, 3, 8),
+        GraphCreate::Legacy(_) | GraphCreate::V2408(_) => (0, 1, 2),
+    }
+}
+
 /// The resolved function pointers. The `Library` is kept alive for the life of the process
 /// (the `OnceLock` below), so the copied-out pointers stay valid.
 struct Api {
@@ -210,6 +216,9 @@ struct Api {
     view_copy_to_host: FnViewCopyToHost,
     graph_create: GraphCreate,
     graph_create_name: &'static str,
+    dtype_int32: DType,
+    dtype_int64: DType,
+    dtype_float32: DType,
     graph_free: FnGraphFree,
     rng_state_create: FnRngStateCreate,
     rng_state_free: FnRngStateFree,
@@ -296,6 +305,7 @@ fn load_api() -> std::result::Result<Api, String> {
             },
             other => return Err(format!("SCFAST_CUGRAPH_API={other:?}: expected legacy, 24.08 or 24.10")),
         };
+        let (dtype_int32, dtype_int64, dtype_float32) = dtypes_for_graph_create(&graph_create);
         let graph_free: FnGraphFree = sym_opt(&lib, "cugraph_graph_free")
             .or_else(|| sym_opt(&lib, "cugraph_sg_graph_free"))
             .ok_or("neither cugraph_graph_free nor cugraph_sg_graph_free is exported")?;
@@ -330,6 +340,9 @@ fn load_api() -> std::result::Result<Api, String> {
             view_copy_to_host: sym(&lib, "cugraph_type_erased_device_array_view_copy_to_host")?,
             graph_create,
             graph_create_name,
+            dtype_int32,
+            dtype_int64,
+            dtype_float32,
             graph_free,
             rng_state_create: sym(&lib, "cugraph_rng_state_create")?,
             rng_state_free: sym(&lib, "cugraph_rng_state_free")?,
@@ -507,13 +520,13 @@ impl Api {
         let dtype = unsafe { (self.view_type)(view.ptr) };
         let mut err: Opaque = std::ptr::null_mut();
         match dtype {
-            DTYPE_INT32 => {
+            d if d == self.dtype_int32 => {
                 let mut buf = vec![0i32; n];
                 let rc = unsafe { (self.view_copy_to_host)(h.ptr, buf.as_mut_ptr() as *mut u8, view.ptr, &mut err) };
                 self.check(rc, err, &format!("copy_to_host ({what})"))?;
                 Ok(buf.into_iter().map(i64::from).collect())
             }
-            DTYPE_INT64 => {
+            d if d == self.dtype_int64 => {
                 let mut buf = vec![0i64; n];
                 let rc = unsafe { (self.view_copy_to_host)(h.ptr, buf.as_mut_ptr() as *mut u8, view.ptr, &mut err) };
                 self.check(rc, err, &format!("copy_to_host ({what})"))?;
@@ -588,9 +601,12 @@ impl CugraphLeiden {
         let api = api()?;
         api.set_device(self.device)?;
         let h = api.create_handle()?;
-        let (_src_arr, src_view) = api.upload(&h, &src, DTYPE_INT32, "src")?;
-        let (_dst_arr, dst_view) = api.upload(&h, &dst, DTYPE_INT32, "dst")?;
-        let (_w_arr, w_view) = api.upload(&h, weights, DTYPE_FLOAT32, "weights")?;
+        let (_src_arr, src_view) = api.upload(&h, &src, api.dtype_int32, "src")?;
+        let (_dst_arr, dst_view) = api.upload(&h, &dst, api.dtype_int32, "dst")?;
+        let (_w_arr, w_view) = api.upload(&h, weights, api.dtype_float32, "weights")?;
+        // RAPIDS 26+: NULL vertices defaults vertex dtype to INT8; pass 0..n-1 as INT32 explicitly.
+        let verts: Vec<i32> = (0..graph.n as i32).collect();
+        let (_vert_arr, vert_view) = api.upload(&h, &verts, api.dtype_int32, "vertices")?;
 
         let props = GraphProperties { is_symmetric: TRUE, is_multigraph: FALSE };
         let mut g: Opaque = std::ptr::null_mut();
@@ -606,7 +622,7 @@ impl CugraphLeiden {
                     &mut g, &mut err,
                 ),
                 GraphCreate::V2408(f) => f(
-                    h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
+                    h.ptr, &props, vert_view.ptr, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
                     FALSE, // store_transposed
                     TRUE,  // renumber
                     FALSE, // drop_self_loops
@@ -615,7 +631,7 @@ impl CugraphLeiden {
                     &mut g, &mut err,
                 ),
                 GraphCreate::V2410(f) => f(
-                    h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
+                    h.ptr, &props, vert_view.ptr, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
                     FALSE, // store_transposed
                     TRUE,  // renumber
                     FALSE, // drop_self_loops
