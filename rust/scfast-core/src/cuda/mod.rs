@@ -41,8 +41,9 @@ pub(crate) const TOPK_CAP_MAX: usize = 128;
 /// CUDA C source of the kernels, compiled with NVRTC. Kept in one translation unit so a
 /// single module holds every function.
 pub(crate) const KERNELS: &str = r#"
-#include <cuda_fp16.h>
+// Self-contained: no headers, so NVRTC needs no include path.
 #define BLOCK 256
+#define POS_INF __int_as_float(0x7f800000)
 #define CAP_MAX 128
 
 // Z V for the implicitly scaled operator Z = (X - 1 mu^T) diag(inv_sd):
@@ -147,7 +148,7 @@ extern "C" __global__ void topk(const float* __restrict__ scores,
   }
   int head = 0;
   for (int t = 0; t < cap; ++t) {
-    sv[threadIdx.x] = (head < cnt) ? best_v[head] : INFINITY;
+    sv[threadIdx.x] = (head < cnt) ? best_v[head] : POS_INF;
     si[threadIdx.x] = (head < cnt) ? best_i[head] : 0xffffffffu;
     __syncthreads();
     for (int stride = BLOCK / 2; stride > 0; stride >>= 1) {
