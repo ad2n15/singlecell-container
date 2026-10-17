@@ -2,10 +2,11 @@
 //!
 //! CPU: single-clustering 0.7.0 (pinned), RB objective, which is what Seurat
 //! (`RBConfigurationVertexPartition`) and Scanpy optimise (docs/RUST_ENGINE.md section 4).
-//! Its Leiden loop is reproduced in [`leiden_rb`] with the local-moving phase replaced by a
-//! parallel, thread-count-independent one (`cluster/local_move.rs`); refinement and
-//! aggregation are single-clustering's. 500k synthetic cells (10 PCs, k = 20, 12-core
-//! M-series): 5.0 s -> 2.6 s, ARI 0.999 against leidenalg on the same graph at 100k.
+//! Its Leiden loop is reproduced in [`leiden_rb`] with local moving and refinement replaced
+//! by parallel, thread-count-independent versions (`cluster/local_move.rs`,
+//! `cluster/refine.rs`); aggregation is single-clustering's. 500k synthetic cells (10 PCs,
+//! k = 20, 12-core M-series): 5.0 s -> 1.8 s, ARI 0.999 against leidenalg on the same graph
+//! at 100k.
 //! GPU (Phase 7): cuGraph Leiden ([`crate::cugraph::CugraphLeiden`], feature `cugraph`) behind
 //! the same `Clusterer` trait; [`leiden_on`] picks the backend from a [`LeidenDevice`].
 //!
@@ -36,11 +37,12 @@ use std::cmp::Reverse;
 
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use single_clustering::community_search::leiden::{refine, LeidenConfig, Objective, Partition, Rb};
+use single_clustering::community_search::leiden::{LeidenConfig, Objective, Partition, Rb};
 use single_clustering::network::CSRNetwork;
 use single_clustering::ClusteringError;
 
 mod local_move;
+mod refine;
 
 use rayon::prelude::*;
 
@@ -141,8 +143,8 @@ impl Clusterer for SingleClusteringLeiden {
 }
 
 /// single-clustering 0.7.0's `leiden` (RB, refinement on, its default tolerance, patience
-/// and level cap) with its sequential local move replaced by [`local_move::local_move`],
-/// which runs in parallel. Refinement and aggregation are single-clustering's own.
+/// and level cap) with its sequential local move and refinement replaced by the parallel
+/// [`local_move::local_move`] and [`refine::refine`]. Aggregation is single-clustering's.
 fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
     let config = LeidenConfig::default();
     let objective = Rb::new(params.resolution);
@@ -156,7 +158,6 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
         let mut membership = labels.clone();
         let mut node_at_level: Vec<usize> = (0..n).collect();
         let mut improvement = 0.0;
-        let mut scratch = single_clustering::community_search::leiden::MoveScratch::with_capacity(n, n + 1);
         let mut partition;
         let mut level = 0;
         loop {
@@ -168,15 +169,14 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
             if level == config.max_levels {
                 break;
             }
-            let mut collapse_by = refine(
+            let refined = refine::refine(
                 &level_graph,
                 partition.membership_raw(),
-                &objective,
-                &mut scratch,
-                &mut level_rng,
-                None,
+                params.resolution,
                 config.refine_randomness,
+                &mut level_rng,
             );
+            let mut collapse_by = Partition::from_membership(&level_graph, &refined);
             let grouping = collapse_by.renumber_into_grouping();
             let coarse = level_graph.aggregate(&grouping);
             if coarse.node_count() >= level_graph.node_count() {
