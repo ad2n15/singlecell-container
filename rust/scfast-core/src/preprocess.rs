@@ -53,6 +53,9 @@ const MIN_BLOCK_ROWS: usize = 64;
 /// per-gene accumulators costs.
 const ACC_WORK_RATIO: usize = 16;
 
+/// Counts below this get their log-normalised value from a per-cell table.
+const SMALL_COUNTS: usize = 32;
+
 /// Value type of the log-normalised output (`f64` for an R `dgCMatrix`, `f32` for AnnData).
 pub trait OutValue: Copy + Send + Sync + 'static {
     fn from_f64(v: f64) -> Self;
@@ -116,6 +119,8 @@ pub struct PreprocessResult<O: OutValue> {
     /// Sample standard deviation (n - 1) of the log-normalised values of each HVG; the
     /// numbers `ScaleData` centres and scales with.
     pub hvg_sd: Vec<f64>,
+    /// First cell whose column indices do not strictly increase (`None`: canonical CSR).
+    pub unsorted_row: Option<usize>,
 }
 
 /// Per-block accumulators of pass 1.
@@ -126,6 +131,8 @@ struct Acc {
     ysumsq: Vec<f64>,
     max: Vec<f64>,
     nnz: Vec<u64>,
+    /// First row whose column indices do not strictly increase.
+    unsorted: Option<usize>,
 }
 
 impl Acc {
@@ -137,9 +144,11 @@ impl Acc {
             ysumsq: vec![0.0; p],
             max: vec![0.0; p],
             nnz: vec![0; p],
+            unsorted: None,
         }
     }
     fn merge(&mut self, b: Acc) {
+        self.unsorted = self.unsorted.or(b.unsorted);
         for j in 0..self.sum.len() {
             self.sum[j] += b.sum[j];
             self.sumsq[j] += b.sumsq[j];
@@ -295,6 +304,7 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         hvg: order,
         hvg_mean,
         hvg_sd,
+        unsorted_row: acc.unsorted,
     })
 }
 
@@ -335,6 +345,7 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
     let mut acc = Acc::new(p);
     // Row stamp per gene to detect duplicate column indices within a row.
     let mut seen = vec![u32::MAX; p];
+    let mut small = [f64::NAN; SMALL_COUNTS];
     for i in r0..r1 {
         let (s, e) = (x.indptr[i].to_usize(), x.indptr[i + 1].to_usize());
         if s > e || e > nnz || s < base || e - base > data.len() {
@@ -344,8 +355,13 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
         let idx = &x.indices[s..e];
         let val = &x.data[s..e];
         let mut lib = 0.0f64;
+        let mut prev = None;
         for (j, v) in idx.iter().zip(val) {
             let j = j.to_usize();
+            if acc.unsorted.is_none() && prev.is_some_and(|q| j <= q) {
+                acc.unsorted = Some(i);
+            }
+            prev = Some(j);
             if j >= p {
                 return Err(Error::InvalidInput(format!("column index {j} out of range for {p} columns")));
             }
@@ -362,10 +378,20 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
         library_size[i - r0] = lib;
         let factor = if lib > 0.0 { scale_factor / lib } else { 0.0 };
         let out = &mut data[s - base..e - base];
+        small.fill(f64::NAN);
         for ((j, v), o) in idx.iter().zip(val).zip(out.iter_mut()) {
             let j = j.to_usize();
             let v = v.to_f64();
-            let y = (v * factor).ln_1p();
+            // Most counts are small integers: their log1p is computed once per cell.
+            let y = match small.get_mut(v as usize) {
+                Some(t) if v == (v as usize) as f64 => {
+                    if t.is_nan() {
+                        *t = (v * factor).ln_1p();
+                    }
+                    *t
+                }
+                _ => (v * factor).ln_1p(),
+            };
             *o = O::from_f64(y);
             acc.sum[j] += v;
             acc.sumsq[j] += v * v;

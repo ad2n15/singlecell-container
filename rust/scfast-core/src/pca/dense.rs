@@ -166,7 +166,7 @@ const CHOL_MIN_PIVOT_RATIO: f64 = 1e-6;
 
 /// One CholeskyQR round, `a <- a L^{-T}` with `a^T a = L L^T`; `false`, with `a`
 /// unchanged, when `a^T a` is not safely positive definite.
-fn cholesky_qr(mut a: MatMut<'_, f64>) -> bool {
+fn cholesky_qr(a: MatMut<'_, f64>) -> bool {
     let l = a.ncols();
     let mut g = cross(a.rb(), a.rb());
     let mut mem = MemBuffer::new(cholesky_in_place_scratch::<f64>(l, Par::Seq, Default::default()));

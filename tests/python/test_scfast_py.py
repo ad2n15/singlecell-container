@@ -724,6 +724,14 @@ def test_leiden_is_deterministic_and_accepts_other_graph_types():
 
 # ---------------------------------------------------------------- preprocess
 
+@pytest.mark.parametrize("cols", [[3, 1], [1, 1]], ids=["unsorted", "duplicate"])
+def test_preprocess_rejects_non_canonical_csr(cols):
+    X = sp.csr_matrix((np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+                       np.array(cols + [0, 2]), np.array([0, 2, 3, 4])), shape=(3, 5))
+    with pytest.raises(ValueError, match="canonical|duplicate"):
+        scfast.preprocess(X, n_hvg=2)
+
+
 def test_preprocess_x_hvg_is_data_columns_in_hvg_order():
     rng = np.random.default_rng(1)
     counts = sp.random(300, 80, density=0.2, format="csr", random_state=rng, dtype=np.float32)
