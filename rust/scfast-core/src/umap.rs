@@ -213,18 +213,12 @@ impl Lanes {
             self.set(l, [0.0, 0.0], 0.0);
         }
         #[cfg(target_arch = "x86_64")]
-        let f = if avx2 {
+        if avx2 {
             // SAFETY: avx2 is true only when use_avx2() detected AVX2 and FMA.
-            unsafe { forces_avx2(self, m, cur, a, b) }
-        } else {
-            self.forces_scalar(m, cur, a, b)
-        };
-        #[cfg(not(target_arch = "x86_64"))]
-        let f = {
-            let _ = avx2;
-            self.forces_scalar(m, cur, a, b)
-        };
-        f
+            return unsafe { forces_avx2(self, m, cur, a, b) };
+        }
+        let _ = avx2;
+        self.forces_scalar(m, cur, a, b)
     }
 
     fn forces_scalar(&self, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
@@ -281,19 +275,19 @@ unsafe fn forces_avx2(l: &Lanes, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f3
         let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
         let d2c = _mm256_max_ps(d2, c(f32::MIN_POSITIVE));
 
-        // log2(d2c) = e + log2(m), m in [sqrt(1/2), sqrt(2)), ln m = 2 atanh((m - 1) / (m + 1)).
+        // log2(d2c) = e + log2(r), r in [sqrt(1/2), sqrt(2)), ln r = 2 atanh((r - 1) / (r + 1)).
         let bits = _mm256_castps_si256(d2c);
         let mant = _mm256_and_si256(bits, ci(0x007F_FFFF));
         let big = _mm256_cmpgt_epi32(mant, ci(0x0035_04F3));
         let e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), ci(127)), big));
-        let m = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
-        let t = _mm256_div_ps(_mm256_sub_ps(m, c(1.0)), _mm256_add_ps(m, c(1.0)));
+        let r = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
+        let t = _mm256_div_ps(_mm256_sub_ps(r, c(1.0)), _mm256_add_ps(r, c(1.0)));
         let t2 = _mm256_mul_ps(t, t);
         let mut s = _mm256_fmadd_ps(t2, c(1.0 / 7.0), c(1.0 / 5.0));
         s = _mm256_fmadd_ps(t2, s, c(1.0 / 3.0));
         s = _mm256_fmadd_ps(t2, s, c(1.0));
-        let ln_m = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
-        let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_m, c(std::f32::consts::LOG2_E), e));
+        let ln_r = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
+        let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_r, c(std::f32::consts::LOG2_E), e));
         let z = _mm256_min_ps(_mm256_max_ps(z, c(-126.0)), c(126.0));
 
         // 2^z = 2^i e^(f ln 2), i = round(z), |f| <= 1/2.
