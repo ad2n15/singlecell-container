@@ -7,7 +7,7 @@ marked as arithmetic.
 
 ## The one sentence
 
-scfast runs the standard Seurat analysis on 1.29 million cells in 6.8 seconds on one GPU, and
+scfast runs the standard Seurat analysis on 1.29 million cells in 5.4 seconds on one GPU, and
 it gives the same principal components and neighbours as Seurat.
 
 ## Numbers you can put on a slide
@@ -23,9 +23,9 @@ file is shown separately. Source for all tables: `bench/results/FINAL.md`.
 | Scanpy | 16 CPU cores | 19.4 min (1,161.6 s) | 21 min (1,262.6 s) |
 | rapids-singlecell | NVIDIA H100, 80 GB | out of GPU memory | fails |
 | scfast | 16 CPU cores | 26.9 s | 30.8 s |
-| scfast | NVIDIA H100, 80 GB | **6.8 s** | **12.0 s** |
+| scfast | NVIDIA H100, 80 GB | **5.4 s** | **12.1 s** |
 
-scfast on the GPU is 172 times faster than Scanpy on compute. scfast on the CPU is 43 times
+scfast on the GPU is 217 times faster than Scanpy on compute. scfast on the CPU is 43 times
 faster than Scanpy. scfast on the CPU uses 46 GB of memory; Scanpy uses 150 GB.
 
 ### CPU only, 16 cores for every engine
@@ -42,7 +42,7 @@ faster than Scanpy. scfast on the CPU uses 46 GB of memory; Scanpy uses 150 GB.
 |---|---:|---:|
 | PBMC 68k | 2.84 s | 0.68 s |
 | Mouse brain 500k | 64.8 s | 5.35 s |
-| Mouse brain 1.29M | out of memory | 12.0 s |
+| Mouse brain 1.29M | out of memory | 12.1 s |
 
 On a smaller 24 GB L4 GPU, rapids-singlecell runs out of memory at 500k cells. scfast finishes
 the same 500k cells on the L4 in 11.0 s.
@@ -89,16 +89,16 @@ has one number. Spend the most time on slides 4 and 5.
 
 ### Slide 3. The reveal (0:35–0:50)
 
-- On screen: one huge number, "6.8 s", and below it "1.29 million cells, one GPU".
-- Speaker: "We rebuilt the core of Seurat. The same analysis now takes under seven seconds."
+- On screen: one huge number, "5.4 s", and below it "1.29 million cells, one GPU".
+- Speaker: "We rebuilt the core of Seurat. The same analysis now takes under six seconds."
 - Effect: cut from the slow clock of slide 1 straight to this number.
 
 ### Slide 4. The race (0:50–1:25), the emotional peak
 
 - On screen: the log-scale bar chart from `bench/results/demo.html` (top chart). Seurat about
-  3 h, Scanpy 19.4 min, rapids-singlecell "out of memory", scfast CPU 26.9 s, scfast GPU 6.8 s.
+  3 h, Scanpy 19.4 min, rapids-singlecell "out of memory", scfast CPU 26.9 s, scfast GPU 5.4 s.
 - Speaker: "The GPU tool that the field uses today cannot even load this dataset on an 80 GB GPU.
-  scfast finishes it in 6.8 seconds."
+  scfast finishes it in 5.4 seconds."
 - Effect: animate the bars one at a time, slowest first. Hold on the "out of memory" line.
 
 ### Slide 5. Live (1:25–2:00)
@@ -127,14 +127,14 @@ has one number. Spend the most time on slides 4 and 5.
 
 - On screen, three short lines, each backed by a measured number:
   - "Explore, do not wait": a full re-run at 100k cells takes 2.4 s, not 3 minutes.
-  - "Atlas scale on one GPU": 1.29 million cells in 6.8 s, where today's GPU tool runs out of memory.
+  - "Atlas scale on one GPU": 1.29 million cells in 5.4 s, where today's GPU tool runs out of memory.
   - "Less hardware": 46 GB instead of 150 GB of memory at 1.29 million cells.
 - Speaker: "Analysis becomes interactive. You ask a question and see the answer while you still think about it."
 
 ### Slide 9. Close (2:50–3:00)
 
 - On screen: "Seurat's answers. In seconds." and the 1.29M UMAP image.
-- Speaker: "Same science, 67 to 86 times faster than Seurat on the same CPUs, and 172 times
+- Speaker: "Same science, 67 to 86 times faster than Seurat on 16-core machines, and 217 times
   faster than Scanpy on one GPU." (Use "overnight" only for the optimisation work; the engine
   itself existed before.)
 
@@ -185,10 +185,12 @@ The `bench/results/demo_data/` folder is not in git. It holds the three input fi
   variable-gene step) on an 80 GB H100. Say "in this workflow" if someone asks.
 - Published rapids-singlecell figures on about 1M cells of the same dataset are 25–26 s in total
   and about 7.3 s for the core steps on B200-class GPUs, with a different workflow
-  (`bench/results/REFERENCES.md`). scfast's 6.8 s on an H100 is in the same range, not "10× faster than rapids".
+  (`bench/results/REFERENCES.md`). scfast's 5.4 s on an H100 is in the same range, not "10× faster than rapids".
 
 ## Final GPU number
 
-The GPU file → result time at 1.29 million cells stays at 12.0 s. A last test overlapped the
-file read with the GPU upload; it saved about 0.1 s, inside the noise, so it was not merged
-(branch `t3/gpu-read-upload-overlap`, which also lowers peak host memory by 19 GB).
+The last change moved the GPU kNN above 200k cells to cuVS IVF-Flat. It keeps 0.9998 of the
+exact neighbours, and it brings compute at 1.29 million cells from 6.8 s to 5.4 s
+(`bench/results/h100_cuvs`). The file → result time in that run was 12.1 s, because the file read
+and the upload were slower in that run; the kNN change does not touch those steps. A separate
+test that overlapped the read with the upload saved about 0.1 s and was not merged.

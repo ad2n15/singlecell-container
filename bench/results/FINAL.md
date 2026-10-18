@@ -23,7 +23,7 @@ Intel Xeon at random, and the same build differs by up to ~2.5× between them on
 steps; Seurat and Scanpy ran once, on containers whose CPU was not recorded. The speed-ups are
 therefore good to roughly ±30%, far inside the gaps they describe.
 
-Sources: `bench/results/{pbmc68k_cpu16,brain_cpu16}/report.md`, GPU `bench/results/{gpu_h100_real,h100_final_brain,h100_final2_brain,h100_final_pbmc68k}/report.md` (medians; 3 measured repeats
+Sources: `bench/results/{pbmc68k_cpu16,brain_cpu16}/report.md`, GPU `bench/results/{gpu_h100_real,h100_final_brain,h100_final2_brain,h100_cuvs,h100_final_pbmc68k}/report.md` (medians; 3 measured repeats
 up to 100k cells, 1–2 above, each after a warm-up).
 
 ## Agreement with Seurat (parity gates: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9)
@@ -50,12 +50,14 @@ PBMC 68k labels (ARI 0.274) equals Seurat's (0.283).
 | PBMC 68k | 68,260 | 0.62 s | **0.56 s** | 2.84 s | **0.68 s** |
 | Mouse brain | 100,000 | 1.20 s | **1.20 s** | 12.06 s | **1.72 s** |
 | Mouse brain | 500,000 | 4.28 s | **3.25 s** | 64.83 s | **5.35 s** |
-| Mouse brain | 1,290,549 | **out of GPU memory** | **6.77 s** | fails | **12.0 s** |
+| Mouse brain | 1,290,549 | **out of GPU memory** | **5.35 s** | fails | **12.1 s** |
 
 The first two columns are compute (normalise → UMAP); "file → result" adds reading the file and the
 host ⇄ GPU transfers. On a 24 GB L4, rapids-singlecell already runs out of memory at 500k cells,
 where scfast-gpu finishes in 11.0 s. scfast-gpu vs Seurat: PC similarity 0.9997–1.0000, kNN overlap
-0.994–0.998 at every size (PBMC 3k on an L4: 1.0 / 0.998).
+0.994–0.998 at every size (PBMC 3k on an L4: 1.0 / 0.998). Above 200k cells the GPU kNN is cuVS
+IVF-Flat: at 1.29M cells it keeps 0.9998 of the exact neighbours and takes the neighbours step
+from 2.75 s to 1.17 s (`bench/results/h100_cuvs`).
 
 Published reference for about 1M cells of the same dataset (`REFERENCES.md`): rapids-singlecell's
 core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
@@ -64,9 +66,9 @@ core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
 
 | | Seurat (16 cores) | Scanpy (16 cores) | scfast CPU (16 cores) | rapids-singlecell (H100) | **scfast GPU (H100)** |
 |---|---:|---:|---:|---:|---:|
-| Compute | ~3 h (published) | 1,161.6 s | 26.9 s | out of memory | **6.8 s** |
-| File → result | – | 1,262.6 s | 30.8 s | – | **12.0 s** |
-| vs Scanpy (compute) | – | 1× | 43× | – | **172×** |
+| Compute | ~3 h (published) | 1,161.6 s | 26.9 s | out of memory | **5.4 s** |
+| File → result | – | 1,262.6 s | 30.8 s | – | **12.1 s** |
+| vs Scanpy (compute) | – | 1× | 43× | – | **217×** |
 
 ## Live on a laptop (Apple M-series, 12 threads, 24 GB)
 
