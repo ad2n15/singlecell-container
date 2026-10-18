@@ -125,6 +125,27 @@ the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weight
 - Scale path merged (agent): k-d tree kNN (exact <= 16 dims; eps=0.7 approximate in 'auto' above 50k, overlap >= 0.946 with exact), parallel Leiden (local moving, refinement, aggregation; thread-count independent; ARI 0.999 vs leidenalg at 100k), tiled PCA kernels, SNN in BFS order. PCA+kNN+SNN+Leiden: brain 500k Modal 193 -> 4.9 s; brain 1.29M Modal 17.4 s.
 - UMAP x86 fix (34f4535): Z-order relabelling + head-only updates; Modal 16 threads PBMC 68k 3.82 -> 1.07 s.
 
+## UMAP at scale (agent, branch t3/bf1bab2f, 2026-10-18 01:45-06:00 BST)
+
+Harness: `bench/modal_umap.py` (cached kNN inputs on volume `scfast-data:umap_bench/`; A/B of git
+revisions in one container; PBMC 68k silhouette seeds 0-2; PNG of the 1.29M layout to
+bench/results/umap/). Modal containers differ up to 2x in speed (Milan vs Genoa), so only
+compare revisions within one run.
+
+Base e290045 (same container as each change):
+- 1.29M epochs 19-21 s of ~20 s; fuzzy set 1.0 s warm but 6.1 s on a cold first call (page faults).
+- 500k thread scaling (after the changes below): 1 thread 70 s, 8: 10 s, 16: 5.3 s, 32: 3.6 s. Near
+  linear, so the SGD is bound by instructions per sample (~50 cycles), not bandwidth.
+
+Kept:
+- 49352c4 negative samples drawn 16 ahead and prefetched: 1.29M 17.3 -> 14.2 s, 500k 6.9 -> 5.8 s.
+- b1e4684 stateless epoch schedule (edge due when floor(epoch/eps) steps up, negative_sample_rate
+  negatives per sample), heads from row offsets: 8 read-only bytes per edge per epoch: 14.2 -> 14.0 s, 500k 5.8 -> 5.1 s.
+- 219e759 fuzzy union via parallel transpose, no per-row Vecs: same graph bit for bit; 500k cold 2.6 -> 0.21 s.
+
+Rejected: per-row batch with polynomial pow (autovectoriser did not vectorise it; 1.29M 14.4 -> 22.5 s);
+scalar polynomial pow (30.7 -> 40.4 s); prefetch distance 32 (= 16).
+
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - GPU path on Modal (Sonnet 5.5): bench/modal_app.py, CUDA tests on L4, scfast-gpu engine.
