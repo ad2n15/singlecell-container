@@ -53,6 +53,13 @@ pub(crate) trait Operator {
     fn ncols(&self) -> usize;
     /// `out = Z v`, `v` genes x l, `out` cells x l.
     fn apply(&self, v: faer::MatRef<'_, f64>, out: faer::MatMut<'_, f64>) -> Result<()>;
+    /// `out = (Z - C) v` for the sparse clip correction `C` of [`Clipped`]. The default
+    /// subtracts `C v` after `apply`; the CPU operator does it inside its row tasks.
+    fn apply_clipped(&self, v: faer::MatRef<'_, f64>, mut out: faer::MatMut<'_, f64>, clip: &operator::ClipEntries) -> Result<()> {
+        self.apply(v, out.rb_mut())?;
+        clip.subtract_from(v, out);
+        Ok(())
+    }
     /// `Z^T u`, `u` cells x l; returns genes x l.
     fn apply_t(&self, u: faer::MatRef<'_, f64>) -> Result<faer::Mat<f64>>;
 }
