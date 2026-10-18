@@ -108,8 +108,8 @@ def _with_cpu_fallback(requested: str, resolved: str, call: Any) -> Any:
 def device_info() -> dict[str, Any]:
     """CUDA state of this build (never raises).
 
-    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver,
-    NVRTC and cuBLAS load and a device is visible), ``device_count``, ``device_name``,
+    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver and
+    NVRTC load and a device is visible), ``device_count``, ``device_name``,
     ``free_gb``, ``total_gb``, ``compute_capability`` (device 0; ``None`` when unavailable),
     ``cuda_error`` (why CUDA is unavailable, else ``None``) and ``auto_device`` (what
     ``device="auto"`` resolves to: ``"cpu"`` or ``"cuda:0"``).
@@ -189,7 +189,9 @@ def pca(
         the log-normalised HVG matrix. float32/float64 data with int32/int64 indices is
         read in place (zero copy); other real dtypes are converted to float32 first (a copy).
         Must be canonical (sorted, unique column indices per row); call ``X.sum_duplicates()``
-        if not. Other sparse formats and dense arrays raise ``TypeError``.
+        if not. Other sparse formats and dense arrays raise ``TypeError``. A
+        ``cupyx.scipy.sparse`` CSR matrix stays on its GPU (copied device-to-device, gene
+        statistics computed there; needs a CUDA ``device`` and no CPU fallback).
     n_comps
         Number of components (Seurat ``npcs``).
     seed
@@ -221,6 +223,9 @@ def pca(
         Component standard deviations d / sqrt(cells - 1) (Seurat ``Stdev``).
     """
     requested, resolved = _resolve_device(device)
+    if _on_gpu(X):
+        return _pca_gpu(X, _int("n_comps", n_comps, 1), _seed(seed), bool(scale), _int("oversample", oversample),
+                        _int("power_iters", power_iters), resolved)
     n_rows, n_cols, indptr, indices, data = _csr_parts(X, "X")
     n_comps = _int("n_comps", n_comps, 1)
     if n_rows == 0 or n_cols == 0:
@@ -269,7 +274,7 @@ def knn(
         not bit-reproducible across runs (hnsw_rs inserts in parallel).
     device
         ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
-        the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
+        the search is exact brute force (fused distance + top-k kernel) at every size, ``method`` is
         ignored and ``k`` must be at most 129.
     eps
         ``"kdtree"`` skips a tree node once it is farther than the current k-th distance
@@ -326,7 +331,9 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
     indices
         Integer array (cells, k) of neighbour indices with the cell itself included, as
         returned by :func:`knn` (Seurat's ``Indices()`` also works). Each row is used as the
-        neighbour set exactly as given; a cell listed twice in a row is an error.
+        neighbour set exactly as given; a cell listed twice in a row is an error. A CuPy
+        array builds the graph on its GPU (Seurat's A A^T, as a cuSPARSE product; duplicates
+        are not checked there) and returns a ``cupyx.scipy.sparse.csr_matrix``.
     prune
         Jaccard cut-off in [0, 1].
     keep_diagonal
@@ -341,7 +348,7 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
 
     if sp.issparse(indices):
         raise TypeError("indices must be a dense integer array (cells, k), got a scipy sparse matrix")
-    idx = np.asarray(indices)
+    idx = indices if _on_gpu(indices) else np.asarray(indices)
     if idx.ndim != 2:
         raise ValueError(f"indices must be 2-D (cells, k), got {idx.ndim}-D with shape {idx.shape}")
     if idx.dtype.kind not in "iu":
@@ -354,11 +361,56 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
     prune = _float("prune", prune)
     if not 0.0 <= prune <= 1.0:
         raise ValueError(f"prune must be in [0, 1], got {prune}")
+    if _on_gpu(idx):
+        return _snn_gpu(idx, prune, bool(keep_diagonal))
     if idx.dtype not in _KNN_INDEX_DTYPES:
         idx = idx.astype(np.int64)
     idx = np.ascontiguousarray(idx, dtype=idx.dtype.newbyteorder("="))
     indptr, col, weights = _scfast.snn(idx, prune, bool(keep_diagonal))
     return sp.csr_matrix((weights, col, indptr), shape=(n, n))
+
+
+def _on_gpu(a: Any) -> bool:
+    return type(a).__module__.split(".")[0] in ("cupy", "cupyx")
+
+
+def _pca_gpu(X: Any, n_comps: int, seed: int, scale: bool, oversample: int, power_iters: int, device: str) -> Any:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    if not csp.isspmatrix_csr(X):
+        raise TypeError(f"X on the GPU must be a cupyx.scipy.sparse CSR matrix, got {type(X).__name__}")
+    n_rows, n_cols = X.shape
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X is empty (shape {(n_rows, n_cols)})")
+    if n_comps > min(n_rows, n_cols):
+        raise ValueError(f"n_comps ({n_comps}) must not exceed min(cells, genes) = {min(n_rows, n_cols)}")
+    if not X.has_canonical_format:
+        X = X.copy()
+        X.sum_duplicates()
+    indptr = X.indptr if X.indptr.dtype in (cp.int32, cp.int64) else X.indptr.astype(cp.int64)
+    indices, data = X.indices.astype(cp.int32, copy=False), X.data.astype(cp.float32, copy=False)
+    cp.cuda.get_current_stream().synchronize()
+    return _scfast.pca_csr_device(n_rows, n_cols, int(data.size), indptr.data.ptr, indptr.dtype == cp.int64,
+                                  indices.data.ptr, data.data.ptr, n_comps, seed, scale, oversample, power_iters, device)
+
+
+def _snn_gpu(idx: Any, prune: float, keep_diagonal: bool) -> Any:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    n, k = idx.shape
+    a = csp.csr_matrix((cp.ones(n * k, dtype=cp.float32), cp.ascontiguousarray(idx, dtype=cp.int32).ravel(),
+                        cp.arange(0, n * k + 1, k, dtype=cp.int32)), shape=(n, n))
+    g = a @ a.T  # shared-neighbour counts
+    s = g.data.astype(cp.float64)
+    w = s / (k + (k - s))  # Seurat's expression, pruned in f64 as on the CPU
+    g.data = cp.where(w < prune, 0.0, w).astype(cp.float32)
+    if not keep_diagonal:
+        g.setdiag(0)
+    g.eliminate_zeros()
+    g.sort_indices()
+    return g
 
 
 def leiden_device(device: str = "auto") -> str:
@@ -391,12 +443,14 @@ def leiden(
         of :func:`snn`, Seurat's ``RNA_snn`` or Scanpy's ``obsp["connectivities"]``.
         Weights must be finite and non-negative; they are used as float32. A diagonal is
         allowed and treated as Seurat does. Must be canonical (``graph.sum_duplicates()``).
+        A ``cupyx.scipy.sparse`` matrix (e.g. :func:`snn` of CuPy indices) stays on its GPU
+        and goes to cuGraph as is, without the checks (``device`` must then be CUDA).
     resolution
         RB resolution (Seurat ``resolution``); larger gives more clusters.
     seed
         Random seed; the same seed and graph give identical labels.
     n_iterations
-        Leiden iterations (Seurat ``n.iter``), at least 1. On cuGraph this is ``max_level``.
+        Leiden iterations (Seurat ``n.iter``), at least 1. cuGraph has no such knob: it runs to ``max_level`` 100.
     device
         ``"auto"`` (cuGraph Leiden when this build has the ``cugraph`` feature and a CUDA
         device is usable, else the CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"`` (an
@@ -411,6 +465,8 @@ def leiden(
     """
     if not isinstance(device, str):
         raise TypeError(f"device must be a string, got {type(device).__name__}")
+    if _on_gpu(graph):
+        return _leiden_gpu(graph, _float("resolution", resolution), _seed(seed), device)
     n_rows, n_cols, indptr, indices, data = _csr_parts(graph, "graph")
     if n_rows != n_cols:
         raise ValueError(f"graph must be square (cells x cells), got shape {(n_rows, n_cols)}")
@@ -422,6 +478,21 @@ def leiden(
     return _scfast.leiden_csr(
         n_rows, indptr, indices, data, resolution, _seed(seed), _int("n_iterations", n_iterations, 1), device
     )
+
+
+def _leiden_gpu(graph: Any, resolution: float, seed: int, device: str) -> np.ndarray:
+    import cupy as cp
+
+    n, n_cols = graph.shape
+    if n != n_cols:
+        raise ValueError(f"graph must be square (cells x cells), got shape {(n, n_cols)}")
+    if device == "auto":
+        device = "cuda"
+    coo = graph.tocoo()
+    row, col = coo.row.astype(cp.int32, copy=False), coo.col.astype(cp.int32, copy=False)
+    w = coo.data.astype(cp.float32, copy=False)
+    cp.cuda.get_current_stream().synchronize()
+    return _scfast.leiden_coo_device(n, int(w.size), row.data.ptr, col.data.ptr, w.data.ptr, resolution, seed, device)
 
 
 def preprocess(

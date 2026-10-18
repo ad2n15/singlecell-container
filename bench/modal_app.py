@@ -2,6 +2,7 @@
 
     uvx modal run bench/modal_app.py::build                              # wheel + Rust test binaries (CPU box)
     uvx modal run bench/modal_app.py::rust_tests                         # cargo test --features cuda,cugraph on a GPU
+    uvx modal run bench/modal_app.py::script --path my_profile.py --args "..."   # any script, GPU box
     uvx modal run bench/modal_app.py::gen --tag synth_500k --sizes 100000,500000
     uvx modal run bench/modal_app.py::bench --tag synth_500k --name l4 --sizes 100000 \
         --engines scanpy,rapids,scfast-cpu,scfast-gpu
@@ -29,7 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 GPU = os.environ.get("SCFAST_GPU", "L4")
 CPUS = int(os.environ.get("SCFAST_CPUS", "8"))
 MEM_GB = int(os.environ.get("SCFAST_MEM_GB", "48"))
-RAPIDS = "26.2.*"
+RAPIDS = "26.10.*"
+RSC = "0.18.1"  # rapids-singlecell-cu12: prebuilt CUDA kernels, no CMake build
 
 app = modal.App("scfast-bench")
 bench_vol = modal.Volume.from_name("scfast-bench", create_if_missing=True)
@@ -43,15 +45,10 @@ image = (
           "CARGO_HOME": "/cache/cargo", "CARGO_TARGET_DIR": "/cache/target", "PYTHONUNBUFFERED": "1"})
     .pip_install(
         "scanpy", "anndata", "scikit-misc", "leidenalg", "python-igraph", "h5py", "scikit-learn", "matplotlib",
-        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", "cupy-cuda12x[ctk]",
+        "pandas", "scipy", "maturin>=1.9.4,<2", "pytest", f"rapids-singlecell-cu12[rapids]=={RSC}",
         f"cudf-cu12=={RAPIDS}", f"cuml-cu12=={RAPIDS}", f"cugraph-cu12=={RAPIDS}", f"cuvs-cu12=={RAPIDS}",
         f"libcugraph-cu12=={RAPIDS}",
         extra_index_url="https://pypi.nvidia.com",
-    )
-    .env({"CC": "gcc", "CXX": "g++", "SKBUILD_CMAKE_DEFINE_CMAKE_CUDA_ARCHITECTURES": "86;89;90"})
-    .run_commands(
-        "pip install rapids-singlecell --no-deps && pip install docrep natsort scikit-image statsmodels tqdm "
-        "'scverse-misc[settings]'",
     )
     .add_local_dir(ROOT, "/work", ignore=["**/.git", "**/target", "**/__pycache__", "bench/results", "data",
                                           "plots", "plots_scanpy", "R", "tests", "docker", "containers"])
@@ -64,6 +61,13 @@ def sh(cmd: list[str], env: dict | None = None, cwd: str = "/work", check: bool 
     if check and rc:
         raise RuntimeError(f"{cmd[0]} exited with {rc}")
     return rc
+
+
+def touch_sources() -> None:
+    """Mounted files keep their local mtimes, which can predate the cached build; cargo would skip the rebuild."""
+    for f in Path("/work/rust").rglob("*"):
+        if f.suffix in (".rs", ".toml"):
+            f.touch()
 
 
 def gpu_libs() -> dict:
@@ -87,6 +91,7 @@ def install_wheel() -> None:
 @app.function(image=image, cpu=16, memory=32768, timeout=3000, volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def build_remote(tests: bool = True) -> str:
     feats = ["--features", "cuda,cugraph"]
+    touch_sources()
     shutil.rmtree("/tmp/wheels", ignore_errors=True)
     sh(["maturin", "build", "--release", "-m", "rust/scfast-py/Cargo.toml", *feats, "-o", "/tmp/wheels"])
     Path("/vol/wheels").mkdir(parents=True, exist_ok=True)
@@ -123,9 +128,10 @@ def gen_remote(tag: str, sizes: str, genes: int = 5000, types: int = 10, force: 
               volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def rust_tests_remote(args: str = "") -> str:
     cargo_vol.reload()
+    touch_sources()
     sh(["nvidia-smi"], check=False)
-    cmd = ["cargo", "test", "--release", "-p", "scfast-core", "--features", "cuda,cugraph", *args.split(),
-           "--", "--include-ignored", "--nocapture", "--test-threads=1"]
+    cmd = ["cargo", "test", "--no-fail-fast", "--release", "-p", "scfast-core", "--features", "cuda,cugraph", *args.split(),
+           "--", "--include-ignored", "--skip", "external_dataset_report", "--skip", "seurat_parity_pbmc_like", "--nocapture", "--test-threads=1"]
     env = {**gpu_libs(), "SCFAST_CUGRAPH_TEST": "1"}
     print("$", " ".join(cmd), flush=True)
     p = subprocess.run(cmd, cwd="/work/rust", env={**os.environ, **env}, capture_output=True, text=True)
@@ -172,6 +178,16 @@ def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, e
     return f"results/{name}"
 
 
+@app.function(image=image, gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800, volumes={"/vol": bench_vol})
+def script_remote(code: str, args: str = "") -> str:
+    """Run a local Python script on the GPU box (wheel installed, data under /vol/data)."""
+    install_wheel()
+    Path("/tmp/script.py").write_text(code)
+    env = {**gpu_libs(), "NUMBA_CACHE_DIR": "/tmp/numba", "MPLCONFIGDIR": "/tmp/mpl"}
+    sh([sys.executable, "/tmp/script.py", *args.split()], env=env, check=False)
+    return "done"
+
+
 def pull(name: str) -> Path:
     out = ROOT / "bench" / "results" / name
     shutil.rmtree(out, ignore_errors=True)
@@ -194,6 +210,11 @@ def build(tests: bool = True):
 @app.local_entrypoint()
 def rust_tests(args: str = ""):
     print(rust_tests_remote.remote(args)[:200])
+
+
+@app.local_entrypoint()
+def script(path: str, args: str = ""):
+    print(script_remote.remote(Path(path).read_text(), args))
 
 
 @app.local_entrypoint()

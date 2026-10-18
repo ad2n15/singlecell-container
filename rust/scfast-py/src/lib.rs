@@ -294,6 +294,51 @@ fn pca_csr<'py>(
     ))
 }
 
+/// pca_csr for a CSR matrix already on the GPU (device pointers: int32 or int64 indptr,
+/// int32 indices, float32 data; canonical). Nothing of the matrix crosses to the host.
+#[pyfunction]
+#[pyo3(name = "pca_csr_device")]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn pca_csr_device<'py>(
+    py: Python<'py>,
+    n_rows: usize,
+    n_cols: usize,
+    nnz: usize,
+    indptr: u64,
+    indptr_i64: bool,
+    indices: u64,
+    data: u64,
+    n_comps: usize,
+    seed: u64,
+    scale: bool,
+    oversample: usize,
+    power_iters: usize,
+    device: &str,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
+    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, ..PcaParams::default() };
+    let ordinal = match parse_device(device)? {
+        Device::Cuda(i) => i,
+        Device::Cpu => return Err(PyValueError::new_err("a matrix on the GPU needs device \"cuda\" (or \"auto\" on a GPU build)")),
+    };
+    #[cfg(feature = "cuda")]
+    {
+        let x = core_pca::DeviceCsr { n: n_rows, p: n_cols, nnz, indptr, indptr_i64, indices, data };
+        // SAFETY: the Python wrapper passes CuPy device pointers of these sizes and dtypes,
+        // kept alive for the call, with the producing work synchronised.
+        let res = run_kernel(py, "pca", move || unsafe { core_pca::implicit_scaled_pca_device(&x, &params, ordinal) })?;
+        Ok((
+            rowmajor_to_py(py, res.embeddings, "embeddings")?,
+            rowmajor_to_py(py, res.loadings, "loadings")?,
+            PyArray1::from_vec(py, res.stdev),
+        ))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (py, n_rows, n_cols, nnz, indptr, indptr_i64, indices, data, params, ordinal);
+        Err(PyRuntimeError::new_err("scfast was built without the cuda feature"))
+    }
+}
+
 /// Diagnostics for tests: runs the same dtype dispatch and validation as pca_csr and reports
 /// which Rust types were chosen and where the borrowed slices point (zero-copy check).
 #[pyfunction]
@@ -537,6 +582,46 @@ fn leiden_csr<'py>(
         Ok(labels)
     }))?;
     Ok(PyArray1::from_vec(py, to_i32(labels)))
+}
+
+/// Leiden on cuGraph for a graph already on the device: COO int32 sources and
+/// destinations and f32 weights (device pointers, `nnz` each), both directions of every
+/// edge. Returns int32 labels. Unchecked beyond sizes; see `CugraphLeiden::cluster_device_coo`.
+#[pyfunction]
+#[pyo3(name = "leiden_coo_device")]
+#[allow(clippy::too_many_arguments)]
+fn leiden_coo_device<'py>(
+    py: Python<'py>,
+    n: usize,
+    nnz: usize,
+    src: usize,
+    dst: usize,
+    weights: usize,
+    resolution: f64,
+    seed: u64,
+    device: &str,
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    check_n_fits_i32(n, "leiden")?;
+    let ordinal = match parse_leiden_device(device)? {
+        LeidenDevice::Cuda(i) => i,
+        other => return Err(PyValueError::new_err(format!("a graph on the GPU needs a CUDA device, got {}", other.as_string()))),
+    };
+    let params = ClusterParams { resolution, seed, n_iterations: 1 };
+    #[cfg(feature = "cugraph")]
+    {
+        let labels = run_kernel(py, "leiden", move || {
+            let gpu = scfast_core::cugraph::CugraphLeiden::new(ordinal)?;
+            // SAFETY: the Python wrapper passes CuPy device pointers to `nnz` elements of the
+            // stated dtypes, kept alive for the call, with the producing work synchronised.
+            unsafe { gpu.cluster_device_coo(n, nnz, src as *mut _, dst as *mut _, weights as *mut _, &params) }.map(|(l, _)| l)
+        })?;
+        Ok(PyArray1::from_vec(py, to_i32(labels)))
+    }
+    #[cfg(not(feature = "cugraph"))]
+    {
+        let _ = (py, nnz, src, dst, weights, params, ordinal);
+        Err(PyRuntimeError::new_err("scfast was built without the cugraph feature"))
+    }
 }
 
 // ------------------------------------------------------------------ preprocessing (Phase 9)
@@ -810,7 +895,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
+    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

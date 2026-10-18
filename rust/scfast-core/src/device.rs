@@ -2,7 +2,7 @@
 //!
 //! `Device::Cpu` is always available and is the reference implementation. `Device::Cuda(i)`
 //! exists only when the crate was built with the `cuda` feature **and** the CUDA driver,
-//! NVRTC and cuBLAS shared libraries can be loaded at run time **and** device `i` is
+//! and NVRTC shared libraries can be loaded at run time **and** device `i` is
 //! visible. Without the feature, every CUDA query answers "not built" without touching any
 //! library, so the default build is identical to the pre-Phase-6 CPU engine.
 
@@ -95,7 +95,7 @@ impl std::fmt::Display for Device {
 pub struct DeviceInfo {
     /// Compiled with feature `cuda`.
     pub cuda_built: bool,
-    /// The driver, NVRTC and cuBLAS libraries loaded and at least one device is visible.
+    /// The driver and NVRTC libraries loaded and at least one device is visible.
     pub cuda_available: bool,
     /// Number of visible CUDA devices (0 when unavailable).
     pub device_count: usize,

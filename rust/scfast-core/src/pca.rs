@@ -132,41 +132,94 @@ pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaPa
 /// is a top-10 PC subspace similarity above 0.99.
 pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaParams, device: Device) -> Result<PcaResult> {
     validate(&x, params)?;
-    let (n, p, k) = (x.n_rows, x.n_cols, params.n_comps);
+    let (n, p) = (x.n_rows, x.n_cols);
     let blocks = Blocks::new(n, p, x.data.len());
-
     let stats = operator::gene_stats(&x, blocks)?;
+    match device {
+        Device::Cpu => {
+            let (gene_sd, inv_sd) = scaling(&stats, params);
+            let b = block_width(n, p, params);
+            let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
+            let svd = match params.clip.filter(|c| c.is_finite()) {
+                Some(c) => block_krylov_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), b, params.power_iters, params.seed)?,
+                None => block_krylov_svd(&op, b, params.power_iters, params.seed)?,
+            };
+            Ok(assemble(svd, &stats, gene_sd, n, p, params.n_comps))
+        }
+        #[cfg(feature = "cuda")]
+        Device::Cuda(ordinal) => cuda_pca(cuda::CsrDev::upload(&x, ordinal)?, stats, params),
+        #[cfg(not(feature = "cuda"))]
+        Device::Cuda(_) => Err(Error::gpu("scfast was built without CUDA support (feature `cuda`); use Device::Cpu")),
+    }
+}
+
+/// [`implicit_scaled_pca_on`] for a CSR matrix that is already on CUDA device `ordinal`
+/// (e.g. a CuPy matrix): the data are copied device-to-device and the gene statistics are
+/// computed there, so nothing of the matrix crosses to the host.
+///
+/// # Safety
+/// The pointers in `x` must be valid device memory as described by [`DeviceCsr`], with all
+/// work writing them finished. The structure is not validated on the device.
+#[cfg(feature = "cuda")]
+pub unsafe fn implicit_scaled_pca_device(x: &DeviceCsr, params: &PcaParams, ordinal: usize) -> Result<PcaResult> {
+    validate_params(x.n, x.p, params)?;
+    let csr = unsafe { cuda::CsrDev::copy_from(x, ordinal)? };
+    let stats = csr.stats()?.finish(x.n)?;
+    cuda_pca(csr, stats, params)
+}
+
+/// The device PCA on the device copy `csr` of X. Seurat's clip is exact on the device:
+/// a scaled value `(x - m) / sd` exceeds `clip` only at a stored entry, and there it equals
+/// the clip exactly when `x` is replaced by `m + clip sd`, so the stored values are capped
+/// in place and the operator keeps the unclipped means. The Gram correction then needs the
+/// column sums of the capped X (a second statistics pass).
+#[cfg(feature = "cuda")]
+fn cuda_pca(mut csr: cuda::CsrDev, stats: operator::GeneStats, params: &PcaParams) -> Result<PcaResult> {
+    let (n, p) = (csr.n, csr.p);
+    let (gene_sd, inv_sd) = scaling(&stats, params);
+    let colsum = match params.clip.filter(|c| c.is_finite()) {
+        Some(c) => {
+            let caps: Vec<f32> =
+                (0..p).map(|j| if inv_sd[j] == 0.0 { f32::INFINITY } else { (stats.mean[j] + c * gene_sd[j]) as f32 }).collect();
+            csr.cap(&caps)?;
+            csr.stats()?.sum
+        }
+        None => stats.mean.iter().map(|&m| m * n as f64).collect(),
+    };
+    let b = block_width(n, p, params);
+    let op = cuda::CudaScaledOp::new(csr, &stats.mean, &inv_sd, colsum, b)?;
+    let svd = if p <= GRAM_MAX_GENES {
+        gram_svd(&op, b, params.power_iters, params.seed)?
+    } else {
+        block_krylov_svd(&op, b, params.power_iters, params.seed)?
+    };
+    Ok(assemble(svd, &stats, gene_sd, n, p, params.n_comps))
+}
+
+/// Krylov block width `n_comps + oversample`, capped at `min(n, p)`.
+fn block_width(n: usize, p: usize, params: &PcaParams) -> usize {
+    params.n_comps.saturating_add(params.oversample).min(n.min(p))
+}
+
+#[cfg(feature = "cuda")]
+pub use cuda::DeviceCsr;
+
+/// Per-gene sd used for scaling (1 when off or constant) and the operator's 1/sd (0 for
+/// constant genes).
+fn scaling(stats: &operator::GeneStats, params: &PcaParams) -> (Vec<f64>, Vec<f64>) {
+    let p = stats.mean.len();
     let gene_sd: Vec<f64> = (0..p)
         .map(|j| if !params.scale || stats.constant[j] || stats.sd[j] == 0.0 { 1.0 } else { stats.sd[j] })
         .collect();
-    let inv_sd: Vec<f64> = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
+    let inv_sd = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
+    (gene_sd, inv_sd)
+}
 
-    let b = k.saturating_add(params.oversample).min(n.min(p));
-    let clip = params.clip.filter(|c| c.is_finite());
-    let (q, ub, d, vb) = match device {
-        Device::Cpu => {
-            let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
-            match clip {
-                Some(c) => block_krylov_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), b, params.power_iters, params.seed)?,
-                None => block_krylov_svd(&op, b, params.power_iters, params.seed)?,
-            }
-        }
-        #[cfg(feature = "cuda")]
-        Device::Cuda(ordinal) => {
-            let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, b, ordinal)?;
-            match clip {
-                Some(c) => block_krylov_svd(&Clipped::new(op, &x, &stats.mean, &inv_sd, c), b, params.power_iters, params.seed)?,
-                None => block_krylov_svd(&op, b, params.power_iters, params.seed)?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        Device::Cuda(_) => {
-            return Err(Error::gpu("scfast was built without CUDA support (feature `cuda`); use Device::Cpu"));
-        }
-    };
+/// (Q, U_B, singular values, V_B) of [`block_krylov_svd`]: the operator is Q B with B^T = U_B S V_B^T.
+type Svd = (faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>);
 
-    // Sign convention: the largest-magnitude loading of each component is positive (ties go
-    // to the lowest gene index).
+/// Signs, loadings, embeddings and standard deviations from the SVD factors.
+fn assemble((q, ub, d, vb): Svd, stats: &operator::GeneStats, gene_sd: Vec<f64>, n: usize, p: usize, k: usize) -> PcaResult {
     let signs: Vec<f64> = (0..k)
         .map(|c| {
             let col = ub.col(c);
@@ -190,13 +243,13 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
     }
     let embeddings = embed(q.as_ref(), vb.as_ref(), &d, &signs, k);
     let denom = ((n - 1) as f64).sqrt();
-    Ok(PcaResult {
+    PcaResult {
         embeddings,
         loadings,
         stdev: d[..k].iter().map(|s| (s / denom) as f32).collect(),
         gene_mean: stats.mean.iter().map(|&m| m as f32).collect(),
         gene_sd: gene_sd.iter().map(|&s| s as f32).collect(),
-    })
+    }
 }
 
 fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Result<()> {
@@ -215,6 +268,10 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
     if x.indptr[0].to_usize() != 0 || x.indptr[n].to_usize() != x.data.len() {
         return Err(Error::InvalidInput("indptr must start at 0 and end at nnz".into()));
     }
+    validate_params(n, p, params)
+}
+
+fn validate_params(n: usize, p: usize, params: &PcaParams) -> Result<()> {
     if params.n_comps == 0 {
         return Err(Error::InvalidParameter("n_comps must be at least 1".into()));
     }
@@ -235,12 +292,8 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
 /// Block Krylov SVD (Musco & Musco 2015): subspace iteration that keeps every
 /// power-iteration block, so the basis spans `[Z Ω, (Z Z^T) Z Ω, ...]` and the
 /// top singular vectors converge much faster when singular values are close.
-fn block_krylov_svd<O: Operator>(
-    op: &O,
-    b: usize,
-    iters: usize,
-    seed: u64,
-) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
+/// Returns (K: n x width orthonormal, U_b: p x width, d, V_b) with `Z ≈ (K V_b) diag(d) U_b^T`.
+fn block_krylov_svd<O: Operator>(op: &O, b: usize, iters: usize, seed: u64) -> Result<Svd> {
     let (n, p) = (op.nrows(), op.ncols());
     let blocks = (iters + 1).min(n.min(p) / b);
     let width = blocks * b;
@@ -278,6 +331,45 @@ fn block_krylov_svd<O: Operator>(
     Ok((k, ub, d, vb))
 }
 
+/// Largest gene count for which the CUDA path forms the Gram matrix (8 p^2 bytes on the
+/// device; 0.5 GiB at this size).
+#[cfg(feature = "cuda")]
+const GRAM_MAX_GENES: usize = 8192;
+
+/// [`block_krylov_svd`] for the device: G = Z^T Z (genes x genes) in one pass over the
+/// data, then the gene-side Krylov basis `[Ω, G Ω, ..., G^q Ω]` on the host (Z times it is
+/// the cell-side basis of `block_krylov_svd`, so the same `power_iters` gives the same
+/// subspace), Rayleigh-Ritz on `K^T G K`, and one `apply` for the cell scores. Avoids
+/// 2 (power_iters + 1) cells x b round trips and their host QR factorisations.
+/// Returns (U, V, S, I) so that `embed` gives Z V.
+#[cfg(feature = "cuda")]
+fn gram_svd(op: &cuda::CudaScaledOp, b: usize, iters: usize, seed: u64) -> Result<Svd> {
+    let g = op.gram()?;
+    let (n, p) = (op.nrows(), op.ncols());
+    let blocks = (iters + 1).min(p / b);
+    let mut k = faer::Mat::<f64>::zeros(p, blocks * b);
+    let mut v = dense::gaussian(p, b, seed);
+    for i in 0..blocks {
+        dense::orthonormalize(v.as_mut());
+        k.as_mut().submatrix_mut(0, i * b, p, b).copy_from(v.as_ref());
+        v = &g * &v;
+    }
+    dense::orthonormalize(k.as_mut());
+    let h = k.transpose() * &g * &k;
+    let (w, lambda, _) = dense::thin_svd(h.as_ref())?;
+    let vr = &k * w.as_ref().subcols(0, b);
+    let s: Vec<f64> = lambda[..b].iter().map(|&x| x.max(0.0).sqrt()).collect();
+    let mut u = faer::Mat::<f64>::zeros(n, b);
+    op.apply(vr.as_ref(), u.as_mut())?;
+    for (c, &sc) in s.iter().enumerate() {
+        let inv = if sc > 0.0 { 1.0 / sc } else { 0.0 };
+        u.col_mut(c).iter_mut().for_each(|y| *y *= inv);
+    }
+    Ok((u, vr, s, faer::Mat::<f64>::identity(b, b)))
+}
+
+/// Embeddings `Q V_b[:, :k] diag(d_k signs)` as row-major f32, parallel over fixed row
+/// chunks (each a sequential faer product, so thread-count independent).
 fn embed(q: faer::MatRef<'_, f64>, vb: faer::MatRef<'_, f64>, d: &[f64], signs: &[f64], k: usize) -> RowMajor {
     use rayon::prelude::*;
     const ROWS: usize = 1024;

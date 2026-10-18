@@ -101,20 +101,26 @@ class RapidsEngine(ScanpyEngine):
         versions = super().startup()
         import cupy as cp
         import rapids_singlecell as rsc
+        import rmm
+        from rmm.allocators.cupy import rmm_cupy_allocator
 
+        # A pooling allocator for CuPy and cuGraph: without one cuGraph Leiden at 500k cells
+        # spends half its time in cudaMalloc / cudaFree. The driver's stream-ordered pool
+        # (cudaMallocAsync), because RMM's fixed pool fragments and runs out at 500k cells.
+        rmm.mr.set_current_device_resource(rmm.mr.CudaAsyncMemoryResource())
+        cp.cuda.set_allocator(rmm_cupy_allocator)
         cp.zeros(1)  # create the CUDA context now, so it counts as start-up
         cp.cuda.Device().synchronize()
         self.cp, self.rsc = cp, rsc
-        self.pool = cp.get_default_memory_pool()
-        versions.update({"rapids_singlecell": self.md.version("rapids_singlecell"), "cupy": cp.__version__})
+        versions.update({"rapids_singlecell": rsc.__version__, "cupy": cp.__version__})
         return versions
 
     def sync(self):
         self.cp.cuda.Device().synchronize()
 
     def gpu_mem(self):
-        # bytes held by CuPy's pool after the step: an upper bound on live allocations
-        return int(self.pool.total_bytes())
+        free, total = self.cp.cuda.runtime.memGetInfo()
+        return int(total - free)  # includes the RMM pool and scfast's own allocations
 
     def to_gpu(self, a):
         self.rsc.get.anndata_to_GPU(a)
@@ -143,8 +149,9 @@ class RapidsEngine(ScanpyEngine):
         self.rsc.pp.neighbors(a, n_neighbors=cfg.k, n_pcs=cfg.dims, random_state=cfg.seed)
 
     def cluster(self, a, cfg):
-        self.rsc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, n_iterations=2,
-                           key_added="cluster")
+        # rsc passes n_iterations to cuGraph as max_level (aggregation depth), not leidenalg's
+        # repeat count: 2 stops the merge early, so keep its default of 100.
+        self.rsc.tl.leiden(a, resolution=cfg.resolution, random_state=cfg.seed, key_added="cluster")
 
     def umap(self, a, cfg):
         self.rsc.tl.umap(a, random_state=cfg.seed)
@@ -206,9 +213,8 @@ class ScfastEngine:
     def pca(self, a, cfg):
         import scipy.sparse as sp
 
-        x = a.X.get() if hasattr(a.X, "get") else a.X
-        emb, load, sdev = self.scfast.pca(sp.csr_matrix(x), n_comps=cfg.n_pcs, seed=cfg.seed,
-                                          device=self.scfast_device)
+        x = a.X if self.device == "gpu" else sp.csr_matrix(a.X)  # a CuPy matrix stays on the GPU
+        emb, load, sdev = self.scfast.pca(x, n_comps=cfg.n_pcs, seed=cfg.seed, device=self.scfast_device)
         a.obsm["X_pca"] = emb
         a.varm["PCs"] = load
         a.uns["pca"] = {"variance": (sdev.astype("float64") ** 2)}
@@ -220,13 +226,16 @@ class ScfastEngine:
         idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="auto",
                                     device=self.scfast_device)
         n = idx.shape[0]
-        rows = np.repeat(np.arange(n), cfg.k - 1)
-        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
-        a.obsp["snn"] = self.scfast.snn(idx)  # Seurat's SNN (Jaccard), what Leiden clusters on
+        indptr = np.arange(0, n * (cfg.k - 1) + 1, cfg.k - 1)
+        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), idx[:, 1:].ravel(), indptr), shape=(n, n))
+        self.snn = self.scfast.snn(self.on_device(idx))  # Seurat's SNN (Jaccard), what Leiden clusters on
         self.knn = idx, dist
 
+    def on_device(self, x):
+        return x
+
     def cluster(self, a, cfg):
-        labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
+        labels = self.scfast.leiden(self.snn, resolution=cfg.resolution, seed=cfg.seed,
                                     n_iterations=2, device=self.leiden_device)
         a.obs["cluster"] = labels.astype(str)
 
@@ -238,9 +247,9 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
     """ScfastEngine with its steps on the device.
 
     rapids-singlecell normalises, selects HVGs and runs UMAP on the GPU; scfast's CUDA
-    backend does PCA and kNN, and Leiden runs on cuGraph when scfast can load it (the backend
-    used is recorded as `leiden_device` in the environment file). The UMAP fuzzy simplicial
-    set comes from cuML, from the same kNN that Leiden's SNN graph uses.
+    backend does PCA and kNN, builds the SNN graph on the device and hands it to cuGraph
+    Leiden there (the backend used is recorded as `leiden_device` in the environment file).
+    The UMAP fuzzy simplicial set is built on the GPU from the same kNN (fuzzy_graph_gpu).
     """
 
     device = "gpu"
@@ -265,23 +274,46 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         free, total = self.cp.cuda.runtime.memGetInfo()
         return int(total - free)  # scfast allocates outside CuPy's pool
 
-    def neighbors(self, a, cfg):
-        import numpy as np
-        import scipy.sparse as sp
-        from cuml.manifold.umap import fuzzy_simplicial_set
+    def on_device(self, x):
+        return self.cp.asarray(x)
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
-                                    device=self.scfast_device)
-        n = idx.shape[0]
-        rows = np.repeat(np.arange(n), cfg.k - 1)
-        a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), (rows, idx[:, 1:].ravel())), shape=(n, n))
-        a.obsp["snn"] = self.scfast.snn(idx)
-        conn = fuzzy_simplicial_set(self.cp.zeros((n, 1), dtype=np.float32), cfg.k, cfg.seed,
-                                    knn_indices=self.cp.asarray(idx), knn_dists=self.cp.asarray(dist),
-                                    set_op_mix_ratio=1.0, local_connectivity=1.0)
-        a.obsp["connectivities"] = conn.tocsr()
+    def neighbors(self, a, cfg):
+        super().neighbors(a, cfg)
+        idx, dist = self.knn
+        a.obsp["connectivities"] = fuzzy_graph_gpu(self.cp.asarray(idx), self.cp.asarray(dist))
         a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
                               "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
+
+
+def fuzzy_graph_gpu(idx, dist):
+    """umap-learn's fuzzy_simplicial_set (local_connectivity 1, set_op_mix_ratio 1) from CuPy
+    kNN arrays with the cell itself in column 0. Matches cuML's to 4e-6 at 500k cells in a
+    quarter of the time (0.21 vs 0.79 s on an L4)."""
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+    import numpy as np
+
+    n, k = idx.shape
+    d = dist[:, 1:].astype(cp.float32)
+    rho = cp.where(d > 0, d, cp.inf).min(axis=1)
+    rho = cp.where(cp.isinf(rho), 0, rho)
+    excess = d - rho[:, None]
+    # Bisection for sigma: sum_j exp(-max(d_j - rho, 0) / sigma) = log2(k), 64 steps as umap-learn.
+    lo, hi, mid = cp.zeros(n, cp.float32), cp.full(n, cp.inf, cp.float32), cp.ones(n, cp.float32)
+    for _ in range(64):
+        big = cp.where(excess > 0, cp.exp(-excess / mid[:, None]), 1.0).sum(axis=1) > np.log2(k)
+        hi = cp.where(big, mid, hi)
+        lo = cp.where(big, lo, mid)
+        mid = cp.where(big | ~cp.isinf(hi), (lo + hi) / 2, mid * 2)
+    sigma = cp.maximum(mid, 1e-3 * cp.where(rho > 0, d.mean(axis=1), d.mean()))
+    w = cp.where(excess > 0, cp.exp(-excess / sigma[:, None]), 1.0).astype(cp.float32)
+    w = cp.where(idx[:, 1:] == cp.arange(n)[:, None], 0, w)
+    p = csp.csr_matrix((w.ravel(), idx[:, 1:].astype(cp.int32).ravel(),
+                        cp.arange(0, n * (k - 1) + 1, k - 1, dtype=cp.int32)), shape=(n, n))
+    pt = p.T.tocsr()
+    g = p + pt - p.multiply(pt)
+    g.eliminate_zeros()
+    return g
 
 
 # ---------------------------------------------------------------- main
