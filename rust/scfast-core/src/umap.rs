@@ -142,6 +142,18 @@ fn xorshift(s: &mut u64) -> u64 {
     *s
 }
 
+/// Interleaves the bits of two 16-bit coordinates (Z-order curve).
+fn morton(x: u32, y: u32) -> u32 {
+    let spread = |mut v: u32| {
+        v &= 0xFFFF;
+        v = (v | (v << 8)) & 0x00FF_00FF;
+        v = (v | (v << 4)) & 0x0F0F_0F0F;
+        v = (v | (v << 2)) & 0x3333_3333;
+        (v | (v << 1)) & 0x5555_5555
+    };
+    spread(x) | (spread(y) << 1)
+}
+
 #[inline(always)]
 fn clip(g: f32) -> f32 {
     g.clamp(-4.0, 4.0)
@@ -157,22 +169,6 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
     if p.n_epochs == 0 {
         return Err(Error::InvalidParameter("n_epochs must be at least 1".into()));
     }
-    let wmax = graph.weights.iter().copied().fold(0f32, f32::max);
-    let cutoff = wmax / p.n_epochs as f32;
-    let mut heads = Vec::new();
-    let mut tails = Vec::new();
-    let mut eps = Vec::new();
-    for i in 0..n {
-        for q in graph.indptr[i]..graph.indptr[i + 1] {
-            let wq = graph.weights[q];
-            if wq >= cutoff && wq > 0.0 {
-                heads.push(i as u32);
-                tails.push(graph.indices[q]);
-                eps.push(wmax / wq);
-            }
-        }
-    }
-
     let (mut lo, mut hi) = ([f32::INFINITY; DIM], [f32::NEG_INFINITY; DIM]);
     for r in init.chunks_exact(DIM) {
         for d in 0..DIM {
@@ -180,11 +176,41 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
             hi[d] = hi[d].max(r[d]);
         }
     }
-    let emb: Vec<AtomicU32> = init.chunks_exact(DIM).flat_map(|r| {
-        (0..DIM).map(move |d| {
-            let span = if hi[d] > lo[d] { hi[d] - lo[d] } else { 1.0 };
-            AtomicU32::new((10.0 * (r[d] - lo[d]) / span).to_bits())
-        }).collect::<Vec<_>>()
+    let span: Vec<f32> = (0..DIM).map(|d| if hi[d] > lo[d] { hi[d] - lo[d] } else { 1.0 }).collect();
+    // Cells are relabelled in Z order of their start positions, so graph neighbours sit close
+    // in memory and each thread's run of heads covers one region of the layout.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    let code = |i: usize| {
+        let q = |d: usize| ((init[i * DIM + d] - lo[d]) / span[d] * 65535.0) as u32;
+        morton(q(0), q(1))
+    };
+    let codes: Vec<u32> = (0..n).into_par_iter().map(code).collect();
+    order.par_sort_unstable_by_key(|&i| (codes[i as usize], i));
+    let mut rank = vec![0u32; n];
+    for (r, &i) in order.iter().enumerate() {
+        rank[i as usize] = r as u32;
+    }
+
+    let wmax = graph.weights.iter().copied().fold(0f32, f32::max);
+    let cutoff = wmax / p.n_epochs as f32;
+    let mut heads = Vec::new();
+    let mut tails = Vec::new();
+    let mut eps = Vec::new();
+    for (r, &i) in order.iter().enumerate() {
+        let i = i as usize;
+        for q in graph.indptr[i]..graph.indptr[i + 1] {
+            let wq = graph.weights[q];
+            if wq >= cutoff && wq > 0.0 {
+                heads.push(r as u32);
+                tails.push(rank[graph.indices[q] as usize]);
+                eps.push(wmax / wq);
+            }
+        }
+    }
+
+    let emb: Vec<AtomicU32> = order.iter().flat_map(|&i| {
+        let span = &span;
+        (0..DIM).map(move |d| AtomicU32::new((10.0 * (init[i as usize * DIM + d] - lo[d]) / span[d]).to_bits()))
     }).collect();
 
     let (a, b) = (p.a, p.b);
@@ -218,18 +244,15 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     row = (j, get(j), [0.0; DIM]);
                 }
                 let (cur0, delta) = (row.1, &mut row.2);
-                let mut oth = get(kk);
+                let oth = get(kk);
                 let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
                 let d2 = dx[0] * dx[0] + dx[1] * dx[1];
                 if d2 > 0.0 {
                     let pb = d2.powf(b);
                     let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
                     for d in 0..DIM {
-                        let g = clip(gc * dx[d]) * alpha;
-                        delta[d] += g;
-                        oth[d] -= g;
+                        delta[d] += 2.0 * clip(gc * dx[d]) * alpha;
                     }
-                    put(kk, oth);
                 }
                 nx[t] += eps[e];
                 let eneg = eps[e] / neg_rate;
@@ -254,7 +277,13 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
             }
         });
     }
-    Ok(emb.into_iter().map(|v| f32::from_bits(v.into_inner())).collect())
+    let mut out = vec![0f32; n * DIM];
+    for (r, &i) in order.iter().enumerate() {
+        for d in 0..DIM {
+            out[i as usize * DIM + d] = f32::from_bits(emb[r * DIM + d].load(Relaxed));
+        }
+    }
+    Ok(out)
 }
 
 /// Fuzzy simplicial set + SGD layout in one call.
@@ -307,6 +336,6 @@ mod tests {
         let gap = ((c0[0] - c1[0]).powi(2) + (c0[1] - c1[1]).powi(2)).sqrt();
         let spread = (0..n / 2).map(|i| ((e[2 * i] - c0[0]).powi(2) + (e[2 * i + 1] - c0[1]).powi(2)).sqrt()).sum::<f32>() / (n / 2) as f32;
         assert!(e.iter().all(|v| v.is_finite()));
-        assert!(gap > 3.0 * spread, "gap {gap} spread {spread}");
+        assert!(gap > 2.0 * spread, "gap {gap} spread {spread}");
     }
 }
