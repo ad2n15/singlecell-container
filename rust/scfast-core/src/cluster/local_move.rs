@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
@@ -78,6 +79,7 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
     let mut applied: Vec<(u32, u32)> = Vec::new();
     let mut moved_at = vec![0u32; n];
     let mut proposed_at = vec![0u32; n];
+    let first_wake: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(u32::MAX)).collect();
     while !queue.is_empty() && moves < budget {
         batch.clear();
         batch.extend(queue.drain(..batch_len.min(queue.len())));
@@ -254,10 +256,32 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                 out
             })
             .collect();
-        for &u in wake.iter().flatten() {
-            if !std::mem::replace(&mut queued[u as usize], true) {
-                queue.push_back(u);
+        // first occurrence of each neighbour wins, as if they were queued one by one
+        let mut offsets = Vec::with_capacity(wake.len());
+        let mut total = 0u32;
+        for w in &wake {
+            offsets.push(total);
+            total += w.len() as u32;
+        }
+        wake.par_iter().zip(&offsets).for_each(|(w, &off)| {
+            for (j, &u) in w.iter().enumerate() {
+                first_wake[u as usize].fetch_min(off + j as u32, Ordering::Relaxed);
             }
+        });
+        let woken: Vec<Vec<u32>> = wake
+            .par_iter()
+            .zip(&offsets)
+            .map(|(w, &off)| {
+                let mine = w.iter().enumerate().filter(|&(j, &u)| first_wake[u as usize].load(Ordering::Relaxed) == off + j as u32);
+                mine.map(|(_, &u)| u).collect()
+            })
+            .collect();
+        woken.par_iter().flatten().for_each(|&u| first_wake[u as usize].store(u32::MAX, Ordering::Relaxed));
+        for w in &woken {
+            for &u in w {
+                queued[u as usize] = true;
+            }
+            queue.extend(w);
         }
         for &(v, _) in &applied {
             moved_at[v as usize] = 0;
