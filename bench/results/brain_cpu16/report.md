@@ -12,12 +12,12 @@ Compute = normalise → UMAP (median of measured repeats, summed). Read and CPU�
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 100,000 | seurat | 194.60 | 21.01 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 100,000 | scanpy | 75.79 | 8.85 | 0.00 | 11.28 | – | 2.57× | –× | 1.000 | 0.995 | 0.585 | fails parity |
-| 100,000 | scfast-cpu | 3.31 | 0.28 | 0.00 | 3.26 | – | 58.72× | –× | 1.000 | 0.963 | 0.693 | fails parity |
+| 100,000 | scfast-cpu | 2.40 | 0.27 | 0.00 | 3.24 | – | 81.20× | –× | 1.000 | 0.963 | 0.693 | fails parity |
 | 500,000 | seurat | 966.82 | 88.44 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 500,000 | scanpy | 488.66 | 51.99 | 0.00 | 50.85 | – | 1.98× | –× | 1.000 | 0.993 | 0.602 | fails parity |
-| 500,000 | scfast-cpu | 17.59 | 1.57 | 0.00 | 13.98 | – | 54.97× | –× | 1.000 | 0.959 | 0.565 | fails parity |
+| 500,000 | scfast-cpu | 8.99 | 1.24 | 0.00 | 13.99 | – | 107.49× | –× | 1.000 | 0.959 | 0.565 | fails parity |
 | 1,290,549 | scanpy | 1161.61 | 101.01 | 0.00 | 150.33 | – | –× | –× | – | – | – | no parity data |
-| 1,290,549 | scfast-cpu | 36.81 | 7.40 | 0.00 | 45.80 | – | –× | –× | – | – | – | no parity data |
+| 1,290,549 | scfast-cpu | 23.70 | 7.11 | 0.00 | 45.88 | – | –× | –× | – | – | – | no parity data |
 
 Parity thresholds: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9. Adoption: parity passes and, at ≥ 100,000 cells, ≥ 1.5× faster or ≥ 2.0× less peak memory. Scanpy and rapids run their own pipelines (different HVG, graph and Leiden implementations), so their parity is informative only; the rule is meant for scfast.
 
@@ -43,14 +43,14 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 100,000 | scanpy | neighbors | 7.059 | 6.994–7.146 | 3 | 11.28 | process |
 | 100,000 | scanpy | cluster | 3.963 | 3.958–4.233 | 3 | 11.28 | process |
 | 100,000 | scanpy | umap | 49.472 | 49.237–52.280 | 3 | 11.28 | process |
-| 100,000 | scfast-cpu | read | 0.280 | 0.266–0.293 | 2 | 3.20 | process |
-| 100,000 | scfast-cpu | normalize | 0.209 | 0.201–0.218 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | scale | 0.004 | 0.004–0.004 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | pca | 0.352 | 0.330–0.374 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | neighbors | 0.185 | 0.171–0.198 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | cluster | 1.078 | 1.040–1.116 | 2 | 3.26 | process |
-| 100,000 | scfast-cpu | umap | 1.486 | 1.439–1.533 | 2 | 3.26 | process |
+| 100,000 | scfast-cpu | read | 0.270 | 0.270–0.270 | 2 | 3.14 | process |
+| 100,000 | scfast-cpu | normalize | 0.201 | 0.198–0.204 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | scale | 0.013 | 0.007–0.019 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | pca | 0.328 | 0.327–0.329 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | neighbors | 0.166 | 0.162–0.170 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | cluster | 1.065 | 1.039–1.091 | 2 | 3.24 | process |
+| 100,000 | scfast-cpu | umap | 0.624 | 0.620–0.628 | 2 | 3.24 | process |
 | 500,000 | seurat | read | 88.443 | 88.443–88.443 | 1 | – | process |
 | 500,000 | seurat | normalize | 10.623 | 10.623–10.623 | 1 | – | process |
 | 500,000 | seurat | hvg | 26.818 | 26.818–26.818 | 1 | – | process |
@@ -67,14 +67,14 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 500,000 | scanpy | neighbors | 48.831 | 48.831–48.831 | 1 | 50.85 | process |
 | 500,000 | scanpy | cluster | 31.164 | 31.164–31.164 | 1 | 50.85 | process |
 | 500,000 | scanpy | umap | 324.843 | 324.843–324.843 | 1 | 50.85 | process |
-| 500,000 | scfast-cpu | read | 1.572 | 1.550–1.595 | 2 | 13.91 | process |
-| 500,000 | scfast-cpu | normalize | 1.067 | 1.056–1.078 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | scale | 0.018 | 0.018–0.019 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | pca | 1.954 | 1.741–2.167 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | neighbors | 1.221 | 1.179–1.263 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | cluster | 4.201 | 3.924–4.478 | 2 | 13.98 | process |
-| 500,000 | scfast-cpu | umap | 9.127 | 8.977–9.276 | 2 | 13.98 | process |
+| 500,000 | scfast-cpu | read | 1.245 | 1.224–1.265 | 2 | 13.89 | process |
+| 500,000 | scfast-cpu | normalize | 0.818 | 0.815–0.820 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | scale | 0.014 | 0.013–0.014 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | pca | 1.143 | 1.129–1.158 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | neighbors | 0.938 | 0.919–0.957 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | cluster | 3.593 | 3.382–3.803 | 2 | 13.99 | process |
+| 500,000 | scfast-cpu | umap | 2.489 | 2.428–2.550 | 2 | 13.99 | process |
 | 1,290,549 | scanpy | read | 101.011 | 101.011–101.011 | 1 | 97.87 | process |
 | 1,290,549 | scanpy | normalize | 16.426 | 16.426–16.426 | 1 | 118.78 | process |
 | 1,290,549 | scanpy | hvg | 40.644 | 40.644–40.644 | 1 | 129.24 | process |
@@ -83,14 +83,14 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 1,290,549 | scanpy | neighbors | 138.586 | 138.586–138.586 | 1 | 150.33 | process |
 | 1,290,549 | scanpy | cluster | 69.998 | 69.998–69.998 | 1 | 150.33 | process |
 | 1,290,549 | scanpy | umap | 796.287 | 796.287–796.287 | 1 | 150.33 | process |
-| 1,290,549 | scfast-cpu | read | 7.400 | 7.079–7.722 | 2 | 45.68 | process |
-| 1,290,549 | scfast-cpu | normalize | 2.178 | 2.168–2.187 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | scale | 0.029 | 0.028–0.030 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | pca | 2.490 | 2.412–2.568 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | neighbors | 3.020 | 2.959–3.080 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | cluster | 9.489 | 9.001–9.978 | 2 | 45.80 | process |
-| 1,290,549 | scfast-cpu | umap | 19.604 | 19.603–19.605 | 2 | 45.80 | process |
+| 1,290,549 | scfast-cpu | read | 7.109 | 7.077–7.141 | 2 | 45.78 | process |
+| 1,290,549 | scfast-cpu | normalize | 2.159 | 2.138–2.179 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | scale | 0.028 | 0.028–0.028 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | pca | 2.556 | 2.545–2.568 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | neighbors | 3.110 | 3.101–3.119 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | cluster | 9.245 | 9.025–9.466 | 2 | 45.88 | process |
+| 1,290,549 | scfast-cpu | umap | 6.599 | 6.340–6.857 | 2 | 45.88 | process |
 
 ## Start-up (cold)
 

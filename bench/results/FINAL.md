@@ -9,12 +9,12 @@ Every engine reads the same QC'd files (`bench/prep.py`).
 
 | Dataset | Cells | Seurat 5.6 | Scanpy 1.12 | **scfast-cpu** | vs Seurat | vs Scanpy |
 |---|---:|---:|---:|---:|---:|---:|
-| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **3.0 s** | **41×** | **19×** |
-| Mouse brain | 100,000 | 194.6 s | 75.8 s | **3.3 s** | **59×** | **23×** |
-| Mouse brain | 500,000 | 966.8 s | 488.7 s | **17.6 s** | **55×** | **28×** |
-| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **36.8 s** | – | **32×** |
+| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **1.9 s** | **63×** | **29×** |
+| Mouse brain | 100,000 | 194.6 s | 75.8 s | **2.4 s** | **81×** | **32×** |
+| Mouse brain | 500,000 | 966.8 s | 488.7 s | **9.0 s** | **108×** | **54×** |
+| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **23.7 s** | – | **49×** |
 
-Peak memory at 1.29M cells: scfast 46 GB, Scanpy 150 GB. Reading the 1.29M file: scfast 7.4 s,
+Peak memory at 1.29M cells: scfast 46 GB, Scanpy 150 GB. Reading the 1.29M file: scfast 7.1 s,
 Scanpy 101 s.
 
 Sources: `bench/results/{pbmc68k_cpu16,brain_cpu16}/report.md`, GPU `bench/results/{gpu_h100_real,h100_final_brain,h100_final_pbmc68k}/report.md` (medians; 3 measured repeats
@@ -58,9 +58,9 @@ core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
 
 | | Seurat (16 cores) | Scanpy (16 cores) | scfast CPU (16 cores) | rapids-singlecell (H100) | **scfast GPU (H100)** |
 |---|---:|---:|---:|---:|---:|
-| Compute | ~3 h (published) | 1,161.6 s | 36.8 s | out of memory | **7.2 s** |
-| File → result | – | 1,262.6 s | 44.2 s | – | **26.7 s** |
-| vs Scanpy (compute) | – | 1× | 32× | – | **162×** |
+| Compute | ~3 h (published) | 1,161.6 s | 23.7 s | out of memory | **7.2 s** |
+| File → result | – | 1,262.6 s | 30.8 s | – | **26.7 s** |
+| vs Scanpy (compute) | – | 1× | 49× | – | **162×** |
 
 ## What changed overnight
 
