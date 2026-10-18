@@ -774,6 +774,9 @@ def test_read_10x_h5_matches_counts(tmp_path, monkeypatch, shuffle, int_dtype):
     W, _, _ = scfast.read_10x_h5(path)
     assert W.indices.dtype == np.int64 and W.indptr.dtype == np.int64
     assert (W != counts).nnz == 0
+    data, indices, indptr, shape = scfast.read_10x_h5(path, arrays=True)[0]
+    assert (data.dtype, indices.dtype, indptr.dtype, shape) == (np.float32, np.int32, np.int64, (50, 30))
+    assert (sp.csr_matrix((data, indices, indptr), shape=shape) != counts).nnz == 0
 
 
 # ---------------------------------------------------------------- end to end

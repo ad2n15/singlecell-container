@@ -246,8 +246,8 @@ class ScfastEngine:
 class ScfastGpuEngine(ScfastEngine, RapidsEngine):
     """ScfastEngine on the device.
 
-    scfast.read_10x_h5 reads on the CPU (int64 CSR above 2^31 - 1 non-zeros); 'to_gpu'
-    uploads the raw counts. scfast.preprocess then runs on the device (the HVGs are
+    scfast.read_10x_h5(arrays=True) reads on the CPU into float32 data, int32 indices and
+    int64 indptr at any size; 'to_gpu' uploads those raw counts. scfast.preprocess then runs on the device (the HVGs are
     Seurat's vst ones, as scfast-cpu), PCA (clip exact), kNN and the SNN graph run on
     scfast's CUDA backend, Leiden on cuGraph there (the backend used is recorded as
     `leiden_device` in the environment file), and UMAP is rapids-singlecell's (cuML) on the
@@ -256,7 +256,7 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
 
     device = "gpu"
     scfast_device = "cuda"
-    read, normalize, hvg, umap = ScfastEngine.read, ScfastEngine.normalize, ScfastEngine.hvg, RapidsEngine.umap
+    normalize, hvg, umap = ScfastEngine.normalize, ScfastEngine.hvg, RapidsEngine.umap
 
     def startup(self):
         versions = {**RapidsEngine.startup(self), **ScfastEngine.startup(self)}
@@ -267,10 +267,14 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
         return versions
 
+    def read(self, path):
+        X, barcodes, _ = self.scfast.read_10x_h5(path, arrays=True)
+        return SimpleNamespace(X=X, obs_names=barcodes, obs={}, obsm={}, obsp={}, varm={}, uns={})
+
     def to_gpu(self, a):
-        cp, x = self.cp, a.X
-        a.X = (cp.asarray(x.data, dtype=cp.float32), cp.asarray(x.indices).astype(cp.int32, copy=False),
-               cp.asarray(x.indptr, dtype=cp.int64), x.shape)  # a tuple: cupyx CSR is limited to 2^31 - 1 non-zeros
+        data, indices, indptr, shape = a.X
+        # A tuple: cupyx CSR is limited to 2^31 - 1 non-zeros.
+        a.X = (self.cp.asarray(data), self.cp.asarray(indices), self.cp.asarray(indptr), shape)
 
     def scale(self, a, cfg):
         import anndata as ad

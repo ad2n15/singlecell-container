@@ -752,7 +752,7 @@ def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:
     return ds[()].astype(dtype, copy=False)
 
 
-def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
+def read_10x_h5(path: str | Any, arrays: bool = False) -> tuple[Any, np.ndarray, np.ndarray]:
     """Read a Cell Ranger ``.h5`` (v2 or v3) as CSR counts, cells x genes.
 
     The file's genes x cells CSC arrays are a cells x genes CSR as they are, so nothing is
@@ -763,7 +763,9 @@ def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
     -------
     (X, barcodes, gene_names)
         X: scipy.sparse.csr_matrix, float32 counts, int32 indices (int64 above 2^31 - 1
-        non-zeros), ready for
+        non-zeros); with ``arrays=True`` the tuple ``(data float32, indices int32, indptr
+        int64, shape)`` instead (no scipy matrix, int32 indices at any size: what a GPU upload
+        wants). Ready for
         :func:`preprocess`. barcodes, gene_names: str arrays. Files with features other
         than Gene Expression raise ``ValueError``.
     """
@@ -783,12 +785,16 @@ def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
         indptr = g["indptr"][()]
         # scipy wants indices and indptr in one dtype: int64 once the non-zeros pass int32.
         wide = int(indptr[-1]) > _I32_MAX
-        index_dtype = np.int64 if wide else np.int32
-        parts = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], index_dtype),
-                 indptr.astype(index_dtype))
-        # Wide arrays skip scipy's index-dtype scan (about 1 s at 2.6e9 non-zeros); preprocess and
-        # pca check the structure in Rust.
-        X = _csr_validated(*parts, (n_cells, n_genes)) if wide else sp.csr_matrix(parts, shape=(n_cells, n_genes))
+        if arrays:
+            X = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], np.int32),
+                 indptr.astype(np.int64), (n_cells, n_genes))
+        else:
+            index_dtype = np.int64 if wide else np.int32
+            parts = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], index_dtype),
+                     indptr.astype(index_dtype))
+            # Wide arrays skip scipy's index-dtype scan (about 1 s at 2.6e9 non-zeros); preprocess
+            # and pca check the structure in Rust.
+            X = _csr_validated(*parts, (n_cells, n_genes)) if wide else sp.csr_matrix(parts, shape=(n_cells, n_genes))
         barcodes = g["barcodes"][()].astype(str)
     return X, barcodes, names
 
