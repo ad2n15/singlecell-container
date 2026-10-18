@@ -2,9 +2,9 @@
   "node": "modal",
   "platform": "Linux-4.19.0-gvisor-x86_64-with-glibc2.39",
   "python": "3.12.1",
-  "cpu_model": "unknown",
+  "cpu_model": "unknown (GenuineIntel family 6 model 106)",
   "logical_cpus": 32,
-  "mem_total_bytes": 726299619328,
+  "mem_total_bytes": 486238355456,
   "loadavg": [
     0.0,
     0.0,
@@ -23,12 +23,12 @@
   "packages": {
     "scfast": "0.1.0"
   },
-  "time_utc": "2026-10-18T00:37:27Z",
+  "time_utc": "2026-10-18T05:05:25Z",
   "config": {
     "engine": "scfast-cpu",
     "data": "/data/prep/brain/n100000",
     "out": "/data/results/brain/scfast-cpu_n100000",
-    "reps": 3,
+    "reps": 2,
     "threads": 16,
     "n_hvg": 2000,
     "n_pcs": 30,
