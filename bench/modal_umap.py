@@ -90,17 +90,17 @@ def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None,
     results["cpu"] = cpu.stdout
     for ds in datasets:
         for rev, site in sites.items():
-          for th in threads:
-            out = f"/tmp/{rev}_{ds}.npy"
-            env = {**os.environ, "PYTHONPATH": site, "RAYON_NUM_THREADS": str(th)}
-            r = subprocess.run(["python", "-c", WORKER, ds, str(reps), out], env=env, capture_output=True, text=True)
-            key = f"{rev} {ds}" + (f" t{th}" if th != 16 else "")
-            results[key] = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
-            if r.stderr.strip():
-                results[key]["stderr"] = r.stderr[-1500:]
-            print(rev, ds, results[f"{rev} {ds}"], flush=True)
-            if ds == png and r.returncode == 0:
-                pngs[rev] = render(out, f"{BASE}/{ds}/labels.npy", f"{rev} {ds}")
+            for th in threads:
+                out = f"/tmp/{rev}_{ds}.npy"
+                env = {**os.environ, "PYTHONPATH": site, "RAYON_NUM_THREADS": str(th)}
+                r = subprocess.run(["python", "-c", WORKER, ds, str(reps), out], env=env, capture_output=True, text=True)
+                key = f"{rev} {ds}" + (f" t{th}" if th != 16 else "")
+                results[key] = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
+                if r.stderr.strip():
+                    results[key]["stderr"] = r.stderr[-1500:]
+                print(key, results[key], flush=True)
+                if ds == png and r.returncode == 0:
+                    pngs[rev] = render(out, f"{BASE}/{ds}/labels.npy", f"{rev} {ds}")
     return {"results": results, "pngs": pngs}
 
 
