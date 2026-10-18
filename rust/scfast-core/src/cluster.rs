@@ -134,7 +134,9 @@ impl Clusterer for SingleClusteringLeiden {
         let (indptr, indices, weights) = renumber(graph, &order);
         let network = CSRNetwork::from_csr_parts(indptr, indices, weights, None).map_err(map_err)?;
 
-        let clustering = leiden_rb(&network, params);
+        // On a pool worker, the per-batch parallel loops that fit one chunk run inline instead of
+        // waking the pool from the caller's thread (thousands of small batches on small graphs).
+        let clustering = rayon::scope(|_| leiden_rb(&network, params));
         let mut labels = vec![0usize; graph.n];
         for (&old, &c) in order.iter().zip(&clustering) {
             labels[old as usize] = c;
