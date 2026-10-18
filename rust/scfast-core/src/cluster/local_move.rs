@@ -27,6 +27,8 @@ const MAX_MOVES_PER_NODE: usize = 100;
 /// Batches of n / 16 nodes, at most this many. Smaller batches mean more fork-join
 /// barriers: on 500k cells n / 64 (capped at 4096) took 2.9 s against 2.6 s.
 const MAX_BATCH: usize = 65_536;
+/// Applied moves per parallel task when collecting the neighbours to re-queue.
+const WAKE_CHUNK: usize = 512;
 /// Stands for "a fresh empty community" in a proposal.
 const EMPTY: u32 = u32::MAX;
 
@@ -66,8 +68,14 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
     let gain = |w: f64, kv: f64, sl: f64, k_c: f64| (w + sl) - resolution * kv * (2.0 * k_c + kv) / four_m;
     let mut batch = Vec::with_capacity(batch_len);
     let mut proposals = Vec::with_capacity(batch_len);
-    let mut wake = Vec::new();
+    // per batch: the applied moves (node, from) in order, each moved node's 1-based position
+    // in that list, and the batch in which each community last gained or lost a node
+    let mut applied: Vec<(u32, u32)> = Vec::new();
+    let mut moved_at = vec![0u32; n];
+    let mut changed_in = vec![0u32; slots];
+    let mut batch_id = 0u32;
     while !queue.is_empty() && moves < budget {
+        batch_id += 1;
         batch.clear();
         batch.extend(queue.drain(..batch_len.min(queue.len())));
         for &v in &batch {
@@ -82,7 +90,8 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                     nw.collect(graph, &membership, v);
                     let (kv, sl) = (strength[v], self_loop[v]);
                     let old = membership[v];
-                    let base = gain(nw.weight_to(old as usize), kv, sl, kc[old as usize] - kv);
+                    let w_old = nw.weight_to(old as usize);
+                    let base = gain(w_old, kv, sl, kc[old as usize] - kv);
                     let (mut best, mut best_gain) = (old, base);
                     for &c in nw.touched() {
                         if c as u32 == old {
@@ -99,29 +108,32 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                             (best, best_gain) = (EMPTY, g);
                         }
                     }
-                    (best != old && best_gain - base > threshold).then_some(best)
+                    let w_best = if best == EMPTY { 0.0 } else { nw.weight_to(best as usize) };
+                    (best != old && best_gain - base > threshold).then_some((best, w_old, w_best))
                 })
             })
             .collect_into_vec(&mut proposals);
 
+        applied.clear();
         for (&v, &p) in batch.iter().zip(&proposals) {
-            let Some(mut target) = p else { continue };
+            let Some((mut target, mut w_old, mut w_target)) = p else { continue };
             let v = v as usize;
             let old = membership[v];
             let (kv, sl) = (strength[v], self_loop[v]);
-            let (mut w_old, mut w_target) = (0.0, 0.0);
-            wake.clear();
-            for (u, w) in graph.neighbors(v) {
-                if u != v {
-                    let c = membership[u];
-                    if c == old {
-                        w_old += w;
-                    } else if c == target {
-                        w_target += w;
-                    }
-                    // only neighbours outside the new community can have gone unstable
-                    if c != target && !queued[u] {
-                        wake.push(u as u32);
+            // the weights from the proposal are stale only if a neighbour entered or left
+            // `old` or `target` earlier in this batch; recomputed in the same order, they
+            // are bit-identical to the proposal's when nothing changed
+            let stale = changed_in[old as usize] == batch_id || (target != EMPTY && changed_in[target as usize] == batch_id);
+            if stale {
+                (w_old, w_target) = (0.0, 0.0);
+                for (u, w) in graph.neighbors(v) {
+                    if u != v {
+                        let c = membership[u];
+                        if c == old {
+                            w_old += w;
+                        } else if c == target {
+                            w_target += w;
+                        }
                     }
                 }
             }
@@ -148,11 +160,46 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             if size[old as usize] == 0 {
                 free.push(old);
             }
+            changed_in[old as usize] = batch_id;
+            changed_in[target as usize] = batch_id;
             moves += 1;
-            for &u in &wake {
-                queued[u as usize] = true;
+            applied.push((v as u32, old));
+            moved_at[v] = applied.len() as u32;
+        }
+
+        // Neighbours to re-queue, per applied move in order: those outside the mover's new
+        // community at the time of its move (a neighbour that moved later in the batch was
+        // still in its old community then) and not already queued.
+        let wake: Vec<Vec<u32>> = applied
+            .par_chunks(WAKE_CHUNK)
+            .enumerate()
+            .map(|(chunk, moves)| {
+                let mut out = Vec::new();
+                for (i, &(v, _)) in moves.iter().enumerate() {
+                    let pos = (chunk * WAKE_CHUNK + i + 1) as u32;
+                    let v = v as usize;
+                    let target = membership[v];
+                    for (u, _) in graph.neighbors(v) {
+                        if u == v || queued[u] {
+                            continue;
+                        }
+                        let at = moved_at[u];
+                        let c = if at > pos { applied[at as usize - 1].1 } else { membership[u] };
+                        if c != target {
+                            out.push(u as u32);
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+        for &u in wake.iter().flatten() {
+            if !std::mem::replace(&mut queued[u as usize], true) {
+                queue.push_back(u);
             }
-            queue.extend(&wake);
+        }
+        for &(v, _) in &applied {
+            moved_at[v as usize] = 0;
         }
     }
     membership.iter().map(|&c| c as usize).collect()
