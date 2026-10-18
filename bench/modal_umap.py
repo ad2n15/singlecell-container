@@ -90,7 +90,7 @@ def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None,
 
     sites = {rev: build(rev, tar) for rev, tar in srcs.items()}
     results, pngs = {}, {}
-    cpu = subprocess.run("lscpu | grep -E 'Model name|^CPU\\(s\\)|L3'", shell=True, capture_output=True, text=True)
+    cpu = subprocess.run("lscpu | grep -E '^CPU\\(s\\)|CPU family|^Model:|L3'", shell=True, capture_output=True, text=True)
     results["cpu"] = cpu.stdout
     for ds in datasets:
         for rev, site in sites.items():
