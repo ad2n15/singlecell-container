@@ -748,7 +748,7 @@ def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:
         step = ds.chunks[0]
         if np.array_equal(info[:, 0], np.arange(len(chunks), dtype=np.uint64) * step):
             return _scfast.inflate_chunks(path, np.ascontiguousarray(info[:, 1]), np.ascontiguousarray(info[:, 2]),
-                                          step, ds.shape[0], ds.dtype.str[1:], dtype == np.float32)
+                                          step, ds.shape[0], ds.dtype.str[1:], dtype == np.float32, dtype == np.int64)
     return ds[()].astype(dtype, copy=False)
 
 
@@ -783,9 +783,12 @@ def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
         indptr = g["indptr"][()]
         # scipy wants indices and indptr in one dtype: int64 once the non-zeros pass int32.
         wide = int(indptr[-1]) > _I32_MAX
-        indices = _read_values(path, g["indices"], np.int32)
-        X = sp.csr_matrix((_read_values(path, g["data"], np.float32), indices.astype(np.int64) if wide else indices,
-                           indptr.astype(np.int64 if wide else np.int32)), shape=(n_cells, n_genes))
+        index_dtype = np.int64 if wide else np.int32
+        parts = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], index_dtype),
+                 indptr.astype(index_dtype))
+        # Wide arrays skip scipy's index-dtype scan (about 1 s at 2.6e9 non-zeros); preprocess and
+        # pca check the structure in Rust.
+        X = _csr_validated(*parts, (n_cells, n_genes)) if wide else sp.csr_matrix(parts, shape=(n_cells, n_genes))
         barcodes = g["barcodes"][()].astype(str)
     return X, barcodes, names
 

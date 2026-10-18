@@ -851,9 +851,9 @@ fn umap_knn<'py>(
 /// Inflates the zlib-compressed chunks of a 1-D HDF5 dataset (read at `offsets`, `sizes`
 /// bytes each, in element order, `chunk_len` elements per chunk) into `n` values. `src` is
 /// the stored little-endian type ("i4", "i8", "f4", "f8"); the result is float32 if
-/// `to_f32`, else int32 (values outside int32 raise ValueError).
+/// `to_f32`, else int64 if `to_i64`, else int32 (values outside int32 raise ValueError).
 #[pyfunction]
-#[pyo3(signature = (path, offsets, sizes, chunk_len, n, src, to_f32))]
+#[pyo3(signature = (path, offsets, sizes, chunk_len, n, src, to_f32, to_i64 = false))]
 #[allow(clippy::too_many_arguments)]
 fn inflate_chunks<'py>(
     py: Python<'py>,
@@ -864,6 +864,7 @@ fn inflate_chunks<'py>(
     n: usize,
     src: &str,
     to_f32: bool,
+    to_i64: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let offsets = contiguous(&offsets, "offsets")?;
     let sizes = contiguous(&sizes, "sizes")?;
@@ -879,6 +880,9 @@ fn inflate_chunks<'py>(
     if to_f32 {
         let v = run_kernel(py, "read_10x_h5", || inflate_into::<f32>(&file, offsets, sizes, chunk_len, n, width, src))?;
         Ok(PyArray1::from_vec(py, v).into_any())
+    } else if to_i64 {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<i64>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
     } else {
         let v = run_kernel(py, "read_10x_h5", || inflate_into::<i32>(&file, offsets, sizes, chunk_len, n, width, src))?;
         Ok(PyArray1::from_vec(py, v).into_any())
@@ -891,6 +895,11 @@ trait FromStored: Copy + Default + Send + Sync {
 impl FromStored for f32 {
     fn from_f64(v: f64) -> Option<Self> {
         Some(v as f32)
+    }
+}
+impl FromStored for i64 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (v >= i64::MIN as f64 && v <= i64::MAX as f64).then_some(v as i64)
     }
 }
 impl FromStored for i32 {

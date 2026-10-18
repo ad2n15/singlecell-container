@@ -162,9 +162,10 @@ def inflate_chunks(
     n: int,
     src: str,
     to_f32: bool,
+    to_i64: bool = False,
     /,
-) -> npt.NDArray[np.float32] | npt.NDArray[np.int32]:
-    """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32 or int32."""
+) -> npt.NDArray[np.float32] | npt.NDArray[np.int32] | npt.NDArray[np.int64]:
+    """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32, int64 or int32."""
 
 def vst_from_sums(
     sum: npt.NDArray[np.float64],

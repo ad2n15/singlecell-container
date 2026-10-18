@@ -749,7 +749,7 @@ def test_preprocess_x_hvg_is_data_columns_in_hvg_order():
 # ---------------------------------------------------------------- 10x h5
 
 @pytest.mark.parametrize("shuffle, int_dtype", [(False, np.int64), (False, np.int32), (True, np.int64)])
-def test_read_10x_h5_matches_counts(tmp_path, shuffle, int_dtype):
+def test_read_10x_h5_matches_counts(tmp_path, monkeypatch, shuffle, int_dtype):
     h5py = pytest.importorskip("h5py")
     rng = np.random.default_rng(0)
     counts = sp.random(50, 30, density=0.3, format="csr", random_state=rng, dtype=np.float64)
@@ -769,6 +769,11 @@ def test_read_10x_h5_matches_counts(tmp_path, shuffle, int_dtype):
     assert X.dtype == np.float32 and X.indices.dtype == np.int32 and X.shape == (50, 30)
     assert (X != counts).nnz == 0
     assert barcodes[3] == "c3" and names[4] == "g4"
+    # Above 2^31 - 1 non-zeros the arrays are int64 (forced here by lowering the limit).
+    monkeypatch.setattr(scfast, "_I32_MAX", 10)
+    W, _, _ = scfast.read_10x_h5(path)
+    assert W.indices.dtype == np.int64 and W.indptr.dtype == np.int64
+    assert (W != counts).nnz == 0
 
 
 # ---------------------------------------------------------------- end to end
