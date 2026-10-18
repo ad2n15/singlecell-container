@@ -187,7 +187,7 @@ fn clip(g: f32) -> f32 {
     g.clamp(-4.0, 4.0)
 }
 
-const LANES: usize = 8;
+const LANES: usize = 32;
 
 /// Up to LANES pending samples of one head cell: the other cell's position and the weight of
 /// its step (2 for a graph edge, whose attraction is doubled for head-only updates; 1 for a
@@ -214,6 +214,9 @@ impl Lanes {
     /// The summed clipped gradient steps at `cur` (umap-learn's formulas); empties the lanes.
     #[inline(always)]
     fn forces(&mut self, cur: [f32; 2], a: f32, b: f32, avx2: bool) -> [f32; 2] {
+        for l in self.m..self.m.next_multiple_of(8) {
+            (self.x[l], self.y[l], self.w[l]) = (0.0, 0.0, 0.0);
+        }
         #[cfg(target_arch = "x86_64")]
         let f = if avx2 {
             // SAFETY: avx2 is true only when use_avx2() detected AVX2 and FMA.
@@ -226,7 +229,7 @@ impl Lanes {
             let _ = avx2;
             self.forces_scalar(cur, a, b)
         };
-        *self = Lanes::default();
+        self.m = 0;
         f
     }
 
@@ -267,56 +270,63 @@ fn use_avx2() -> bool {
     }
 }
 
-/// `Lanes::forces_scalar` over all 8 lanes at once, with `d2^b` as `exp2(b log2 d2)` from
-/// polynomials (relative error below 1e-5) instead of a libm `powf` per sample.
+/// `Lanes::forces_scalar` 8 lanes at a time (lanes up to the next multiple of 8 must have
+/// weight 0), with `d2^b` as `exp2(b log2 d2)` from polynomials (relative error below 1e-5)
+/// instead of a libm `powf` per sample. The groups are independent, so their long dependency
+/// chains overlap.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn forces_avx2(l: &Lanes, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
     use std::arch::x86_64::*;
     let c = _mm256_set1_ps;
     let ci = _mm256_set1_epi32;
-    let (x, y, w) = (_mm256_loadu_ps(l.x.as_ptr()), _mm256_loadu_ps(l.y.as_ptr()), _mm256_loadu_ps(l.w.as_ptr()));
-    let (dx, dy) = (_mm256_sub_ps(c(cur[0]), x), _mm256_sub_ps(c(cur[1]), y));
-    let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
-    let d2c = _mm256_max_ps(d2, c(f32::MIN_POSITIVE));
+    let (mut sx, mut sy) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    for o in (0..l.m).step_by(8) {
+        let (x, y, w) = (_mm256_loadu_ps(l.x[o..].as_ptr()), _mm256_loadu_ps(l.y[o..].as_ptr()), _mm256_loadu_ps(l.w[o..].as_ptr()));
+        let (dx, dy) = (_mm256_sub_ps(c(cur[0]), x), _mm256_sub_ps(c(cur[1]), y));
+        let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
+        let d2c = _mm256_max_ps(d2, c(f32::MIN_POSITIVE));
 
-    // log2(d2c) = e + log2(m), m in [sqrt(1/2), sqrt(2)), ln m = 2 atanh((m - 1) / (m + 1)).
-    let bits = _mm256_castps_si256(d2c);
-    let mant = _mm256_and_si256(bits, ci(0x007F_FFFF));
-    let big = _mm256_cmpgt_epi32(mant, ci(0x0035_04F3));
-    let e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), ci(127)), big));
-    let m = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
-    let t = _mm256_div_ps(_mm256_sub_ps(m, c(1.0)), _mm256_add_ps(m, c(1.0)));
-    let t2 = _mm256_mul_ps(t, t);
-    let mut s = _mm256_fmadd_ps(t2, c(1.0 / 7.0), c(1.0 / 5.0));
-    s = _mm256_fmadd_ps(t2, s, c(1.0 / 3.0));
-    s = _mm256_fmadd_ps(t2, s, c(1.0));
-    let ln_m = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
-    let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_m, c(std::f32::consts::LOG2_E), e));
-    let z = _mm256_min_ps(_mm256_max_ps(z, c(-126.0)), c(126.0));
+        // log2(d2c) = e + log2(m), m in [sqrt(1/2), sqrt(2)), ln m = 2 atanh((m - 1) / (m + 1)).
+        let bits = _mm256_castps_si256(d2c);
+        let mant = _mm256_and_si256(bits, ci(0x007F_FFFF));
+        let big = _mm256_cmpgt_epi32(mant, ci(0x0035_04F3));
+        let e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), ci(127)), big));
+        let m = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
+        let t = _mm256_div_ps(_mm256_sub_ps(m, c(1.0)), _mm256_add_ps(m, c(1.0)));
+        let t2 = _mm256_mul_ps(t, t);
+        let mut s = _mm256_fmadd_ps(t2, c(1.0 / 7.0), c(1.0 / 5.0));
+        s = _mm256_fmadd_ps(t2, s, c(1.0 / 3.0));
+        s = _mm256_fmadd_ps(t2, s, c(1.0));
+        let ln_m = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
+        let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_m, c(std::f32::consts::LOG2_E), e));
+        let z = _mm256_min_ps(_mm256_max_ps(z, c(-126.0)), c(126.0));
 
-    // 2^z = 2^i e^(f ln 2), i = round(z), |f| <= 1/2.
-    let i = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(z);
-    let f = _mm256_mul_ps(_mm256_sub_ps(z, i), c(std::f32::consts::LN_2));
-    let mut p = _mm256_fmadd_ps(f, c(1.0 / 720.0), c(1.0 / 120.0));
-    for k in [1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0] {
-        p = _mm256_fmadd_ps(f, p, c(k));
+        // 2^z = 2^i e^(f ln 2), i = round(z), |f| <= 1/2.
+        let i = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(z);
+        let f = _mm256_mul_ps(_mm256_sub_ps(z, i), c(std::f32::consts::LN_2));
+        let mut p = _mm256_fmadd_ps(f, c(1.0 / 720.0), c(1.0 / 120.0));
+        for k in [1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0] {
+            p = _mm256_fmadd_ps(f, p, c(k));
+        }
+        let scale = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(i), ci(127)), 23));
+        let pb = _mm256_mul_ps(p, scale);
+
+        let att = _mm256_cmp_ps::<_CMP_GT_OQ>(w, c(1.5));
+        let num = _mm256_blendv_ps(c(2.0 * b), _mm256_mul_ps(c(-2.0 * a * b), pb), att);
+        let den = _mm256_mul_ps(_mm256_blendv_ps(_mm256_add_ps(d2, c(0.001)), d2c, att), _mm256_fmadd_ps(c(a), pb, c(1.0)));
+        let g = _mm256_div_ps(num, den);
+        let clip8 = |v: __m256| _mm256_min_ps(_mm256_max_ps(v, c(-4.0)), c(4.0));
+        let zero = _mm256_blendv_ps(c(4.0), c(0.0), att);
+        let live = _mm256_cmp_ps::<_CMP_GT_OQ>(d2, c(0.0));
+        let fx = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dx)), live));
+        let fy = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dy)), live));
+        sx = _mm256_add_ps(sx, fx);
+        sy = _mm256_add_ps(sy, fy);
     }
-    let scale = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(i), ci(127)), 23));
-    let pb = _mm256_mul_ps(p, scale);
-
-    let att = _mm256_cmp_ps::<_CMP_GT_OQ>(w, c(1.5));
-    let num = _mm256_blendv_ps(c(2.0 * b), _mm256_mul_ps(c(-2.0 * a * b), pb), att);
-    let den = _mm256_mul_ps(_mm256_blendv_ps(_mm256_add_ps(d2, c(0.001)), d2c, att), _mm256_fmadd_ps(c(a), pb, c(1.0)));
-    let g = _mm256_div_ps(num, den);
-    let clip8 = |v: __m256| _mm256_min_ps(_mm256_max_ps(v, c(-4.0)), c(4.0));
-    let zero = _mm256_blendv_ps(c(4.0), c(0.0), att);
-    let live = _mm256_cmp_ps::<_CMP_GT_OQ>(d2, c(0.0));
-    let fx = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dx)), live));
-    let fy = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dy)), live));
     let (mut ox, mut oy) = ([0f32; 8], [0f32; 8]);
-    _mm256_storeu_ps(ox.as_mut_ptr(), fx);
-    _mm256_storeu_ps(oy.as_mut_ptr(), fy);
+    _mm256_storeu_ps(ox.as_mut_ptr(), sx);
+    _mm256_storeu_ps(oy.as_mut_ptr(), sy);
     [ox.iter().sum(), oy.iter().sum()]
 }
 
