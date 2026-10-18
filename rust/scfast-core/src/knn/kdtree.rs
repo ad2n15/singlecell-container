@@ -108,7 +108,7 @@ impl Tree {
     /// Best-first search: nodes are opened in increasing box distance, each one followed
     /// down its nearer side, the farther sides queued. Stops when the nearest queued box is
     /// beyond the current (k - 1)-th squared distance times `shrink` (1 for exact search).
-    fn search(&self, q: &[f64], self_pos: usize, shrink: f64, best: &mut Best, queue: &mut Vec<Pending>) {
+    fn search(&self, q: &[f64], self_pos: usize, shrink: f64, best: &mut Best, queue: &mut Vec<Pending>, scratch: &mut [f64]) {
         queue.clear();
         queue.push(Pending { lb: 0.0, v: 0, s: 0, e: self.perm.len() as u32, level: 0 });
         while let Some(Pending { lb, mut v, s, e, mut level }) = pop_min(queue) {
@@ -135,8 +135,7 @@ impl Tree {
                 continue;
             }
             let len = e - s;
-            let mut acc = [0f64; LEAF_SIZE + 1];
-            let acc = &mut acc[..len];
+            let acc = &mut scratch[..len];
             leaf_d2(&self.pts[s * self.d..e * self.d], q, acc);
             let mut worst = best.worst();
             for (j, &d2) in acc.iter().enumerate() {
@@ -196,10 +195,19 @@ fn pop_min(h: &mut Vec<Pending>) -> Option<Pending> {
     Some(top)
 }
 
+/// Squared distances from `q` to the points of a dimension-major leaf block. The first
+/// dimension initialises `acc` (`0 + x == x`), so the sums match `exact_d2` bit for bit.
 #[inline]
 fn leaf_d2(blk: &[f64], q: &[f64], acc: &mut [f64]) {
     let len = acc.len();
-    for (col, &qt) in blk.chunks_exact(len).zip(q) {
+    let mut cols = blk.chunks_exact(len).zip(q);
+    if let Some((col, &q0)) = cols.next() {
+        for (a, &v) in acc.iter_mut().zip(col) {
+            let g = q0 - v;
+            *a = g * g;
+        }
+    }
+    for (col, &qt) in cols {
         for (a, &v) in acc.iter_mut().zip(col) {
             let g = qt - v;
             *a += g * g;
@@ -308,12 +316,12 @@ pub(super) fn kdtree_knn(x: &RowMajor, k: usize, eps: f64) -> Knn {
     let mut tidx = vec![0u32; n * k];
     let mut tdist = vec![0f32; n * k];
     tidx.par_chunks_mut(QUERY_CHUNK * k).zip(tdist.par_chunks_mut(QUERY_CHUNK * k)).enumerate().for_each_init(
-        || (Best { items: Vec::with_capacity(k), cap: k - 1 }, vec![0f64; d], Vec::new()),
-        |(best, q, queue), (c, (ib, db))| {
+        || (Best { items: Vec::with_capacity(k), cap: k - 1 }, vec![0f64; d], Vec::new(), vec![0f64; LEAF_SIZE + 1]),
+        |(best, q, queue, scratch), (c, (ib, db))| {
             for (t, (irow, drow)) in ib.chunks_exact_mut(k).zip(db.chunks_exact_mut(k)).enumerate() {
                 let pos = c * QUERY_CHUNK + t;
                 best.items.clear();
-                tree.search(tree.point(pos, q), pos, shrink, best, queue);
+                tree.search(tree.point(pos, q), pos, shrink, best, queue, scratch);
                 write_row(tree.perm[pos] as usize, &best.items, irow, drow);
             }
         },
