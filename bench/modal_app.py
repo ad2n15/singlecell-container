@@ -30,11 +30,17 @@ ROOT = Path(__file__).resolve().parent.parent
 GPU = os.environ.get("SCFAST_GPU", "L4")
 CPUS = int(os.environ.get("SCFAST_CPUS", "8"))
 MEM_GB = int(os.environ.get("SCFAST_MEM_GB", "48"))
+# Per-session wheel folder and cargo target dir, so concurrent sessions on the shared volumes
+# do not overwrite each other's builds.
+WHEELS = os.environ.get("SCFAST_WHEELS", "/vol/wheels")
+TARGET = os.environ.get("SCFAST_TARGET", "/cache/target")
 RAPIDS = "26.10.*"
 RSC = "0.18.1"  # rapids-singlecell-cu12: prebuilt CUDA kernels, no CMake build
 
-app = modal.App("scfast-bench")
+app = modal.App(os.environ.get("SCFAST_APP", "scfast-bench"))
 bench_vol = modal.Volume.from_name("scfast-bench", create_if_missing=True)
+data_vol = modal.Volume.from_name("scfast-data", create_if_missing=True)  # real datasets, prep/<dataset>/
+session = modal.Secret.from_dict({"SCFAST_WHEELS": WHEELS, "CARGO_TARGET_DIR": TARGET})
 cargo_vol = modal.Volume.from_name("scfast-cargo", create_if_missing=True)
 
 image = (
@@ -51,7 +57,7 @@ image = (
         extra_index_url="https://pypi.nvidia.com",
     )
     .add_local_dir(ROOT, "/work", ignore=["**/.git", "**/target", "**/__pycache__", "bench/results", "data",
-                                          "plots", "plots_scanpy", "R", "tests", "docker", "containers"])
+                                          "plots", "plots_scanpy", "R", "tests/R", "docker", "containers"])
 )
 
 
@@ -84,21 +90,22 @@ def gpu_libs() -> dict:
 
 def install_wheel() -> None:
     bench_vol.reload()
-    wheel = sorted(glob.glob("/vol/wheels/scfast-*.whl"))[-1]
+    wheel = sorted(glob.glob(f"{os.environ['SCFAST_WHEELS']}/scfast-*.whl"))[-1]
     sh([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps", "-q", wheel])
 
 
-@app.function(image=image, cpu=16, memory=32768, timeout=3000, volumes={"/cache": cargo_vol, "/vol": bench_vol})
+@app.function(image=image, secrets=[session], cpu=16, memory=32768, timeout=3000, volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def build_remote(tests: bool = True) -> str:
     feats = ["--features", "cuda,cugraph"]
     touch_sources()
     shutil.rmtree("/tmp/wheels", ignore_errors=True)
     sh(["maturin", "build", "--release", "-m", "rust/scfast-py/Cargo.toml", *feats, "-o", "/tmp/wheels"])
-    Path("/vol/wheels").mkdir(parents=True, exist_ok=True)
-    for old in glob.glob("/vol/wheels/*.whl"):
+    wheels = Path(os.environ["SCFAST_WHEELS"])
+    wheels.mkdir(parents=True, exist_ok=True)
+    for old in wheels.glob("*.whl"):
         os.remove(old)
     wheel = glob.glob("/tmp/wheels/*.whl")[0]
-    shutil.copy(wheel, "/vol/wheels/")
+    shutil.copy(wheel, wheels)
     if tests:
         sh(["cargo", "test", "--no-run", "--release", "-p", "scfast-core", *feats], cwd="/work/rust")
     cargo_vol.commit()
@@ -106,7 +113,7 @@ def build_remote(tests: bool = True) -> str:
     return os.path.basename(wheel)
 
 
-@app.function(image=image, cpu=4, memory=65536, timeout=3600, volumes={"/vol": bench_vol})
+@app.function(image=image, secrets=[session], cpu=4, memory=65536, timeout=3600, volumes={"/vol": bench_vol})
 def gen_remote(tag: str, sizes: str, genes: int = 5000, types: int = 10, force: bool = False) -> str:
     root = Path("/vol/data") / tag
     if (root / "data" / "prep.json").exists() and not force:
@@ -124,7 +131,7 @@ def gen_remote(tag: str, sizes: str, genes: int = 5000, types: int = 10, force: 
     return f"{tag}: sizes {sizes} written"
 
 
-@app.function(image=image, gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=3000,
+@app.function(image=image, secrets=[session], gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=3000,
               volumes={"/cache": cargo_vol, "/vol": bench_vol})
 def rust_tests_remote(args: str = "") -> str:
     cargo_vol.reload()
@@ -140,8 +147,11 @@ def rust_tests_remote(args: str = "") -> str:
     return f"exit {p.returncode}\n{out}"
 
 
-@app.function(image=image, gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=7000, volumes={"/vol": bench_vol})
+@app.function(image=image, secrets=[session], gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=7000,
+              volumes={"/vol": bench_vol, "/data": data_vol})
 def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, extra: str = "") -> str:
+    """`tag` names /vol/data/<tag>/data (synthetic, staged to local disk) or, as `real:<dataset>`,
+    /data/prep/<dataset> on the scfast-data volume (read in place: the 1.29M brain file is 6.6 GB)."""
     install_wheel()
     bench_vol.reload()
     run = Path("/tmp/run") / name
@@ -157,16 +167,18 @@ def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, e
         keep.write_text("".join(ln + "\n" for ln in lines))
     for e in engine_list:
         shutil.rmtree(run / "outputs" / e, ignore_errors=True)
-    data = Path("/vol/data") / tag / "data"
-    stage = Path("/tmp/stage")
+    real = tag.startswith("real:")
+    data = Path("/data/prep") / tag[5:] if real else Path("/vol/data") / tag / "data"
+    stage = data if real else Path("/tmp/stage")
     stage.mkdir(exist_ok=True)
     (run / "data").mkdir(exist_ok=True)
-    for f in (stage, run / "data"):
+    for f in {stage, run / "data"} - {data}:
         shutil.copy(data / "prep.json", f)
     env = {**gpu_libs(), "NUMBA_CACHE_DIR": "/tmp/numba", "MPLCONFIGDIR": "/tmp/mpl"}
     for size in sizes.split(","):
         ds = f"n{size}"
-        shutil.copytree(data / ds, stage / ds, dirs_exist_ok=True)
+        if not real:
+            shutil.copytree(data / ds, stage / ds, dirs_exist_ok=True)
         (run / "data" / ds).mkdir(exist_ok=True)
         shutil.copy(data / ds / "cells.tsv", run / "data" / ds)
         for e in engine_list:
@@ -178,7 +190,7 @@ def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, e
     return f"results/{name}"
 
 
-@app.function(image=image, gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800, volumes={"/vol": bench_vol})
+@app.function(image=image, secrets=[session], gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800, volumes={"/vol": bench_vol})
 def script_remote(code: str, args: str = "") -> str:
     """Run a local Python script on the GPU box (wheel installed, data under /vol/data)."""
     install_wheel()

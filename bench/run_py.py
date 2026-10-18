@@ -244,17 +244,19 @@ class ScfastEngine:
 
 
 class ScfastGpuEngine(ScfastEngine, RapidsEngine):
-    """ScfastEngine with its steps on the device.
+    """ScfastEngine with its steps from PCA on the device.
 
-    rapids-singlecell normalises, selects HVGs and runs UMAP on the GPU; scfast's CUDA
-    backend does PCA and kNN, builds the SNN graph on the device and hands it to cuGraph
-    Leiden there (the backend used is recorded as `leiden_device` in the environment file).
-    The UMAP fuzzy simplicial set is built on the GPU from the same kNN (fuzzy_graph_gpu).
+    Read, normalisation and HVGs are scfast-cpu's Rust front end on the CPU (Seurat's vst
+    HVGs; int64 CSR above 2^31 - 1 non-zeros). 'scale' wraps the HVG CSR in an AnnData;
+    scfast's CUDA backend uploads it in 'pca' and keeps PCA's clip exact, runs kNN, builds
+    the SNN graph on the device and hands it to cuGraph Leiden there (the backend used is
+    recorded as `leiden_device` in the environment file). UMAP is rapids-singlecell's
+    (cuML) on the fuzzy simplicial set built on the GPU from the same kNN (fuzzy_graph_gpu).
     """
 
     device = "gpu"
     scfast_device = "cuda"
-    read, normalize, hvg, umap = ScanpyEngine.read, RapidsEngine.normalize, RapidsEngine.hvg, RapidsEngine.umap
+    read, normalize, hvg, umap = ScfastEngine.read, ScfastEngine.normalize, ScfastEngine.hvg, RapidsEngine.umap
 
     def startup(self):
         versions = {**RapidsEngine.startup(self), **ScfastEngine.startup(self)}
@@ -265,10 +267,14 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
         return versions
 
+    def to_gpu(self, a):
+        pass  # the HVG CSR goes to the device in 'pca', after the CPU front end
+
     def scale(self, a, cfg):
-        b = a[:, a.var.highly_variable].copy()
-        del b.layers["counts"]
-        return b
+        import anndata as ad
+        import pandas as pd
+
+        return ad.AnnData(X=ScfastEngine.scale(self, a, cfg).X, obs=pd.DataFrame(index=pd.Index(a.obs_names)))
 
     def gpu_mem(self):
         free, total = self.cp.cuda.runtime.memGetInfo()
