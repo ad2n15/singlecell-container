@@ -380,6 +380,16 @@ Input: `60k_Human_TotalSeqB_hashing_3p_gem-x_Multiplex_count_raw_feature_bc_matr
 - scpipe on Modal GPU: `bench/modal_scpipe.py` builds `containers/Dockerfile` (first build ever). Fixed two
   Dockerfile bugs: `nice-utils` is not an Ubuntu package; the R 4.4.2 pin conflicts with CRAN's r-recommended
   (needs R >= 4.5/4.6), so R is unpinned (same fix in `scpipe.def`).
+  Third fix: the [gpu] extra builds the rapids-singlecell sdist (needs nvcc); use the prebuilt
+  rapids-singlecell-cu12 wheel. `.dockerignore` now excludes build artefacts at any depth (a local
+  scfast rebuild during upload aborted one Modal build). Image builds in ~25-50 min; any context change rebuilds.
+- First real GPU run of scpipe (L4): S0 3m04s, S1a 3m48s, S1b 1m46s (local 6m49s). S1b gave ~7,500
+  pre-clusters: gpu_core passed n_iterations=2 to rsc.tl.leiden, which caps cuGraph levels (scanpy: full
+  passes). ~1,000 CLUSTER_LOSS triggers made a 551,817-token G1 prompt (API 400; rules fallback, escalate).
+  Fixed in f86e2fc with a regression test; S2 used the same call.
+  Rerun with the fix: 15 pre-clusters, 3 CLUSTER_LOSS triggers (doublet clusters, 97-99%), G1 prompt normal
+  (3 calls, GBP 0.018), reviewer escalated as on the CPU run. Run paused at G1 on the volume
+  (`scfast-data:scpipe/hash60k/run`); S2-S5 on the GPU not run (approve + resume with bench/modal_scpipe.py).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
@@ -390,6 +400,7 @@ Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - Round-1 Sonnet agents (GPU, front end) were interrupted at 22:51; relaunched as Opus 5.5 medium.
 
 ## Surprises (evidence)
+- The G1 bundle lists every triggered review rule with no cap, so many small pre-clusters can push the qc_worker prompt past the model context (551,817 tokens seen). The gate falls back to rules and escalates, so no wrong decision results, but the LLM step is lost.
 - `scpipe doctor` tool-use test uses `max_tokens=16`; Claude Haiku 4.5 needs more for a tool call (16: stop_reason max_tokens, 0 calls; 256: tool_use, 1 call), so doctor warns although the key and tool use work.
 - 3 Python tests fail on main too (not touched by this branch): test_runner::test_status_output, test_runner::test_failure_then_resume (log-tail line assertions), test_s3::test_consensus_recovers_planted_types (platelet cluster low_confidence). 498 others pass.
 - Tried and rejected for UMAP: polynomial fast_pow (scalar and 8-lane batched): no gain; the SGD is bound by random gathers.
