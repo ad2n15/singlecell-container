@@ -154,6 +154,23 @@ fn morton(x: u32, y: u32) -> u32 {
     spread(x) | (spread(y) << 1)
 }
 
+/// Hints the cache to load the line holding `p`; negative samples are drawn ahead and
+/// prefetched, so their random reads over the embedding overlap.
+#[inline(always)]
+fn prefetch<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const i8, std::arch::x86_64::_MM_HINT_T0)
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, readonly, preserves_flags))
+    }
+}
+
+/// Negative samples drawn this many draws before they are used.
+const NEG_AHEAD: usize = 16;
+
 #[inline(always)]
 fn clip(g: f32) -> f32 {
     g.clamp(-4.0, 4.0)
@@ -230,6 +247,16 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().with_min_len(MIN_TASK_EDGES / chunk).for_each(|(c, (nx, nn))| {
             let base = c * chunk;
             let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(base as u64 * 0x2545_F491_4F6C_DD1D) | 1;
+            let draw = |rng: &mut u64| {
+                let q = (((xorshift(rng) >> 32) * n as u64) >> 32) as usize;
+                prefetch(&emb[q * DIM]);
+                q
+            };
+            let mut ahead = [0usize; NEG_AHEAD];
+            for q in ahead.iter_mut() {
+                *q = draw(&mut rng);
+            }
+            let mut slot = 0;
             let mut row = (usize::MAX, [0f32; DIM], [0f32; DIM]);
             for t in 0..nx.len() {
                 if nx[t] > ep {
@@ -258,7 +285,8 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                 let eneg = eps[e] / neg_rate;
                 let n_neg = ((ep - nn[t]) / eneg) as usize;
                 for _ in 0..n_neg {
-                    let q = (((xorshift(&mut rng) >> 32) * n as u64) >> 32) as usize;
+                    let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
+                    slot = (slot + 1) % NEG_AHEAD;
                     if q == j {
                         continue;
                     }
