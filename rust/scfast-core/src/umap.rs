@@ -208,22 +208,36 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         rank[i as usize] = r as u32;
     }
 
+    // Edge e is sampled at the epochs where floor(epoch / eps_e) steps up, with eps_e =
+    // wmax / w_e, and draws `negative_sample_rate` negatives each time: umap-learn's schedule
+    // without its per-edge counters, so an epoch reads 8 bytes per edge and writes none.
+    // Heads are implicit in the row offsets of the relabelled graph.
     let wmax = graph.weights.iter().copied().fold(0f32, f32::max);
     let cutoff = wmax / p.n_epochs as f32;
-    let mut heads = Vec::new();
+    let mut offsets = Vec::with_capacity(n + 1);
+    offsets.push(0usize);
     let mut tails = Vec::new();
-    let mut eps = Vec::new();
-    for (r, &i) in order.iter().enumerate() {
+    let mut inv_eps = Vec::new();
+    for &i in &order {
         let i = i as usize;
         for q in graph.indptr[i]..graph.indptr[i + 1] {
             let wq = graph.weights[q];
             if wq >= cutoff && wq > 0.0 {
-                heads.push(r as u32);
                 tails.push(rank[graph.indices[q] as usize]);
-                eps.push(wmax / wq);
+                inv_eps.push(wq / wmax);
             }
         }
+        offsets.push(tails.len());
     }
+    // Tasks are runs of whole rows of about CHUNK edges, so each head is written by one task.
+    const CHUNK: usize = 4096;
+    let mut tasks = vec![0usize];
+    for r in 1..=n {
+        if offsets[r] - offsets[*tasks.last().unwrap()] >= CHUNK || r == n {
+            tasks.push(r);
+        }
+    }
+    let tasks: Vec<(usize, usize)> = tasks.windows(2).map(|w| (w[0], w[1])).collect();
 
     let emb: Vec<AtomicU32> = order.iter().flat_map(|&i| {
         let span = &span;
@@ -231,22 +245,18 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
     }).collect();
 
     let (a, b) = (p.a, p.b);
-    let neg_rate = p.negative_sample_rate as f32;
-    let mut next = eps.clone();
-    let mut next_neg: Vec<f32> = eps.iter().map(|e| e / neg_rate).collect();
-    let chunk = 4096;
+    let n_neg = p.negative_sample_rate;
     let get = |i: usize| [f32::from_bits(emb[i * DIM].load(Relaxed)), f32::from_bits(emb[i * DIM + 1].load(Relaxed))];
     let put = |i: usize, v: [f32; DIM]| {
         emb[i * DIM].store(v[0].to_bits(), Relaxed);
         emb[i * DIM + 1].store(v[1].to_bits(), Relaxed);
     };
 
-    for epoch in 0..p.n_epochs {
-        let ep = epoch as f32;
+    for epoch in 1..p.n_epochs {
+        let (ep, prev) = (epoch as f32, (epoch - 1) as f32);
         let alpha = p.learning_rate * (1.0 - ep / p.n_epochs as f32);
-        next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().with_min_len(MIN_TASK_EDGES / chunk).for_each(|(c, (nx, nn))| {
-            let base = c * chunk;
-            let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(base as u64 * 0x2545_F491_4F6C_DD1D) | 1;
+        tasks.par_iter().enumerate().with_min_len(MIN_TASK_EDGES / CHUNK).for_each(|(c, &(r0, r1))| {
+            let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D) | 1;
             let draw = |rng: &mut u64| {
                 let q = (((xorshift(rng) >> 32) * n as u64) >> 32) as usize;
                 prefetch(&emb[q * DIM]);
@@ -257,51 +267,43 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                 *q = draw(&mut rng);
             }
             let mut slot = 0;
-            let mut row = (usize::MAX, [0f32; DIM], [0f32; DIM]);
-            for t in 0..nx.len() {
-                if nx[t] > ep {
-                    continue;
-                }
-                let e = base + t;
-                let (j, kk) = (heads[e] as usize, tails[e] as usize);
-                if j != row.0 {
-                    if row.0 != usize::MAX {
-                        put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
-                    }
-                    row = (j, get(j), [0.0; DIM]);
-                }
-                let (cur0, delta) = (row.1, &mut row.2);
-                let oth = get(kk);
-                let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
-                let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                if d2 > 0.0 {
-                    let pb = d2.powf(b);
-                    let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
-                    for d in 0..DIM {
-                        delta[d] += 2.0 * clip(gc * dx[d]) * alpha;
-                    }
-                }
-                nx[t] += eps[e];
-                let eneg = eps[e] / neg_rate;
-                let n_neg = ((ep - nn[t]) / eneg) as usize;
-                for _ in 0..n_neg {
-                    let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
-                    slot = (slot + 1) % NEG_AHEAD;
-                    if q == j {
+            for j in r0..r1 {
+                let (cur0, mut delta) = (get(j), [0f32; DIM]);
+                let mut touched = false;
+                for e in offsets[j]..offsets[j + 1] {
+                    let ie = inv_eps[e];
+                    if (ep * ie).floor() <= (prev * ie).floor() {
                         continue;
                     }
-                    let o = get(q);
-                    let dx = [cur0[0] - o[0], cur0[1] - o[1]];
+                    touched = true;
+                    let oth = get(tails[e] as usize);
+                    let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
                     let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                    let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
-                    for d in 0..DIM {
-                        delta[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
+                    if d2 > 0.0 {
+                        let pb = d2.powf(b);
+                        let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
+                        for d in 0..DIM {
+                            delta[d] += 2.0 * clip(gc * dx[d]) * alpha;
+                        }
+                    }
+                    for _ in 0..n_neg {
+                        let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
+                        slot = (slot + 1) % NEG_AHEAD;
+                        if q == j {
+                            continue;
+                        }
+                        let o = get(q);
+                        let dx = [cur0[0] - o[0], cur0[1] - o[1]];
+                        let d2 = dx[0] * dx[0] + dx[1] * dx[1];
+                        let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
+                        for d in 0..DIM {
+                            delta[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
+                        }
                     }
                 }
-                nn[t] += n_neg as f32 * eneg;
-            }
-            if row.0 != usize::MAX {
-                put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
+                if touched {
+                    put(j, [cur0[0] + delta[0], cur0[1] + delta[1]]);
+                }
             }
         });
     }
