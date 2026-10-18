@@ -23,12 +23,18 @@ Constraints from the user (2026-10-17):
 - Image: prebuilt `rapids-singlecell-cu12` 0.18.1 + RAPIDS 26.10 wheels; builds on Modal.
 - CUDA bugs fixed: cuGraph dtype enum (INT32 = 2, not 0); Leiden `max_level` = n_iterations (2) gave 580 fragments, now 100;
   cargo did not rebuild mounted sources (mtime), now touched; kNN `topk` O(n^2) with L1 thrash, replaced by a fused kernel;
-  serial symmetry check before cuGraph (2 s at 500k), now parallel. All CUDA tests pass on L4.
+  serial symmetry check before cuGraph (2 s at 500k), now parallel. All CUDA tests pass on L4 (incl. new device-input PCA test).
 - Bench: rapids `n_iterations=2` was the same max_level bug, removed; both GPU engines use cudaMallocAsync via RMM.
-- L4, 8 CPU cores, compute s (excl. read), 100k / 500k: rapids 2.14 / 13.68, scfast-gpu 2.37 / 12.63 (before kNN pruning).
-- Profile at 500k (scfast-gpu): Leiden 3.3, PCA 1.5 (rsc 0.4), SNN on CPU 1.5, kNN 1.5 -> 0.8, fuzzy set 0.7, UMAP (cuML) 1.3.
-- Rust UMAP on the Modal box: 11.7 s at 100k (8 threads) vs cuML 0.25 s: GPU engine keeps cuML.
-- Next: PCA via Gram on device, Leiden wrapper overhead, then the final L4 run (all 4 engines) and the H100 run.
+- scfast-gpu now keeps data on the device: PCA takes the CuPy HVG matrix (Gram path, colstats on device), SNN is built
+  with cuSPARSE from CuPy indices, Leiden gets cuGraph device views. kNN: fused kernel, Morton order, tile pruning.
+- L4, 8 CPU cores, compute s (excl. read), 100k / 500k: rapids 2.14 / 13.68, scfast-gpu 1.82 / 8.74.
+  500k scfast-gpu steps: to_gpu 0.69, pca 0.64, neighbors 2.15, cluster (cuGraph) 3.16, umap (cuML) 1.27.
+- Parity vs rapids: 100k all pass (ARI 1.0). 500k: PC 0.9997, kNN overlap 0.94, ARI vs truth 0.85 (12 clusters, truth 10).
+  Evidence that this is Seurat's objective, not a GPU bug: RB quality (directed, res 0.5) on the 500k SNN:
+  truth 2,696,230 < CPU Leiden (11 clusters, ARI 0.936) 2,697,092 < cuGraph (12 clusters) 2,698,180. Decision needed:
+  accept, or scale resolution with n. Diagonal at half weight in cuGraph under-splits at res 1 and 2 (100k: 13/20 vs CPU 14/22).
+- Rust UMAP on the Modal box: 11.7 s at 100k (8 threads) vs cuML 0.25 s: GPU engine keeps cuML. Mac: 1.3 s. Unexplained.
+- Next: final L4 run (all 4 engines, `l4_final`), H100 run at 500k and 1M (`synth_1m`).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
