@@ -223,13 +223,15 @@ class ScfastEngine:
         import numpy as np
         import scipy.sparse as sp
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="auto",
-                                    device=self.scfast_device)
+        idx, dist = self.knn_search(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), cfg.k)
         n = idx.shape[0]
         indptr = np.arange(0, n * (cfg.k - 1) + 1, cfg.k - 1)
         a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), idx[:, 1:].ravel(), indptr), shape=(n, n))
         self.snn = self.scfast.snn(self.on_device(idx))  # Seurat's SNN (Jaccard), what Leiden clusters on
         self.knn = idx, dist
+
+    def knn_search(self, x, k):
+        return self.scfast.knn(x, k=k, method="auto", device=self.scfast_device)
 
     def on_device(self, x):
         return x
@@ -289,12 +291,39 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
     def on_device(self, x):
         return self.cp.asarray(x)
 
+    def knn_search(self, x, k):
+        if x.shape[0] <= CAGRA_MIN_CELLS:
+            return ScfastEngine.knn_search(self, x, k)
+        return cagra_knn(self.cp.asarray(x, dtype=self.cp.float32), k)
+
     def neighbors(self, a, cfg):
         super().neighbors(a, cfg)
         idx, dist = self.knn
         a.obsp["connectivities"] = fuzzy_graph_gpu(self.cp.asarray(idx), self.cp.asarray(dist))
         a.uns["neighbors"] = {"connectivities_key": "connectivities", "distances_key": "distances",
                               "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
+
+
+CAGRA_MIN_CELLS = 200_000
+
+
+def cagra_knn(x, k):
+    """Approximate kNN from cuVS CAGRA, in scfast.knn's layout: the cell itself in column 0,
+    then k - 1 neighbours by increasing Euclidean distance (int32 / float32, on the host)."""
+    import cupy as cp
+    from cuvs.neighbors import cagra
+
+    index = cagra.build(cagra.IndexParams(graph_degree=32, intermediate_graph_degree=64, build_algo="nn_descent"), x)
+    d, i = cagra.search(cagra.SearchParams(itopk_size=64), index, x, k)
+    d, i = cp.asarray(d), cp.asarray(i).astype(cp.int32)
+    n = x.shape[0]
+    is_self = i == cp.arange(n, dtype=cp.int32)[:, None]
+    is_self[~is_self.any(axis=1), -1] = True  # self missed: drop the farthest instead
+    order = cp.argsort(is_self.astype(cp.int8), axis=1)[:, : k - 1]
+    idx = cp.concatenate([cp.arange(n, dtype=cp.int32)[:, None], cp.take_along_axis(i, order, axis=1)], axis=1)
+    dist = cp.concatenate([cp.zeros((n, 1), cp.float32),
+                           cp.sqrt(cp.maximum(cp.take_along_axis(d, order, axis=1), 0))], axis=1)
+    return cp.asnumpy(idx), cp.asnumpy(dist.astype(cp.float32))
 
 
 def fuzzy_graph_gpu(idx, dist):
