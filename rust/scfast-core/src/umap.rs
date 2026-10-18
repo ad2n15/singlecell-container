@@ -38,8 +38,8 @@ const MIN_TASK_EDGES: usize = 16_384;
 
 /// `indices` / `distances` are (n, k) row-major with the cell itself in column 0.
 pub fn fuzzy_simplicial_set(indices: &[u32], distances: &[f32], n: usize, k: usize) -> Result<FuzzyGraph> {
-    if indices.len() != n * k || distances.len() != n * k || k < 2 {
-        return Err(Error::InvalidInput(format!("kNN arrays must be {n} x {k} with k >= 2")));
+    if indices.len() != n * k || distances.len() != n * k || k < 2 || n * k > u32::MAX as usize {
+        return Err(Error::InvalidInput(format!("kNN arrays must be {n} x {k} with k >= 2 and n k < 2^32")));
     }
     let mean_all = distances.iter().map(|&d| d as f64).sum::<f64>() / distances.len() as f64;
     let target = (k as f32).log2();
@@ -79,57 +79,68 @@ pub fn fuzzy_simplicial_set(indices: &[u32], distances: &[f32], n: usize, k: usi
         }
     });
 
-    let mut deg = vec![0usize; n + 1];
-    for (p, &j) in indices.iter().enumerate() {
-        if w[p] > 0.0 {
-            deg[p / k + 1] += 1;
-            deg[j as usize + 1] += 1;
+    // Row i of the union holds its own kNN edges and the reversed edges j -> i, gathered
+    // through a transpose filled in parallel; blocks of rows merge into a few large vectors.
+    let incoming: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    indices.par_iter().zip(w.par_iter()).for_each(|(&j, &wp)| {
+        if wp > 0.0 {
+            incoming[j as usize + 1].fetch_add(1, Relaxed);
         }
+    });
+    let mut start = vec![0usize; n + 1];
+    for j in 0..n {
+        start[j + 1] = start[j] + incoming[j + 1].load(Relaxed) as usize;
     }
-    for i in 0..n {
-        deg[i + 1] += deg[i];
-    }
-    let total = deg[n];
-    let mut cols = vec![0u32; total];
-    let mut vals = vec![0f32; total];
-    let mut fill = deg.clone();
-    for (p, &j) in indices.iter().enumerate() {
-        if w[p] > 0.0 {
-            let (i, j) = (p / k, j as usize);
-            cols[fill[i]] = j as u32;
-            vals[fill[i]] = w[p];
-            fill[i] += 1;
-            cols[fill[j]] = i as u32;
-            vals[fill[j]] = w[p];
-            fill[j] += 1;
-        }
-    }
-
-    let rows: Vec<Vec<(u32, f32)>> = (0..n).into_par_iter().map(|i| {
-        let mut r: Vec<(u32, f32)> = cols[deg[i]..deg[i + 1]].iter().copied().zip(vals[deg[i]..deg[i + 1]].iter().copied()).collect();
-        r.sort_unstable_by_key(|e| e.0);
-        let mut out: Vec<(u32, f32)> = Vec::with_capacity(r.len());
-        for (c, v) in r {
-            match out.last_mut() {
-                Some(last) if last.0 == c => last.1 = last.1 + v - last.1 * v,
-                _ => out.push((c, v)),
+    let cursor: Vec<AtomicU32> = start[..n].iter().map(|&s| AtomicU32::new(s as u32)).collect();
+    let src: Vec<AtomicU32> = (0..start[n]).map(|_| AtomicU32::new(0)).collect();
+    w.par_chunks(k).enumerate().for_each(|(i, wi)| {
+        for (q, &wp) in wi.iter().enumerate() {
+            if wp > 0.0 {
+                let pos = cursor[indices[i * k + q] as usize].fetch_add(1, Relaxed);
+                src[pos as usize].store((i * k + q) as u32, Relaxed);
             }
         }
-        out
+    });
+
+    const ROWS: usize = 4096;
+    let blocks: Vec<(Vec<usize>, Vec<u32>, Vec<f32>)> = (0..n.div_ceil(ROWS)).into_par_iter().map(|bl| {
+        let (mut lens, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let mut r: Vec<(u32, f32)> = Vec::new();
+        for i in bl * ROWS..((bl + 1) * ROWS).min(n) {
+            r.clear();
+            r.extend((i * k..(i + 1) * k).filter(|&p| w[p] > 0.0).map(|p| (indices[p], w[p])));
+            r.extend(src[start[i]..start[i + 1]].iter().map(|p| {
+                let p = p.load(Relaxed) as usize;
+                ((p / k) as u32, w[p])
+            }));
+            r.sort_unstable_by_key(|e| e.0);
+            let before = cols.len();
+            for &(c, v) in &r {
+                if cols.len() > before && *cols.last().unwrap() == c {
+                    let last: &mut f32 = vals.last_mut().unwrap();
+                    *last = *last + v - *last * v;
+                } else {
+                    cols.push(c);
+                    vals.push(v);
+                }
+            }
+            lens.push(cols.len() - before);
+        }
+        (lens, cols, vals)
     }).collect();
 
     let mut indptr = Vec::with_capacity(n + 1);
     indptr.push(0);
-    for r in &rows {
-        indptr.push(indptr.last().unwrap() + r.len());
+    for (lens, _, _) in &blocks {
+        for l in lens {
+            indptr.push(indptr.last().unwrap() + l);
+        }
     }
     let mut indices_out = Vec::with_capacity(indptr[n]);
     let mut weights = Vec::with_capacity(indptr[n]);
-    for r in rows {
-        for (c, v) in r {
-            indices_out.push(c);
-            weights.push(v);
-        }
+    for (_, cols, vals) in &blocks {
+        indices_out.extend_from_slice(cols);
+        weights.extend_from_slice(vals);
     }
     Ok(FuzzyGraph { indptr, indices: indices_out, weights })
 }
