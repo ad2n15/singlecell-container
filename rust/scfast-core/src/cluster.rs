@@ -239,23 +239,26 @@ fn renumber_ascending(ids: &[usize]) -> (Vec<u32>, usize) {
 /// Errors on an index out of range.
 fn bfs_order(g: &SparseGraph) -> Result<Vec<u32>> {
     let n = g.n;
-    if let Some(&j) = g.indices.iter().find(|&&j| j as usize >= n) {
+    if let Some(&j) = g.indices.par_iter().find_first(|&&j| j as usize >= n) {
         return Err(Error::InvalidInput(format!("graph index {j} out of range for {n} nodes")));
     }
-    let mut seen = vec![false; n];
+    // a bitset stays in L2 at 1M+ nodes, where a Vec<bool> does not
+    let mut seen = vec![0u64; n.div_ceil(64)];
     let mut order = Vec::with_capacity(n);
     for root in 0..n {
-        if seen[root] {
+        if seen[root / 64] & (1 << (root % 64)) != 0 {
             continue;
         }
-        seen[root] = true;
+        seen[root / 64] |= 1 << (root % 64);
         let mut head = order.len();
         order.push(root as u32);
         while head < order.len() {
             let v = order[head] as usize;
             head += 1;
             for &j in &g.indices[g.indptr[v]..g.indptr[v + 1]] {
-                if !std::mem::replace(&mut seen[j as usize], true) {
+                let (word, bit) = (j as usize / 64, 1u64 << (j % 64));
+                if seen[word] & bit == 0 {
+                    seen[word] |= bit;
                     order.push(j);
                 }
             }
