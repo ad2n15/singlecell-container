@@ -17,6 +17,9 @@ Constraints from the user (2026-10-17):
 | to 01:30 | Scale agent: cpu_steps on Modal | CPU | ~2.5 |
 | to 01:00 | GPU agent: builds, CUDA tests, L4 runs | L4 + builds | ~2.1+ (more since) |
 | 00:30-01:40 | Orchestrator: scfast-cpu PBMC 68k / brain 100k, UMAP probes | CPU | ~0.6 |
+| to 02:45 | GPU agent round 2 total (L4 + H100 synthetic runs), Modal billing report | GPU | 6.15 |
+| 01:50-02:00 | Orchestrator: final scfast-cpu brain 500k/1.29M (160 GB) | CPU | ~0.4 |
+| from 02:00 | Caps: UMAP-large $3, PCA-large $3, GPU round 3 $7 | | <= 13 |
 | 10-17 23:11 | baselines agent: download raw data (2 cores, 8 GB, ~3 min) | 0.1 core-h | 0.01 |
 | 10-17 23:16 | prep PBMC 68k (4 cores, 16 GB, ~1 min) | 0.1 core-h | 0.01 |
 | 10-17 23:16 | prep brain 100k/500k/all (4 cores, 160 GB, ~12 min) | 0.8 core-h | 0.30 |
@@ -124,6 +127,8 @@ the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weight
 
 - Scale path merged (agent): k-d tree kNN (exact <= 16 dims; eps=0.7 approximate in 'auto' above 50k, overlap >= 0.946 with exact), parallel Leiden (local moving, refinement, aggregation; thread-count independent; ARI 0.999 vs leidenalg at 100k), tiled PCA kernels, SNN in BFS order. PCA+kNN+SNN+Leiden: brain 500k Modal 193 -> 4.9 s; brain 1.29M Modal 17.4 s.
 - UMAP x86 fix (34f4535): Z-order relabelling + head-only updates; Modal 16 threads PBMC 68k 3.82 -> 1.07 s.
+
+- GPU round 2 (agent, branch t3/gpu-bench-modal-hillclimb, NOT merged yet): synthetic, compute s: L4 100k rapids 2.07 / scfast-gpu 1.74; L4 500k 13.36 / 8.20; H100 500k 5.49 / 3.05; H100 1M 12.21 / 7.00. CUDA bugs fixed: cuGraph dtype enum, Leiden max_level=2 (580 fragments), O(n^2) kNN top-k, stale cargo builds, serial symmetry check. Its device Gram-matrix PCA does not apply Seurat's clip -> merge aborted; GPU round 3 merges it with an exact device clip and runs the real-data H100 headline.
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
