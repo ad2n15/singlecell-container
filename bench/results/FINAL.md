@@ -9,15 +9,15 @@ Every engine reads the same QC'd files (`bench/prep.py`).
 
 | Dataset | Cells | Seurat 5.6 | Scanpy 1.12 | **scfast-cpu** | vs Seurat | vs Scanpy |
 |---|---:|---:|---:|---:|---:|---:|
-| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **3.4 s** | **36×** | **17×** |
-| Mouse brain | 100,000 | 194.6 s | 75.8 s | **3.2 s** | **60×** | **23×** |
-| Mouse brain | 500,000 | 966.8 s | 488.7 s | **21.4 s** | **45×** | **23×** |
-| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **46.3 s** | – | **25×** |
+| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **3.0 s** | **41×** | **19×** |
+| Mouse brain | 100,000 | 194.6 s | 75.8 s | **3.3 s** | **59×** | **23×** |
+| Mouse brain | 500,000 | 966.8 s | 488.7 s | **17.6 s** | **55×** | **28×** |
+| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **36.8 s** | – | **32×** |
 
-Peak memory at 1.29M cells: scfast 45 GB, Scanpy 150 GB. Reading the 1.29M file: scfast 15 s,
+Peak memory at 1.29M cells: scfast 46 GB, Scanpy 150 GB. Reading the 1.29M file: scfast 7.4 s,
 Scanpy 101 s.
 
-Sources: `bench/results/{pbmc68k_cpu16,brain_cpu16}/report.md` (medians; 3 measured repeats
+Sources: `bench/results/{pbmc68k_cpu16,brain_cpu16}/report.md`, GPU `bench/results/{gpu_h100_real,h100_final_brain,h100_final_pbmc68k}/report.md` (medians; 3 measured repeats
 up to 100k cells, 1–2 above, each after a warm-up).
 
 ## Agreement with Seurat (parity gates: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9)
@@ -41,10 +41,10 @@ PBMC 68k labels (ARI 0.274) equals Seurat's (0.283).
 
 | Dataset | Cells | rapids-singlecell | **scfast-gpu** | file → result, rapids | **file → result, scfast-gpu** |
 |---|---:|---:|---:|---:|---:|
-| PBMC 68k | 68,260 | 0.62 s | **0.52 s** | 2.84 s | **0.68 s** |
-| Mouse brain | 100,000 | 1.20 s | **1.20 s** | 12.06 s | **1.82 s** |
-| Mouse brain | 500,000 | 4.28 s | **3.06 s** | 64.83 s | **5.50 s** |
-| Mouse brain | 1,290,549 | **out of GPU memory** | **6.80 s** | fails | **25.7 s** |
+| PBMC 68k | 68,260 | 0.62 s | **0.56 s** | 2.84 s | **0.68 s** |
+| Mouse brain | 100,000 | 1.20 s | **1.20 s** | 12.06 s | **1.72 s** |
+| Mouse brain | 500,000 | 4.28 s | **3.24 s** | 64.83 s | **5.72 s** |
+| Mouse brain | 1,290,549 | **out of GPU memory** | **7.16 s** | fails | **26.7 s** |
 
 The first two columns are compute (normalise → UMAP); "file → result" adds reading the file and the
 host ⇄ GPU transfers. On a 24 GB L4, rapids-singlecell already runs out of memory at 500k cells,
@@ -58,9 +58,9 @@ core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
 
 | | Seurat (16 cores) | Scanpy (16 cores) | scfast CPU (16 cores) | rapids-singlecell (H100) | **scfast GPU (H100)** |
 |---|---:|---:|---:|---:|---:|
-| Compute | ~3 h (published) | 1,161.6 s | 46.3 s | out of memory | **6.8 s** |
-| File → result | – | 1,262.6 s | 61.6 s | – | **25.7 s** |
-| vs Scanpy (compute) | – | 1× | 25× | – | **171×** |
+| Compute | ~3 h (published) | 1,161.6 s | 36.8 s | out of memory | **7.2 s** |
+| File → result | – | 1,262.6 s | 44.2 s | – | **26.7 s** |
+| vs Scanpy (compute) | – | 1× | 32× | – | **162×** |
 
 ## What changed overnight
 
