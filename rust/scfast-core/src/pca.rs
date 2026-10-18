@@ -273,7 +273,9 @@ fn block_krylov_svd<O: Operator>(
         if i + 1 < blocks {
             dense::orthonormalize(g.as_mut());
             op.apply(g.as_ref(), y.as_mut())?;
-            dense::orthonormalize_against(k.as_ref().subcols(0, (i + 1) * b), y.as_mut());
+            // K^T y = K^T Z g = (Z^T K)^T g: the first projection needs no pass over K.
+            let kty = dense::mul_tn(bt.as_ref().subcols(0, (i + 1) * b), g.as_ref());
+            dense::orthonormalize_against(k.as_ref().subcols(0, (i + 1) * b), y.as_mut(), kty);
         }
     }
     let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;

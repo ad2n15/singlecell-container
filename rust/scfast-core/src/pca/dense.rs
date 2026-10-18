@@ -141,22 +141,32 @@ fn cross(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
 
 /// Replace `y` by an orthonormal basis of the part of range(`y`) orthogonal to range(`q`)
 /// (`q` with orthonormal columns): block classical Gram-Schmidt run twice (BCGS2), each
-/// pass projecting out `q` and orthonormalising the block (CholeskyQR, TSQR fallback). When `y` lies in range(`q`),
-/// the result is still orthonormal and orthogonal to `q`, spanning round-off directions.
-pub(super) fn orthonormalize_against(q: MatRef<'_, f64>, mut y: MatMut<'_, f64>) {
-    for _ in 0..2 {
-        if q.ncols() > 0 {
-            let c = cross(q, y.rb());
-            y.rb_mut().par_row_chunks_mut(TSQR_ROWS).zip(q.par_row_chunks(TSQR_ROWS)).for_each(|(yc, qc)| {
-                matmul(yc, Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
-            });
+/// pass projecting out `q` and orthonormalising the block (CholeskyQR, TSQR fallback).
+/// `qty` is `q^T y` for the first pass, when the caller has it more cheaply than a pass
+/// over `q`. When `y` lies in range(`q`), the result is still orthonormal and orthogonal
+/// to `q`, spanning round-off directions.
+pub(super) fn orthonormalize_against(q: MatRef<'_, f64>, mut y: MatMut<'_, f64>, qty: Mat<f64>) {
+    let mut c = qty;
+    for pass in 0..2 {
+        if pass > 0 {
+            c = cross(q, y.rb());
         }
+        y.rb_mut().par_row_chunks_mut(TSQR_ROWS).zip(q.par_row_chunks(TSQR_ROWS)).for_each(|(yc, qc)| {
+            matmul(yc, Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
+        });
         // One CholeskyQR round per pass: the second pass starts from a nearly orthonormal
         // block and restores orthogonality to working precision.
         if !cholesky_qr(y.rb_mut()) {
             orthonormalize_chunked(y.rb_mut(), TSQR_ROWS);
         }
     }
+}
+
+/// `a^T b`, sequential (small matrices).
+pub(super) fn mul_tn(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+    let mut c = Mat::<f64>::zeros(a.ncols(), b.ncols());
+    matmul(c.as_mut(), Accum::Replace, a.transpose(), b, 1.0, Par::Seq);
+    c
 }
 
 /// Smallest accepted `min(diag L) / max(diag L)` in `cholesky_qr`: a condition number up to
@@ -285,7 +295,8 @@ mod tests {
         // A block mostly inside range(q), with one column exactly inside it.
         let r = random(30_000, 20, 3);
         let mut y = Mat::from_fn(30_000, 20, |i, j| (0..80).map(|t| q[(i, t)] * ((t + j) % 7) as f64).sum::<f64>() + if j == 0 { 0.0 } else { 1e-7 * r[(i, j)] });
-        orthonormalize_against(q.as_ref(), y.as_mut());
+        let qty = cross(q.as_ref(), y.as_ref());
+        orthonormalize_against(q.as_ref(), y.as_mut(), qty);
         let mut full = Mat::<f64>::zeros(30_000, 100);
         full.as_mut().subcols_mut(0, 80).copy_from(&q);
         full.as_mut().subcols_mut(80, 20).copy_from(&y);
