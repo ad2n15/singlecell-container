@@ -218,6 +218,12 @@ impl Lanes {
             return unsafe { forces_avx2(self, m, cur, a, b) };
         }
         let _ = avx2;
+        #[cfg(target_arch = "aarch64")]
+        {
+            // SAFETY: NEON is part of the aarch64 baseline.
+            unsafe { forces_neon(self, m, cur, a, b) }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         self.forces_scalar(m, cur, a, b)
     }
 
@@ -316,6 +322,56 @@ unsafe fn forces_avx2(l: &Lanes, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f3
     _mm256_storeu_ps(ox.as_mut_ptr(), sx);
     _mm256_storeu_ps(oy.as_mut_ptr(), sy);
     [ox.iter().sum(), oy.iter().sum()]
+}
+
+/// [`forces_avx2`] on aarch64 NEON, 4 lanes per vector and two vectors per step.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn forces_neon(l: &Lanes, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+    use std::arch::aarch64::*;
+    let c = vdupq_n_f32;
+    let ci = vdupq_n_u32;
+    let (mut sx, mut sy) = (c(0.0), c(0.0));
+    for o in (0..m).step_by(4) {
+        let (x, y, w) = (vld1q_f32(l.x[o..].as_ptr()), vld1q_f32(l.y[o..].as_ptr()), vld1q_f32(l.w[o..].as_ptr()));
+        let (dx, dy) = (vsubq_f32(c(cur[0]), x), vsubq_f32(c(cur[1]), y));
+        let d2 = vfmaq_f32(vmulq_f32(dy, dy), dx, dx);
+        let d2c = vmaxq_f32(d2, c(f32::MIN_POSITIVE));
+
+        let bits = vreinterpretq_u32_f32(d2c);
+        let mant = vandq_u32(bits, ci(0x007F_FFFF));
+        let big = vcgtq_u32(mant, ci(0x0035_04F3));
+        let e = vcvtq_f32_s32(vsubq_s32(vsubq_s32(vreinterpretq_s32_u32(vshrq_n_u32::<23>(bits)), vdupq_n_s32(127)), vreinterpretq_s32_u32(big)));
+        let r = vreinterpretq_f32_u32(vorrq_u32(mant, vbslq_u32(big, ci(0x3F00_0000), ci(0x3F80_0000))));
+        let t = vdivq_f32(vsubq_f32(r, c(1.0)), vaddq_f32(r, c(1.0)));
+        let t2 = vmulq_f32(t, t);
+        let mut s = vfmaq_f32(c(1.0 / 5.0), t2, c(1.0 / 7.0));
+        s = vfmaq_f32(c(1.0 / 3.0), t2, s);
+        s = vfmaq_f32(c(1.0), t2, s);
+        let ln_r = vmulq_f32(vmulq_f32(c(2.0), t), s);
+        let z = vmulq_f32(c(b), vfmaq_f32(e, ln_r, c(std::f32::consts::LOG2_E)));
+        let z = vminq_f32(vmaxq_f32(z, c(-126.0)), c(126.0));
+
+        let i = vrndnq_f32(z);
+        let f = vmulq_f32(vsubq_f32(z, i), c(std::f32::consts::LN_2));
+        let mut p = vfmaq_f32(c(1.0 / 120.0), f, c(1.0 / 720.0));
+        for k in [1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0] {
+            p = vfmaq_f32(c(k), f, p);
+        }
+        let scale = vreinterpretq_f32_s32(vshlq_n_s32::<23>(vaddq_s32(vcvtq_s32_f32(i), vdupq_n_s32(127))));
+        let pb = vmulq_f32(p, scale);
+
+        let att = vcgtq_f32(w, c(1.5));
+        let num = vbslq_f32(att, vmulq_f32(c(-2.0 * a * b), pb), c(2.0 * b));
+        let den = vmulq_f32(vbslq_f32(att, d2c, vaddq_f32(d2, c(0.001))), vfmaq_f32(c(1.0), c(a), pb));
+        let g = vdivq_f32(num, den);
+        let clip4 = |v: float32x4_t| vminq_f32(vmaxq_f32(v, c(-4.0)), c(4.0));
+        let zero = vbslq_f32(att, c(0.0), c(4.0));
+        let live = vcgtq_f32(d2, c(0.0));
+        sx = vfmaq_f32(sx, w, vbslq_f32(live, clip4(vmulq_f32(g, dx)), zero));
+        sy = vfmaq_f32(sy, w, vbslq_f32(live, clip4(vmulq_f32(g, dy)), zero));
+    }
+    [vaddvq_f32(sx), vaddvq_f32(sy)]
 }
 
 /// SGD layout of `graph` starting from `init` (n x 2, row-major). Returns the n x 2 embedding.
@@ -491,6 +547,29 @@ mod tests {
                 }
                 let want = l.forces_scalar(m, cur, a, b);
                 let got = unsafe { forces_avx2(&l, m, cur, a, b) };
+                for d in 0..2 {
+                    assert!((got[d] - want[d]).abs() <= 1e-4 * (1.0 + want[d].abs()), "{got:?} vs {want:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_forces_match_scalar() {
+        let (a, b) = (0.583, 1.334);
+        let mut s = 11u64;
+        let mut u = || (xorshift(&mut s) % 100_000) as f32 / 5000.0;
+        for m in 1..=LANES {
+            for _ in 0..500 {
+                let mut l = Lanes::default();
+                let cur = [u(), u()];
+                for q in 0..m {
+                    let o = match q % 4 { 0 => cur, 1 => [cur[0] + 1e-4, cur[1]], _ => [u(), u()] };
+                    l.set(q, o, if q % 3 == 0 { 2.0 } else { 1.0 });
+                }
+                let want = l.forces_scalar(m, cur, a, b);
+                let got = unsafe { forces_neon(&l, m, cur, a, b) };
                 for d in 0..2 {
                     assert!((got[d] - want[d]).abs() <= 1e-4 * (1.0 + want[d].abs()), "{got:?} vs {want:?}");
                 }
