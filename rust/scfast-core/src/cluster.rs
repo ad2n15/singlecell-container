@@ -178,18 +178,17 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
                 config.refine_randomness,
                 &mut level_rng,
             );
-            let mut collapse_by = Partition::from_membership(&level_graph, &refined);
-            let grouping = collapse_by.renumber_into_grouping();
-            let coarse = aggregate::aggregate(&level_graph, &grouping);
+            let (group, n_groups) = renumber_ascending(&refined);
+            let coarse = aggregate::aggregate(&level_graph, &group, n_groups);
             if coarse.node_count() >= level_graph.node_count() {
                 break;
             }
             membership = vec![0; coarse.node_count()];
-            for v in 0..level_graph.node_count() {
-                membership[collapse_by.membership(v)] = partition.membership(v);
+            for (v, &g) in group.iter().enumerate() {
+                membership[g as usize] = partition.membership(v);
             }
             for slot in node_at_level.iter_mut() {
-                *slot = collapse_by.membership(*slot);
+                *slot = group[*slot] as usize;
             }
             level_graph = coarse;
         }
@@ -205,6 +204,21 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
         }
     }
     labels
+}
+
+/// Community ids renumbered 0.. in ascending order of the old id (as single-clustering's
+/// `Partition::renumber`), and the number of communities.
+fn renumber_ascending(ids: &[usize]) -> (Vec<u32>, usize) {
+    let mut new_id = vec![u32::MAX; ids.iter().copied().max().map_or(0, |m| m + 1)];
+    for &c in ids {
+        new_id[c] = 0;
+    }
+    let mut next = 0;
+    for id in new_id.iter_mut().filter(|id| **id == 0) {
+        *id = next;
+        next += 1;
+    }
+    (ids.iter().map(|&c| new_id[c]).collect(), next as usize)
 }
 
 /// Nodes in breadth-first order (`order[new] = old`), restarting at the lowest unvisited
