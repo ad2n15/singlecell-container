@@ -407,3 +407,28 @@ Nothing running. Modal spend for this work: about $2.5 (estimate: inputs ~12 min
   umap::tests::two_blobs_separate is flaky under parallel test load.
 
 ## Evidence
+
+## Final state (orchestrator, 2026-10-18 morning)
+
+Headline numbers and sources: `bench/results/FINAL.md`; talk page: `bench/results/demo.html`;
+live demo: `python bench/demo_run.py --input bench/results/demo_data/<set>/matrix.h5`.
+
+Merged into perf/hillclimb overnight (each with evidence in its commits):
+- CPU: Rust UMAP (Z-order, head-only, AVX2 + NEON force kernels, prefetch), block Krylov PCA with
+  exact Seurat clip (incremental orthonormalisation), interpolated-loess vst (HVGs = Seurat's),
+  fused Rust preprocess and parallel h5 read (int64 above 2^31 nnz), k-d tree kNN, parallel Leiden,
+  SNN in BFS order.
+- GPU: CUDA PCA via the clipped Gram matrix (cuSOLVER), device preprocess, fused kNN kernel, SNN +
+  cuGraph Leiden on device, raw int32-index upload; five CUDA bugs fixed (see GPU sections).
+- R/scpipe: RunUMAPFast replaces single-thread uwot on the S2 fast path.
+
+Surprises (evidence):
+- Parity on real data was failing before tonight (PBMC 3k PC sim 0.73): missing clip, too-few
+  PCA iterations, scanpy HVGs, direct loess. Fixed; now 0.99995 / 0.976 / 0.947.
+- The ARI >= 0.9 gate is below Leiden's own noise on PBMC 68k / brain: Seurat vs Seurat across
+  seeds 0.70-0.71 (PBMC 68k). Not changed; reported.
+- Modal cpu=16 lands on AMD Milan, AMD Genoa or Intel at random; the same build varies up to 2.5x.
+- `modal volume get` returned a corrupted 2.5 GB file once (same size, different md5; h5py
+  "filter returned failure"); a second download was intact. Check large downloads.
+- rapids-singlecell runs out of GPU memory at 1.29M cells on an 80 GB H100 (and at 500k on a 24 GB L4).
+- 3 Python tests fail on main too (runner log tails, s3 platelet confidence).
