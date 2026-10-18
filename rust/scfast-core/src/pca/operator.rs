@@ -493,6 +493,18 @@ impl ClipEntries {
             }
         });
     }
+
+    /// `out -= C^T u`, in the same way.
+    fn subtract_t_from(&self, u: MatRef<'_, f64>, mut out: MatMut<'_, f64>) {
+        let (rows, cols, vals) = (&self.rows, &self.cols, &self.vals);
+        out.rb_mut().par_col_chunks_mut(1).enumerate().for_each(|(c, mut oc)| {
+            let o = oc.rb_mut().col_mut(0).try_as_col_major_mut().expect("column-major").as_slice_mut();
+            let uc = col(u, c);
+            for ((&i, &j), &w) in rows.iter().zip(cols).zip(vals) {
+                o[j as usize] -= w * uc[i as usize];
+            }
+        });
+    }
 }
 
 impl<O: super::Operator> Clipped<O> {
@@ -540,15 +552,7 @@ impl<O: super::Operator> super::Operator for Clipped<O> {
     }
     fn apply_t(&self, u: MatRef<'_, f64>) -> Result<Mat<f64>> {
         let mut out = self.inner.apply_t(u)?;
-        // One task per output column; each element receives its terms in entry order.
-        let ClipEntries { rows, cols, vals } = &self.entries;
-        out.as_mut().par_col_chunks_mut(1).enumerate().for_each(|(c, mut oc)| {
-            let o = oc.rb_mut().col_mut(0).try_as_col_major_mut().expect("column-major").as_slice_mut();
-            let uc = col(u, c);
-            for ((&i, &j), &w) in rows.iter().zip(cols).zip(vals) {
-                o[j as usize] -= w * uc[i as usize];
-            }
-        });
+        self.entries.subtract_t_from(u, out.as_mut());
         Ok(out)
     }
 }

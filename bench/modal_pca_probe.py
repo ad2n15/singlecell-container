@@ -38,6 +38,7 @@ for name, path in BUILDS.items():
     image = image.add_local_dir(path, f"/src/{name}/rust", copy=True, ignore=["**/target"]).run_commands(
         f"cd /src/{name} && maturin build --release -m rust/scfast-py/Cargo.toml -o /tmp/w{name} "
         f"&& pip install --target /opt/{name} /tmp/w{name}/*.whl")
+image = image.add_local_dir(ROOT / "bench", "/work/bench", ignore=["results", "hpc", "__pycache__"])
 
 STEP = r'''
 import sys, time, numpy as np, scfast
@@ -85,6 +86,34 @@ def probe(sizes: str, builds: list[str]):
             print(f"--- {build} vs {builds[0]}", flush=True)
             subprocess.run([sys.executable, "/tmp/compare.py", f"/tmp/emb_{builds[0]}_{size}.npy",
                             f"/tmp/emb_{build}_{size}.npy"], check=True)
+
+
+@app.function(image=image, volumes={"/data": vol}, cpu=CPUS, memory=96 * 1024, timeout=3600)
+def bench(sizes: str, builds: list[str], reps: int):
+    """bench/run_py.py --engine scfast-cpu per build and size (outputs in /tmp, not on the volume)."""
+    import json
+    import statistics
+
+    env = {**os.environ, "PYTHONPATH": ""}
+    env.update({v: str(CPUS) for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "RAYON_NUM_THREADS")})
+    for size in sizes.split(","):
+        for build in builds:
+            out = Path(f"/tmp/bench_{build}_{size}")
+            subprocess.run([sys.executable, "bench/run_py.py", "--engine", "scfast-cpu", "--data", f"/data/prep/brain/n{size}",
+                            "--out", str(out), "--reps", str(reps), "--threads", str(CPUS)], cwd="/work",
+                           env={**env, "PYTHONPATH": f"/opt/{build}"}, check=True, stdout=subprocess.DEVNULL)
+            rows = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
+            steps = {}
+            for r in rows:
+                if not r.get("warmup") and r.get("status") == "ok" and r.get("wall_s") is not None:
+                    steps.setdefault(r["step"], []).append(r["wall_s"])
+            print(f"bench n{size} {build}: " + ", ".join(f"{k} {statistics.median(v):.3f}" for k, v in steps.items()),
+                  flush=True)
+
+
+@app.local_entrypoint()
+def bench_main(sizes: str = "100000,500000,1290549", reps: int = 3):
+    bench.remote(sizes, list(BUILDS), reps)
 
 
 @app.local_entrypoint()

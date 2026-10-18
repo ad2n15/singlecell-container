@@ -1,11 +1,13 @@
 //! Dense steps of the block Krylov SVD, on faer 0.24 with explicit `Par::Seq` inside each
 //! task so no result depends on faer's global parallelism or the rayon pool size.
 //!
-//! - `orthonormalize`: thin Q of a tall matrix by TSQR. Rows are split into a fixed number
-//!   of chunks (from the shape only), each chunk is QR-factored in parallel, the stacked R
-//!   factors are QR-factored once more, and each chunk's Householder reflectors are applied
-//!   to its slice of the second Q. Works in place: the only extra memory is one chunk-sized
-//!   buffer per task and the stacked R (chunks x l x l).
+//! - `orthonormalize`: thin Q of a tall matrix by CholeskyQR2 (Gram matrix and products
+//!   over fixed row chunks), or by TSQR when the Gram matrix is too ill-conditioned:
+//!   rows are split into a fixed number of chunks (from the shape only), each chunk is
+//!   QR-factored in parallel, the stacked R factors are QR-factored once more, and each
+//!   chunk's Householder reflectors are applied to its slice of the second Q.
+//! - `orthonormalize_against`: a new Krylov block orthonormalised against the earlier
+//!   ones (block Gram-Schmidt run twice).
 //! - `thin_svd`: faer's SVD of the small genes x l matrix.
 //! - `gaussian`: the test matrix, from ChaCha8 seeded with the PCA seed.
 
@@ -205,7 +207,7 @@ pub(super) fn orthonormalize_against(q: MatRef<'_, f64>, mut y: MatMut<'_, f64>,
 }
 
 /// `a b`, sequential (small matrices).
-pub(super) fn mul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+fn mul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
     let mut c = Mat::<f64>::zeros(a.nrows(), b.ncols());
     matmul(c.as_mut(), Accum::Replace, a, b, 1.0, Par::Seq);
     c

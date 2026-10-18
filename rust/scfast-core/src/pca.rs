@@ -23,8 +23,8 @@
 //!
 //! Besides the borrowed X: the cells x width f64 basis K (2.2 KB per cell at the defaults,
 //! b = 40 and width 280, against 16 KB per cell for `ScaleData`'s dense 2,000-HVG matrix),
-//! one cells x b block, a few genes x width matrices, per-task chunk buffers, and the
-//! `Z^T U` accumulators (see `operator.rs`). No transposed copy of X.
+//! a few genes x width matrices, per-task chunk buffers, and the `Z^T U` accumulators (see
+//! `operator.rs`). No transposed copy of X.
 //!
 //! # Determinism
 //!
