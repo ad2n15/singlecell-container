@@ -112,6 +112,20 @@ def leiden_csr(
     RuntimeError.
     """
 
+def leiden_coo_device(
+    n: int,
+    nnz: int,
+    src: int,
+    dst: int,
+    weights: int,
+    resolution: float,
+    seed: int,
+    device: str,
+    /,
+) -> npt.NDArray[np.int32]:
+    """Leiden on cuGraph for a COO graph already on the device (int32 / int32 / float32
+    device pointers, nnz each). Unchecked beyond sizes."""
+
 def leiden_device(device: str, /) -> dict[str, Any]:
     """Resolve a Leiden device string.
 

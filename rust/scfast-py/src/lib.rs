@@ -534,6 +534,46 @@ fn leiden_csr<'py>(
     Ok(PyArray1::from_vec(py, to_i32(labels)))
 }
 
+/// Leiden on cuGraph for a graph already on the device: COO int32 sources and
+/// destinations and f32 weights (device pointers, `nnz` each), both directions of every
+/// edge. Returns int32 labels. Unchecked beyond sizes; see `CugraphLeiden::cluster_device_coo`.
+#[pyfunction]
+#[pyo3(name = "leiden_coo_device")]
+#[allow(clippy::too_many_arguments)]
+fn leiden_coo_device<'py>(
+    py: Python<'py>,
+    n: usize,
+    nnz: usize,
+    src: usize,
+    dst: usize,
+    weights: usize,
+    resolution: f64,
+    seed: u64,
+    device: &str,
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    check_n_fits_i32(n, "leiden")?;
+    let ordinal = match parse_leiden_device(device)? {
+        LeidenDevice::Cuda(i) => i,
+        other => return Err(PyValueError::new_err(format!("a graph on the GPU needs a CUDA device, got {}", other.as_string()))),
+    };
+    let params = ClusterParams { resolution, seed, n_iterations: 1 };
+    #[cfg(feature = "cugraph")]
+    {
+        let labels = run_kernel(py, "leiden", move || {
+            let gpu = scfast_core::cugraph::CugraphLeiden::new(ordinal)?;
+            // SAFETY: the Python wrapper passes CuPy device pointers to `nnz` elements of the
+            // stated dtypes, kept alive for the call, with the producing work synchronised.
+            unsafe { gpu.cluster_device_coo(n, nnz, src as *mut _, dst as *mut _, weights as *mut _, &params) }.map(|(l, _)| l)
+        })?;
+        Ok(PyArray1::from_vec(py, to_i32(labels)))
+    }
+    #[cfg(not(feature = "cugraph"))]
+    {
+        let _ = (py, nnz, src, dst, weights, params, ordinal);
+        Err(PyRuntimeError::new_err("scfast was built without the cugraph feature"))
+    }
+}
+
 // ------------------------------------------------------------------ preprocessing (Phase 9)
 
 /// Low-level fused preprocessing on borrowed CSR counts (cells x genes). See scfast.preprocess.
@@ -677,7 +717,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
+    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

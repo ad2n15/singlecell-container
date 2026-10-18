@@ -216,13 +216,16 @@ class ScfastEngine(ScanpyEngine):
         n = idx.shape[0]
         indptr = np.arange(0, n * (cfg.k - 1) + 1, cfg.k - 1)
         a.obsp["distances"] = sp.csr_matrix((dist[:, 1:].ravel(), idx[:, 1:].ravel(), indptr), shape=(n, n))
-        a.obsp["snn"] = self.scfast.snn(idx)  # Seurat's SNN (Jaccard), what Leiden clusters on
+        self.snn = self.scfast.snn(self.on_device(idx))  # Seurat's SNN (Jaccard), what Leiden clusters on
         self.knn = idx, dist
+
+    def on_device(self, x):
+        return x
 
     def cluster(self, a, cfg):
         import pandas as pd
 
-        labels = self.scfast.leiden(a.obsp["snn"], resolution=cfg.resolution, seed=cfg.seed,
+        labels = self.scfast.leiden(self.snn, resolution=cfg.resolution, seed=cfg.seed,
                                     n_iterations=2, device=self.leiden_device)
         a.obs["cluster"] = pd.Categorical(labels.astype(str))
 
@@ -234,9 +237,9 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
     """ScfastEngine with its steps on the device.
 
     rapids-singlecell normalises, selects HVGs and runs UMAP on the GPU; scfast's CUDA
-    backend does PCA and kNN, and Leiden runs on cuGraph when scfast can load it (the backend
-    used is recorded as `leiden_device` in the environment file). The UMAP fuzzy simplicial
-    set comes from cuML, from the same kNN that Leiden's SNN graph uses.
+    backend does PCA and kNN, builds the SNN graph on the device and hands it to cuGraph
+    Leiden there (the backend used is recorded as `leiden_device` in the environment file).
+    The UMAP fuzzy simplicial set comes from cuML, from the same kNN.
     """
 
     device = "gpu"
@@ -251,6 +254,9 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         self.leiden_device = self.scfast.leiden_device("auto")
         versions.update({"scfast_gpu": info["device_name"], "leiden_device": self.leiden_device})
         return versions
+
+    def on_device(self, x):
+        return self.cp.asarray(x)
 
     def neighbors(self, a, cfg):
         import numpy as np

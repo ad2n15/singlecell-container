@@ -106,6 +106,7 @@ type FnErrorFree = unsafe extern "C" fn(error: Opaque);
 type FnDeviceArrayCreate =
     unsafe extern "C" fn(handle: *const c_void, n_elems: usize, dtype: DType, array: *mut Opaque, error: *mut Opaque) -> ErrCode;
 type FnDeviceArrayFree = unsafe extern "C" fn(array: Opaque);
+type FnViewCreate = unsafe extern "C" fn(pointer: *mut c_void, n_elems: usize, dtype: DType) -> Opaque;
 type FnDeviceArrayView = unsafe extern "C" fn(array: Opaque) -> Opaque;
 type FnViewFree = unsafe extern "C" fn(view: Opaque);
 type FnViewSize = unsafe extern "C" fn(view: *const c_void) -> usize;
@@ -210,6 +211,7 @@ struct Api {
     device_array_create: FnDeviceArrayCreate,
     device_array_free: FnDeviceArrayFree,
     device_array_view: FnDeviceArrayView,
+    view_create: FnViewCreate,
     view_free: FnViewFree,
     view_size: FnViewSize,
     view_type: FnViewType,
@@ -330,6 +332,7 @@ fn load_api() -> std::result::Result<Api, String> {
             device_array_create: sym(&lib, "cugraph_type_erased_device_array_create")?,
             device_array_free: sym(&lib, "cugraph_type_erased_device_array_free")?,
             device_array_view: sym(&lib, "cugraph_type_erased_device_array_view")?,
+            view_create: sym(&lib, "cugraph_type_erased_device_array_view_create")?,
             view_free: sym(&lib, "cugraph_type_erased_device_array_view_free")?,
             view_size: sym(&lib, "cugraph_type_erased_device_array_view_size")?,
             view_type: sym(&lib, "cugraph_type_erased_device_array_view_type")?,
@@ -598,79 +601,130 @@ impl CugraphLeiden {
         let (_src_arr, src_view) = api.upload(&h, &src, DTYPE_INT32, "src")?;
         let (_dst_arr, dst_view) = api.upload(&h, &dst, DTYPE_INT32, "dst")?;
         let (_w_arr, w_view) = api.upload(&h, weights, DTYPE_FLOAT32, "weights")?;
-
-        let props = GraphProperties { is_symmetric: TRUE, is_multigraph: FALSE };
-        let mut g: Opaque = std::ptr::null_mut();
-        let mut err: Opaque = std::ptr::null_mut();
-        let null = std::ptr::null();
-        let rc = unsafe {
-            match api.graph_create {
-                GraphCreate::Legacy(f) => f(
-                    h.ptr, &props, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
-                    FALSE, // store_transposed
-                    TRUE,  // renumber
-                    FALSE, // do_expensive_check
-                    &mut g, &mut err,
-                ),
-                GraphCreate::V2408(f) => f(
-                    h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
-                    FALSE, // store_transposed
-                    TRUE,  // renumber
-                    FALSE, // drop_self_loops
-                    FALSE, // drop_multi_edges
-                    FALSE, // do_expensive_check
-                    &mut g, &mut err,
-                ),
-                GraphCreate::V2410(f) => f(
-                    h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
-                    FALSE, // store_transposed
-                    TRUE,  // renumber
-                    FALSE, // drop_self_loops
-                    FALSE, // drop_multi_edges
-                    FALSE, // symmetrize (both arcs are already present)
-                    FALSE, // do_expensive_check
-                    &mut g, &mut err,
-                ),
-            }
-        };
-        api.check(rc, err, api.graph_create_name)?;
-        if g.is_null() {
-            return Err(backend("graph handle is NULL"));
-        }
-        let g = Graph { api, ptr: g };
-
-        let mut rng: Opaque = std::ptr::null_mut();
-        let mut err: Opaque = std::ptr::null_mut();
-        let rc = unsafe { (api.rng_state_create)(h.ptr, params.seed, &mut rng, &mut err) };
-        api.check(rc, err, "cugraph_rng_state_create")?;
-        let rng = RngState { api, ptr: rng };
-
-        let mut result: Opaque = std::ptr::null_mut();
-        let mut err: Opaque = std::ptr::null_mut();
-        let rc = unsafe {
-            (api.leiden)(h.ptr, rng.ptr, g.ptr, MAX_LEVEL, params.resolution, 1.0, FALSE, &mut result, &mut err)
-        };
-        api.check(rc, err, "cugraph_leiden")?;
-        if result.is_null() {
-            return Err(backend("cugraph_leiden returned a NULL result"));
-        }
-        let result = ClusteringResult { api, ptr: result };
-
-        let vertices = View { api, ptr: unsafe { (api.result_get_vertices)(result.ptr) } };
-        let clusters = View { api, ptr: unsafe { (api.result_get_clusters)(result.ptr) } };
-        if vertices.ptr.is_null() || clusters.ptr.is_null() {
-            return Err(backend("result vertex/cluster view is NULL"));
-        }
-        let modularity = unsafe { (api.result_get_modularity)(result.ptr) };
-        let vert = api.download_ints(&h, &vertices, "result vertices")?;
-        let clus = api.download_ints(&h, &clusters, "result clusters")?;
-        if vert.len() != clus.len() {
-            return Err(backend(format!("result has {} vertices but {} cluster ids", vert.len(), clus.len())));
-        }
-
-        let labels = assemble_labels(graph.n, &vert, &clus)?;
-        Ok((labels, modularity))
+        run(api, &h, graph.n, &src_view, &dst_view, &w_view, params)
     }
+
+    /// [`cluster_with_modularity`](Self::cluster_with_modularity) on a graph that is already
+    /// on the device, as COO arrays of `nnz` int32 sources, int32 destinations and f32
+    /// weights holding both directions of every edge. No copy is made and nothing is
+    /// validated beyond the sizes: the caller guarantees indices below `n`, a symmetric edge
+    /// list and finite, non-negative weights, and that all work writing the arrays has
+    /// finished.
+    ///
+    /// # Safety
+    /// `src`, `dst` and `weights` must be device pointers to at least `nnz` elements of the
+    /// stated types on this instance's device, valid for the duration of the call.
+    pub unsafe fn cluster_device_coo(
+        &self,
+        n: usize,
+        nnz: usize,
+        src: *mut c_void,
+        dst: *mut c_void,
+        weights: *mut c_void,
+        params: &ClusterParams,
+    ) -> Result<(Vec<u32>, f64)> {
+        if !params.resolution.is_finite() || params.resolution < 0.0 {
+            return Err(Error::InvalidParameter(format!("resolution must be finite and non-negative, got {}", params.resolution)));
+        }
+        if n > i32::MAX as usize {
+            return Err(Error::InvalidInput(format!("{n} nodes exceed cuGraph's int32 vertex range")));
+        }
+        if n == 0 {
+            return Ok((Vec::new(), 0.0));
+        }
+        if nnz == 0 {
+            return Ok(((0..n as u32).collect(), 0.0));
+        }
+        let api = api()?;
+        api.set_device(self.device)?;
+        let h = api.create_handle()?;
+        let view = |ptr: *mut c_void, dtype: DType, what: &str| -> Result<View<'_>> {
+            // SAFETY: the caller guarantees `ptr` holds `nnz` elements of `dtype`.
+            let v = unsafe { (api.view_create)(ptr, nnz, dtype) };
+            if v.is_null() {
+                return Err(backend(format!("device array view for {what} is NULL")));
+            }
+            Ok(View { api, ptr: v })
+        };
+        let (src_view, dst_view, w_view) = (view(src, DTYPE_INT32, "src")?, view(dst, DTYPE_INT32, "dst")?, view(weights, DTYPE_FLOAT32, "weights")?);
+        run(api, &h, n, &src_view, &dst_view, &w_view, params)
+    }
+}
+
+/// Builds the cuGraph graph from the edge views and runs Leiden; returns the labels (numbered
+/// as the CPU backend numbers them) and cuGraph's modularity.
+fn run(api: &Api, h: &Handle<'_>, n: usize, src_view: &View<'_>, dst_view: &View<'_>, w_view: &View<'_>, params: &ClusterParams) -> Result<(Vec<u32>, f64)> {
+    let props = GraphProperties { is_symmetric: TRUE, is_multigraph: FALSE };
+    let mut g: Opaque = std::ptr::null_mut();
+    let mut err: Opaque = std::ptr::null_mut();
+    let null = std::ptr::null();
+    let rc = unsafe {
+        match api.graph_create {
+            GraphCreate::Legacy(f) => f(
+                h.ptr, &props, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
+                FALSE, // store_transposed
+                TRUE,  // renumber
+                FALSE, // do_expensive_check
+                &mut g, &mut err,
+            ),
+            GraphCreate::V2408(f) => f(
+                h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
+                FALSE, // store_transposed
+                TRUE,  // renumber
+                FALSE, // drop_self_loops
+                FALSE, // drop_multi_edges
+                FALSE, // do_expensive_check
+                &mut g, &mut err,
+            ),
+            GraphCreate::V2410(f) => f(
+                h.ptr, &props, null, src_view.ptr, dst_view.ptr, w_view.ptr, null, null,
+                FALSE, // store_transposed
+                TRUE,  // renumber
+                FALSE, // drop_self_loops
+                FALSE, // drop_multi_edges
+                FALSE, // symmetrize (both arcs are already present)
+                FALSE, // do_expensive_check
+                &mut g, &mut err,
+            ),
+        }
+    };
+    api.check(rc, err, api.graph_create_name)?;
+    if g.is_null() {
+        return Err(backend("graph handle is NULL"));
+    }
+    let g = Graph { api, ptr: g };
+
+    let mut rng: Opaque = std::ptr::null_mut();
+    let mut err: Opaque = std::ptr::null_mut();
+    let rc = unsafe { (api.rng_state_create)(h.ptr, params.seed, &mut rng, &mut err) };
+    api.check(rc, err, "cugraph_rng_state_create")?;
+    let rng = RngState { api, ptr: rng };
+
+    let mut result: Opaque = std::ptr::null_mut();
+    let mut err: Opaque = std::ptr::null_mut();
+    let rc = unsafe {
+        (api.leiden)(h.ptr, rng.ptr, g.ptr, MAX_LEVEL, params.resolution, 1.0, FALSE, &mut result, &mut err)
+    };
+    api.check(rc, err, "cugraph_leiden")?;
+    if result.is_null() {
+        return Err(backend("cugraph_leiden returned a NULL result"));
+    }
+    let result = ClusteringResult { api, ptr: result };
+
+    let vertices = View { api, ptr: unsafe { (api.result_get_vertices)(result.ptr) } };
+    let clusters = View { api, ptr: unsafe { (api.result_get_clusters)(result.ptr) } };
+    if vertices.ptr.is_null() || clusters.ptr.is_null() {
+        return Err(backend("result vertex/cluster view is NULL"));
+    }
+    let modularity = unsafe { (api.result_get_modularity)(result.ptr) };
+    let vert = api.download_ints(&h, &vertices, "result vertices")?;
+    let clus = api.download_ints(&h, &clusters, "result clusters")?;
+    if vert.len() != clus.len() {
+        return Err(backend(format!("result has {} vertices but {} cluster ids", vert.len(), clus.len())));
+    }
+
+    let labels = assemble_labels(n, &vert, &clus)?;
+    Ok((labels, modularity))
 }
 
 impl Clusterer for CugraphLeiden {
