@@ -179,43 +179,8 @@ fn prefetch<T>(p: *const T) {
     }
 }
 
-/// Uniform negative samples in blocks of LANES from LANES xorshift streams (the per-lane
-/// loops vectorise), drawn two blocks before use so their coordinates can be prefetched.
-struct Negatives {
-    state: [u64; LANES],
-    ahead: [[u32; LANES]; 2],
-    next: usize,
-    n: u64,
-}
-
-impl Negatives {
-    fn new(seed: u64, n: usize, prefetch: impl Fn(usize)) -> Self {
-        let state = std::array::from_fn(|l| seed.wrapping_add(l as u64 * 0xD1B5_4A32_D192_ED03) | 1);
-        let mut s = Negatives { state, ahead: [[0; LANES]; 2], next: 0, n: n as u64 };
-        s.ahead = [s.draw(&prefetch), s.draw(&prefetch)];
-        s
-    }
-
-    #[inline(always)]
-    fn draw(&mut self, prefetch: &impl Fn(usize)) -> [u32; LANES] {
-        let mut q = [0u32; LANES];
-        for (s, q) in self.state.iter_mut().zip(q.iter_mut()) {
-            *q = (((xorshift(s) >> 32) * self.n) >> 32) as u32;
-        }
-        for &q in &q {
-            prefetch(q as usize);
-        }
-        q
-    }
-
-    #[inline(always)]
-    fn next(&mut self, prefetch: impl Fn(usize)) -> [u32; LANES] {
-        let fresh = self.draw(&prefetch);
-        let out = std::mem::replace(&mut self.ahead[self.next], fresh);
-        self.next ^= 1;
-        out
-    }
-}
+/// Negative samples drawn this many draws before they are used.
+const NEG_AHEAD: usize = 16;
 
 #[inline(always)]
 fn clip(g: f32) -> f32 {
@@ -434,8 +399,17 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         let (ep, prev) = (epoch as f32, (epoch - 1) as f32);
         let alpha = p.learning_rate * (1.0 - ep / p.n_epochs as f32);
         tasks.par_iter().enumerate().with_min_len(MIN_TASK_EDGES / CHUNK).for_each(|(c, &(r0, r1))| {
-            let seed = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D);
-            let mut negs = Negatives::new(seed, n, |q| prefetch(&emb[q * DIM]));
+            let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D) | 1;
+            let draw = |rng: &mut u64| {
+                let q = (((xorshift(rng) >> 32) * n as u64) >> 32) as usize;
+                prefetch(&emb[q * DIM]);
+                q
+            };
+            let mut ahead = [0usize; NEG_AHEAD];
+            for q in ahead.iter_mut() {
+                *q = draw(&mut rng);
+            }
+            let mut slot = 0;
             for j in r0..r1 {
                 let (cur, mut delta) = (get(j), [0f32; DIM]);
                 let mut lanes = Lanes::default();
@@ -444,7 +418,6 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     delta[0] += f[0];
                     delta[1] += f[1];
                 };
-                let mut owed = 0;
                 for e in offsets[j]..offsets[j + 1] {
                     let (tail, ie) = edges[e];
                     if (ep * ie).floor() <= (prev * ie).floor() {
@@ -453,23 +426,16 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     if lanes.push(get(tail as usize), true) {
                         add(&mut lanes);
                     }
-                    owed += n_neg;
+                    for _ in 0..n_neg {
+                        let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
+                        slot = (slot + 1) % NEG_AHEAD;
+                        if q != j && lanes.push(get(q), false) {
+                            add(&mut lanes);
+                        }
+                    }
                 }
                 if lanes.m > 0 {
                     add(&mut lanes);
-                }
-                while owed > 0 {
-                    let block = negs.next(|q| prefetch(&emb[q * DIM]));
-                    let take = owed.min(LANES);
-                    for (l, &q) in block[..take].iter().enumerate() {
-                        let o = get(q as usize);
-                        lanes.x[l] = o[0];
-                        lanes.y[l] = o[1];
-                        lanes.w[l] = if q as usize == j { 0.0 } else { 1.0 };
-                    }
-                    lanes.m = take;
-                    add(&mut lanes);
-                    owed -= take;
                 }
                 if delta != [0.0; DIM] {
                     put(j, [cur[0] + alpha * delta[0], cur[1] + alpha * delta[1]]);
