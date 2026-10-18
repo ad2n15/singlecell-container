@@ -9,7 +9,7 @@ name = "scfast"
 description = "Fast single-cell kernels in Rust: implicitly scaled PCA, kNN, SNN and Leiden for Seurat- and Scanpy-style workflows"
 readme = { text = "Python bindings for scfast (docs/RUST_ENGINE.md in https://github.com/mukeshkbj/singlecell).", content-type = "text/plain" }
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = ["numpy>=1.22", "scipy>=1.8"]
 dynamic = ["version"]
 classifiers = [

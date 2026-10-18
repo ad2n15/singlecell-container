@@ -11,7 +11,7 @@ Description: Drop-in replacements for the numerical core of the 'Seurat' workflo
     Leiden clustering (RB objective). Results are standard 'DimReduc' and 'Graph'
     objects and meta data columns, so everything downstream in 'Seurat' works
     unchanged.
-License: MIT + file LICENSE
+License: Apache License (== 2.0)
 URL: https://github.com/mukeshkbj/singlecell
 Encoding: UTF-8
 Depends:
