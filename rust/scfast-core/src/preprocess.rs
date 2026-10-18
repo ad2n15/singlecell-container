@@ -123,39 +123,38 @@ pub struct PreprocessResult<O: OutValue> {
     pub unsorted_row: Option<usize>,
 }
 
+/// Pass-1 sums of one gene, kept together so a stored entry updates one cache line.
+#[derive(Clone, Copy, Default)]
+#[repr(align(64))]
+struct GeneAcc {
+    sum: f64,
+    sumsq: f64,
+    ysum: f64,
+    ysumsq: f64,
+    max: f64,
+    nnz: u64,
+}
+
 /// Per-block accumulators of pass 1.
 struct Acc {
-    sum: Vec<f64>,
-    sumsq: Vec<f64>,
-    ysum: Vec<f64>,
-    ysumsq: Vec<f64>,
-    max: Vec<f64>,
-    nnz: Vec<u64>,
+    genes: Vec<GeneAcc>,
     /// First row whose column indices do not strictly increase.
     unsorted: Option<usize>,
 }
 
 impl Acc {
     fn new(p: usize) -> Self {
-        Self {
-            sum: vec![0.0; p],
-            sumsq: vec![0.0; p],
-            ysum: vec![0.0; p],
-            ysumsq: vec![0.0; p],
-            max: vec![0.0; p],
-            nnz: vec![0; p],
-            unsorted: None,
-        }
+        Self { genes: vec![GeneAcc::default(); p], unsorted: None }
     }
     fn merge(&mut self, b: Acc) {
         self.unsorted = self.unsorted.or(b.unsorted);
-        for j in 0..self.sum.len() {
-            self.sum[j] += b.sum[j];
-            self.sumsq[j] += b.sumsq[j];
-            self.ysum[j] += b.ysum[j];
-            self.ysumsq[j] += b.ysumsq[j];
-            self.max[j] = self.max[j].max(b.max[j]);
-            self.nnz[j] += b.nnz[j];
+        for (a, b) in self.genes.iter_mut().zip(&b.genes) {
+            a.sum += b.sum;
+            a.sumsq += b.sumsq;
+            a.ysum += b.ysum;
+            a.ysumsq += b.ysumsq;
+            a.max = a.max.max(b.max);
+            a.nnz += b.nnz;
         }
     }
 }
@@ -223,13 +222,13 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
     let mut mean = vec![0.0; p];
     let mut variance = vec![0.0; p];
     for j in 0..p {
-        let m = acc.sum[j] / nf;
+        let m = acc.genes[j].sum / nf;
         mean[j] = m;
         if n > 1 {
             // Seurat: sum((x - mu)^2) / (n - 1), zeros included.
-            variance[j] = ((acc.sumsq[j] - acc.sum[j] * m) / (nf - 1.0)).max(0.0);
+            variance[j] = ((acc.genes[j].sumsq - acc.genes[j].sum * m) / (nf - 1.0)).max(0.0);
             // A gene stored in every cell with a single value is constant too.
-            if acc.nnz[j] as usize == n && acc.max[j] * acc.max[j] * nf == acc.sumsq[j] && acc.max[j] * nf == acc.sum[j] {
+            if acc.genes[j].nnz as usize == n && acc.genes[j].max * acc.genes[j].max * nf == acc.genes[j].sumsq && acc.genes[j].max * nf == acc.genes[j].sum {
                 variance[j] = 0.0;
             }
         }
@@ -254,7 +253,7 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         if sd[j] == 0.0 {
             continue;
         }
-        if acc.max[j] > mean[j] + clip * sd[j] {
+        if acc.genes[j].max > mean[j] + clip * sd[j] {
             needs_clip[j] = true;
             any_clip = true;
         } else {
@@ -265,7 +264,7 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         let clipped = pass2(&x, &mean, &sd, &needs_clip, clip, blocks)?;
         for j in 0..p {
             if needs_clip[j] {
-                let zeros = (n as u64 - acc.nnz[j]) as f64;
+                let zeros = (n as u64 - acc.genes[j].nnz) as f64;
                 let z0 = mean[j] / sd[j];
                 variance_standardized[j] = (clipped[j] + zeros * z0 * z0) / (nf - 1.0);
             }
@@ -279,14 +278,14 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b))
     });
     order.truncate(params.n_hvg.min(p));
-    let hvg_mean: Vec<f64> = order.iter().map(|&j| acc.ysum[j as usize] / nf).collect();
+    let hvg_mean: Vec<f64> = order.iter().map(|&j| acc.genes[j as usize].ysum / nf).collect();
     let hvg_sd: Vec<f64> = order
         .iter()
         .zip(&hvg_mean)
         .map(|(&j, &m)| {
             let j = j as usize;
             if n > 1 {
-                ((acc.ysumsq[j] - acc.ysum[j] * m).max(0.0) / (nf - 1.0)).sqrt()
+                ((acc.genes[j].ysumsq - acc.genes[j].ysum * m).max(0.0) / (nf - 1.0)).sqrt()
             } else {
                 0.0
             }
@@ -343,8 +342,9 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
     let (r0, r1) = blocks.range(lo, n);
     let base = x.indptr[r0].to_usize();
     let mut acc = Acc::new(p);
-    // Row stamp per gene to detect duplicate column indices within a row.
-    let mut seen = vec![u32::MAX; p];
+    // Row stamp per gene to find duplicate column indices in rows that are not strictly
+    // increasing (a strictly increasing row has none).
+    let mut seen: Vec<u32> = Vec::new();
     let mut small = [f64::NAN; SMALL_COUNTS];
     for i in r0..r1 {
         let (s, e) = (x.indptr[i].to_usize(), x.indptr[i + 1].to_usize());
@@ -356,24 +356,30 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
         let val = &x.data[s..e];
         let mut lib = 0.0f64;
         let mut prev = None;
+        let mut increasing = true;
         for (j, v) in idx.iter().zip(val) {
             let j = j.to_usize();
-            if acc.unsorted.is_none() && prev.is_some_and(|q| j <= q) {
-                acc.unsorted = Some(i);
-            }
+            increasing &= prev.is_none_or(|q| j > q);
             prev = Some(j);
             if j >= p {
                 return Err(Error::InvalidInput(format!("column index {j} out of range for {p} columns")));
             }
-            if seen[j] == stamp {
-                return Err(Error::InvalidInput(format!("duplicate column index {j} in row {i}; sum duplicates first")));
-            }
-            seen[j] = stamp;
             let v = v.to_f64();
             if !v.is_finite() || v < 0.0 {
                 return Err(Error::InvalidInput(format!("counts must be finite and non-negative; row {i}, column {j} is {v}")));
             }
             lib += v;
+        }
+        if !increasing {
+            acc.unsorted.get_or_insert(i);
+            seen.resize(p, u32::MAX);
+            for j in idx {
+                let j = j.to_usize();
+                if seen[j] == stamp {
+                    return Err(Error::InvalidInput(format!("duplicate column index {j} in row {i}; sum duplicates first")));
+                }
+                seen[j] = stamp;
+            }
         }
         library_size[i - r0] = lib;
         let factor = if lib > 0.0 { scale_factor / lib } else { 0.0 };
@@ -393,14 +399,15 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
                 _ => (v * factor).ln_1p(),
             };
             *o = O::from_f64(y);
-            acc.sum[j] += v;
-            acc.sumsq[j] += v * v;
-            acc.ysum[j] += y;
-            acc.ysumsq[j] += y * y;
-            if v > acc.max[j] {
-                acc.max[j] = v;
+            let g = &mut acc.genes[j];
+            g.sum += v;
+            g.sumsq += v * v;
+            g.ysum += y;
+            g.ysumsq += y * y;
+            if v > g.max {
+                g.max = v;
             }
-            acc.nnz[j] += 1;
+            g.nnz += 1;
         }
     }
     Ok(acc)
