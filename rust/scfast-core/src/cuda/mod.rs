@@ -206,6 +206,74 @@ extern "C" __global__ void ztu(const long long* __restrict__ indptr,
   }
 }
 
+#define POS_INF __int_as_float(0x7f800000)
+#define NEG_INF __int_as_float(0xff800000)
+#define GCH 1536
+
+__device__ __forceinline__ void atomic_min_f(float* a, float v) {
+  int old = __float_as_int(*a);
+  while (v < __int_as_float(old)) {
+    const int seen = atomicCAS((int*)a, old, __float_as_int(v));
+    if (seen == old) break;
+    old = seen;
+  }
+}
+__device__ __forceinline__ void atomic_max_f(float* a, float v) {
+  int old = __float_as_int(*a);
+  while (v > __int_as_float(old)) {
+    const int seen = atomicCAS((int*)a, old, __float_as_int(v));
+    if (seen == old) break;
+    old = seen;
+  }
+}
+
+// Per-gene sum, sum of squares, min, max and count of the stored entries of CSR X, for
+// genes j0 .. j0 + GCH (j0 = blockIdx.y * GCH): each block accumulates a slice of rows in
+// shared memory (one warp per row) and adds it to the global arrays once. Column indices
+// outside 0..p are ignored; mn / mx must start at +inf / -inf, the rest at 0.
+extern "C" __global__ void colstats(const long long* __restrict__ indptr,
+                                    const unsigned int* __restrict__ indices,
+                                    const float* __restrict__ vals,
+                                    int n, int p,
+                                    double* __restrict__ sum, double* __restrict__ sumsq,
+                                    float* __restrict__ mn, float* __restrict__ mx,
+                                    unsigned int* __restrict__ cnt) {
+  __shared__ double s_sum[GCH], s_sq[GCH];
+  __shared__ float s_mn[GCH], s_mx[GCH];
+  __shared__ unsigned int s_cnt[GCH];
+  const int j0 = blockIdx.y * GCH;
+  const int w = min(GCH, p - j0);
+  for (int t = threadIdx.x; t < w; t += blockDim.x) {
+    s_sum[t] = 0.0; s_sq[t] = 0.0; s_mn[t] = POS_INF; s_mx[t] = NEG_INF; s_cnt[t] = 0;
+  }
+  __syncthreads();
+  const int per = (n + gridDim.x - 1) / gridDim.x;
+  const int r1 = min(n, (int)blockIdx.x * per + per);
+  const int lane = threadIdx.x & 31;
+  for (int i = blockIdx.x * per + (threadIdx.x >> 5); i < r1; i += blockDim.x >> 5) {
+    for (long long t = indptr[i] + lane; t < indptr[i + 1]; t += 32) {
+      const unsigned int j = indices[t] - (unsigned int)j0;
+      if (j < (unsigned int)w) {
+        const float v = vals[t];
+        atomicAdd(&s_sum[j], (double)v);
+        atomicAdd(&s_sq[j], (double)v * (double)v);
+        atomic_min_f(&s_mn[j], v);
+        atomic_max_f(&s_mx[j], v);
+        atomicAdd(&s_cnt[j], 1u);
+      }
+    }
+  }
+  __syncthreads();
+  for (int t = threadIdx.x; t < w; t += blockDim.x) {
+    if (s_cnt[t] == 0) continue;
+    atomicAdd(&sum[j0 + t], s_sum[t]);
+    atomicAdd(&sumsq[j0 + t], s_sq[t]);
+    atomic_min_f(&mn[j0 + t], s_mn[t]);
+    atomic_max_f(&mx[j0 + t], s_mx[t]);
+    atomicAdd(&cnt[j0 + t], s_cnt[t]);
+  }
+}
+
 // X^T X for CSR X (cells x genes): g[min(a, b) * p + max(a, b)] += X[i, a] X[i, b] over the
 // pairs of stored entries in each row (one block per row). Only the upper triangle is
 // written; g (genes x genes, f64) must be zeroed first. f64 atomics: the mean correction
@@ -341,6 +409,7 @@ pub(crate) struct Gpu {
     pub ztu: CudaFunction,
     pub ztu_finish: CudaFunction,
     pub xtx: CudaFunction,
+    pub colstats: CudaFunction,
     /// `knn` compiled per (dims, cap).
     knn: Mutex<HashMap<(usize, usize), CudaFunction>>,
     pub ordinal: usize,
@@ -378,7 +447,8 @@ impl Gpu {
         let ztu = f("ztu")?;
         let ztu_finish = f("ztu_finish")?;
         let xtx = f("xtx")?;
-        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, xtx, knn: Mutex::new(HashMap::new()), ordinal })
+        let colstats = f("colstats")?;
+        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, xtx, colstats, knn: Mutex::new(HashMap::new()), ordinal })
     }
 
     /// The `knn` kernel for `d` dims and `cap` candidates, and the reference points per
@@ -458,7 +528,7 @@ mod tests {
     /// Rust side loads is defined, and the compile-time constants agree.
     #[test]
     fn kernel_source_names_every_entry_point() {
-        for name in ["zv", "ztu", "ztu_finish", "xtx"] {
+        for name in ["zv", "ztu", "ztu_finish", "xtx", "colstats"] {
             assert!(KERNELS.contains(&format!("__global__ void {name}(")), "kernel {name} missing");
         }
         assert!(KNN_KERNEL.contains("__global__ void knn("));

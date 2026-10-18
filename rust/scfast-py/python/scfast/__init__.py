@@ -188,7 +188,9 @@ def pca(
         the log-normalised HVG matrix. float32/float64 data with int32/int64 indices is
         read in place (zero copy); other real dtypes are converted to float32 first (a copy).
         Must be canonical (sorted, unique column indices per row); call ``X.sum_duplicates()``
-        if not. Other sparse formats and dense arrays raise ``TypeError``.
+        if not. Other sparse formats and dense arrays raise ``TypeError``. A
+        ``cupyx.scipy.sparse`` CSR matrix stays on its GPU (copied device-to-device, gene
+        statistics computed there; needs a CUDA ``device`` and no CPU fallback).
     n_comps
         Number of components (Seurat ``npcs``).
     seed
@@ -216,6 +218,9 @@ def pca(
         Component standard deviations d / sqrt(cells - 1) (Seurat ``Stdev``).
     """
     requested, resolved = _resolve_device(device)
+    if _on_gpu(X):
+        return _pca_gpu(X, _int("n_comps", n_comps, 1), _seed(seed), bool(scale), _int("oversample", oversample),
+                        _int("power_iters", power_iters), resolved)
     n_rows, n_cols, indptr, indices, data = _csr_parts(X, "X")
     n_comps = _int("n_comps", n_comps, 1)
     if n_rows == 0 or n_cols == 0:
@@ -351,6 +356,27 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
 
 def _on_gpu(a: Any) -> bool:
     return type(a).__module__.split(".")[0] in ("cupy", "cupyx")
+
+
+def _pca_gpu(X: Any, n_comps: int, seed: int, scale: bool, oversample: int, power_iters: int, device: str) -> Any:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    if not csp.isspmatrix_csr(X):
+        raise TypeError(f"X on the GPU must be a cupyx.scipy.sparse CSR matrix, got {type(X).__name__}")
+    n_rows, n_cols = X.shape
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X is empty (shape {(n_rows, n_cols)})")
+    if n_comps > min(n_rows, n_cols):
+        raise ValueError(f"n_comps ({n_comps}) must not exceed min(cells, genes) = {min(n_rows, n_cols)}")
+    if not X.has_canonical_format:
+        X = X.copy()
+        X.sum_duplicates()
+    indptr = X.indptr if X.indptr.dtype in (cp.int32, cp.int64) else X.indptr.astype(cp.int64)
+    indices, data = X.indices.astype(cp.int32, copy=False), X.data.astype(cp.float32, copy=False)
+    cp.cuda.get_current_stream().synchronize()
+    return _scfast.pca_csr_device(n_rows, n_cols, int(data.size), indptr.data.ptr, indptr.dtype == cp.int64,
+                                  indices.data.ptr, data.data.ptr, n_comps, seed, scale, oversample, power_iters, device)
 
 
 def _snn_gpu(idx: Any, prune: float, keep_diagonal: bool) -> Any:

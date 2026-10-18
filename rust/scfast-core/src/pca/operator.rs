@@ -211,12 +211,13 @@ pub(super) struct GeneStats {
     pub constant: Vec<bool>,
 }
 
-struct StatsAcc {
-    sum: Vec<f64>,
-    sumsq: Vec<f64>,
-    min: Vec<f64>,
-    max: Vec<f64>,
-    nnz: Vec<u64>,
+/// Per-gene accumulators of [`gene_stats`] (also filled on the device, `pca/cuda.rs`).
+pub(super) struct StatsAcc {
+    pub sum: Vec<f64>,
+    pub sumsq: Vec<f64>,
+    pub min: Vec<f64>,
+    pub max: Vec<f64>,
+    pub nnz: Vec<u64>,
 }
 
 /// One parallel pass over the CSR: per-gene sum, sum of squares, min/max of stored values and
@@ -271,30 +272,37 @@ pub(super) fn gene_stats<I: Idx, T: Real>(x: &CsrView<'_, I, T>, blocks: Blocks)
             a.nnz[j] += b.nnz[j];
         }
     };
-    let acc = tree_reduce(0, blocks.count, &leaf, &merge)?;
+    tree_reduce(0, blocks.count, &leaf, &merge)?.finish(n)
+}
 
-    let nf = n as f64;
-    let mut mean = vec![0.0; p];
-    let mut sd = vec![0.0; p];
-    let mut constant = vec![false; p];
-    for j in 0..p {
-        if !acc.sum[j].is_finite() || !acc.sumsq[j].is_finite() {
-            return Err(Error::InvalidInput(format!("non-finite values in column {j}")));
+impl StatsAcc {
+    /// Mean, sample sd and the constant flag of each gene over `n` cells.
+    pub(super) fn finish(self, n: usize) -> Result<GeneStats> {
+        let acc = self;
+        let p = acc.sum.len();
+        let nf = n as f64;
+        let mut mean = vec![0.0; p];
+        let mut sd = vec![0.0; p];
+        let mut constant = vec![false; p];
+        for j in 0..p {
+            if !acc.sum[j].is_finite() || !acc.sumsq[j].is_finite() {
+                return Err(Error::InvalidInput(format!("non-finite values in column {j}")));
+            }
+            let all_stored = acc.nnz[j] as usize == n;
+            let is_const = acc.nnz[j] == 0 || (acc.min[j] == acc.max[j] && (all_stored || acc.max[j] == 0.0));
+            if is_const {
+                constant[j] = true;
+                // The exact constant, so the centred column is exactly zero.
+                mean[j] = if all_stored { acc.min[j] } else { 0.0 };
+                continue;
+            }
+            let m = acc.sum[j] / nf;
+            let m2 = (acc.sumsq[j] - acc.sum[j] * m).max(0.0);
+            mean[j] = m;
+            sd[j] = (m2 / (nf - 1.0)).sqrt();
         }
-        let all_stored = acc.nnz[j] as usize == n;
-        let is_const = acc.nnz[j] == 0 || (acc.min[j] == acc.max[j] && (all_stored || acc.max[j] == 0.0));
-        if is_const {
-            constant[j] = true;
-            // The exact constant, so the centred column is exactly zero.
-            mean[j] = if all_stored { acc.min[j] } else { 0.0 };
-            continue;
-        }
-        let m = acc.sum[j] / nf;
-        let m2 = (acc.sumsq[j] - acc.sum[j] * m).max(0.0);
-        mean[j] = m;
-        sd[j] = (m2 / (nf - 1.0)).sqrt();
+        Ok(GeneStats { mean, sd, constant })
     }
-    Ok(GeneStats { mean, sd, constant })
 }
 
 /// `Z = (X - 1 mu^T) diag(inv_sd)`, applied implicitly.

@@ -200,9 +200,8 @@ class ScfastEngine(ScanpyEngine):
     def pca(self, a, cfg):
         import scipy.sparse as sp
 
-        x = a.X.get() if hasattr(a.X, "get") else a.X
-        emb, load, sdev = self.scfast.pca(sp.csr_matrix(x), n_comps=cfg.n_pcs, seed=cfg.seed,
-                                          device=self.scfast_device)
+        x = a.X if self.device == "gpu" else sp.csr_matrix(a.X)  # a CuPy matrix stays on the GPU
+        emb, load, sdev = self.scfast.pca(x, n_comps=cfg.n_pcs, seed=cfg.seed, device=self.scfast_device)
         a.obsm["X_pca"] = emb
         a.varm["PCs"] = load
         a.uns["pca"] = {"variance": (sdev.astype("float64") ** 2)}

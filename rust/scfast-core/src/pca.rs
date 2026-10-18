@@ -132,38 +132,77 @@ pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaPa
 /// is a top-10 PC subspace similarity above 0.99.
 pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaParams, device: Device) -> Result<PcaResult> {
     validate(&x, params)?;
-    let (n, p, k) = (x.n_rows, x.n_cols, params.n_comps);
+    let (n, p) = (x.n_rows, x.n_cols);
     let blocks = Blocks::new(n, p, x.data.len());
-
     let stats = operator::gene_stats(&x, blocks)?;
-    let gene_sd: Vec<f64> = (0..p)
-        .map(|j| if !params.scale || stats.constant[j] || stats.sd[j] == 0.0 { 1.0 } else { stats.sd[j] })
-        .collect();
-    let inv_sd: Vec<f64> = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
-
-    let l = k.saturating_add(params.oversample).min(n.min(p));
-    let (q, ub, d, vb) = match device {
+    let (gene_sd, inv_sd) = scaling(&stats, params);
+    let l = params.n_comps.saturating_add(params.oversample).min(n.min(p));
+    let svd = match device {
         Device::Cpu => {
             let op = ScaledOp::new(x, &stats.mean, &inv_sd, blocks);
             randomized_svd(&op, l, params.power_iters, params.seed)?
         }
         #[cfg(feature = "cuda")]
         Device::Cuda(ordinal) => {
-            let op = cuda::CudaScaledOp::new(x, &stats.mean, &inv_sd, l, ordinal)?;
-            if p <= GRAM_MAX_GENES {
-                gram_svd(&op, l, params.power_iters, params.seed)?
-            } else {
-                randomized_svd(&op, l, params.power_iters, params.seed)?
-            }
+            let op = cuda::CudaScaledOp::new(cuda::CsrDev::upload(&x, ordinal)?, &stats.mean, &inv_sd, l)?;
+            cuda_svd(&op, l, params)?
         }
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => {
             return Err(Error::gpu("scfast was built without CUDA support (feature `cuda`); use Device::Cpu"));
         }
     };
+    Ok(assemble(svd, &stats, gene_sd, n, p, params.n_comps))
+}
 
-    // Sign convention: the largest-magnitude loading of each component is positive (ties go
-    // to the lowest gene index).
+/// [`implicit_scaled_pca_on`] for a CSR matrix that is already on CUDA device `ordinal`
+/// (e.g. a CuPy matrix): the data are copied device-to-device and the gene statistics are
+/// computed there, so nothing of the matrix crosses to the host.
+///
+/// # Safety
+/// The pointers in `x` must be valid device memory as described by [`DeviceCsr`], with all
+/// work writing them finished. The structure is not validated on the device.
+#[cfg(feature = "cuda")]
+pub unsafe fn implicit_scaled_pca_device(x: &DeviceCsr, params: &PcaParams, ordinal: usize) -> Result<PcaResult> {
+    let (n, p) = (x.n, x.p);
+    validate_params(n, p, params)?;
+    let csr = unsafe { cuda::CsrDev::copy_from(x, ordinal)? };
+    let stats = csr.stats()?.finish(n)?;
+    let (gene_sd, inv_sd) = scaling(&stats, params);
+    let l = params.n_comps.saturating_add(params.oversample).min(n.min(p));
+    let op = cuda::CudaScaledOp::new(csr, &stats.mean, &inv_sd, l)?;
+    let svd = cuda_svd(&op, l, params)?;
+    Ok(assemble(svd, &stats, gene_sd, n, p, params.n_comps))
+}
+
+#[cfg(feature = "cuda")]
+pub use cuda::DeviceCsr;
+
+/// Per-gene sd used for scaling (1 when off or constant) and the operator's 1/sd (0 for
+/// constant genes).
+fn scaling(stats: &operator::GeneStats, params: &PcaParams) -> (Vec<f64>, Vec<f64>) {
+    let p = stats.mean.len();
+    let gene_sd: Vec<f64> = (0..p)
+        .map(|j| if !params.scale || stats.constant[j] || stats.sd[j] == 0.0 { 1.0 } else { stats.sd[j] })
+        .collect();
+    let inv_sd = (0..p).map(|j| if stats.constant[j] { 0.0 } else { 1.0 / gene_sd[j] }).collect();
+    (gene_sd, inv_sd)
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_svd(op: &cuda::CudaScaledOp, l: usize, params: &PcaParams) -> Result<Svd> {
+    if op.ncols() <= GRAM_MAX_GENES {
+        gram_svd(op, l, params.power_iters, params.seed)
+    } else {
+        randomized_svd(op, l, params.power_iters, params.seed)
+    }
+}
+
+/// (Q, U_B, singular values, V_B) of [`randomized_svd`]: the operator is Q B with B^T = U_B S V_B^T.
+type Svd = (faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>);
+
+/// Signs, loadings, embeddings and standard deviations from the SVD factors.
+fn assemble((q, ub, d, vb): Svd, stats: &operator::GeneStats, gene_sd: Vec<f64>, n: usize, p: usize, k: usize) -> PcaResult {
     let signs: Vec<f64> = (0..k)
         .map(|c| {
             let col = ub.col(c);
@@ -187,13 +226,13 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
     }
     let embeddings = embed(q.as_ref(), vb.as_ref(), &d, &signs, k);
     let denom = ((n - 1) as f64).sqrt();
-    Ok(PcaResult {
+    PcaResult {
         embeddings,
         loadings,
         stdev: d[..k].iter().map(|s| (s / denom) as f32).collect(),
         gene_mean: stats.mean.iter().map(|&m| m as f32).collect(),
         gene_sd: gene_sd.iter().map(|&s| s as f32).collect(),
-    })
+    }
 }
 
 fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Result<()> {
@@ -212,6 +251,10 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
     if x.indptr[0].to_usize() != 0 || x.indptr[n].to_usize() != x.data.len() {
         return Err(Error::InvalidInput("indptr must start at 0 and end at nnz".into()));
     }
+    validate_params(n, p, params)
+}
+
+fn validate_params(n: usize, p: usize, params: &PcaParams) -> Result<()> {
     if params.n_comps == 0 {
         return Err(Error::InvalidParameter("n_comps must be at least 1".into()));
     }
@@ -231,12 +274,7 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
 
 /// Randomised SVD of the implicit operator. Returns (Q: n x l orthonormal, U_b: p x l,
 /// d: l singular values, V_b: l x l) with `Z ≈ (Q V_b) diag(d) U_b^T`.
-fn randomized_svd<O: Operator>(
-    op: &O,
-    l: usize,
-    power_iters: usize,
-    seed: u64,
-) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
+fn randomized_svd<O: Operator>(op: &O, l: usize, power_iters: usize, seed: u64) -> Result<Svd> {
     let (n, p) = (op.nrows(), op.ncols());
     let omega = dense::gaussian(p, l, seed);
     let mut q = faer::Mat::<f64>::zeros(n, l);
@@ -268,12 +306,7 @@ const GRAM_MAX_GENES: usize = 8192;
 /// one `apply` for the cell scores. Avoids 2 (power_iters + 1) cells x l round trips and
 /// their host QR factorisations. Returns (U, V, S, I) so that `embed` gives Z V.
 #[cfg(feature = "cuda")]
-fn gram_svd(
-    op: &cuda::CudaScaledOp,
-    l: usize,
-    power_iters: usize,
-    seed: u64,
-) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
+fn gram_svd(op: &cuda::CudaScaledOp, l: usize, power_iters: usize, seed: u64) -> Result<Svd> {
     let g = op.gram()?;
     let (n, p) = (op.nrows(), op.ncols());
     let mut v = dense::gaussian(p, l, seed);

@@ -17,7 +17,7 @@ use faer::Mat;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use scfast_core::knn::{knn, knn_on, KnnMethod, KnnParams};
-use scfast_core::pca::{implicit_scaled_pca, implicit_scaled_pca_on, PcaParams};
+use scfast_core::pca::{implicit_scaled_pca, implicit_scaled_pca_device, implicit_scaled_pca_on, DeviceCsr, PcaParams};
 use scfast_core::{device_info, CsrView, Device, Error, RowMajor};
 
 const GPU_SKIP: &str = "needs a CUDA device (run on the L4 with `cargo test --features cuda -- --ignored`)";
@@ -256,4 +256,32 @@ fn gpu_auto_resolves_to_cuda_and_parse_accepts_ordinals() {
     assert!(matches!(Device::parse("cuda:99"), Err(Error::Gpu(_))));
     assert!(info.device_name.is_some());
     assert!(info.free_gb().unwrap_or(0.0) > 0.0);
+}
+
+#[test]
+#[ignore = "needs a CUDA device (run on the L4 with `cargo test --features cuda -- --ignored`)"]
+fn gpu_pca_from_device_memory_matches_host_input() {
+    use cudarc::driver::{CudaContext, DevicePtr};
+    let info = device_info();
+    assert!(info.cuda_available, "{GPU_SKIP}: {}", info.cuda_error.as_deref().unwrap_or("?"));
+    let x = structured(20_000, 2000, 6, 3);
+    let pr = PcaParams { n_comps: 30, ..Default::default() };
+    let host = implicit_scaled_pca_on(x.view(), &pr, Device::Cuda(0)).unwrap();
+    let stream = CudaContext::new(0).unwrap().default_stream();
+    let ip = stream.clone_htod(&x.indptr.iter().map(|&v| v as i32).collect::<Vec<i32>>()).unwrap();
+    let ix = stream.clone_htod(&x.indices).unwrap();
+    let dx = stream.clone_htod(&x.data.iter().map(|&v| v as f32).collect::<Vec<f32>>()).unwrap();
+    stream.synchronize().unwrap();
+    let ((ip_p, _a), (ix_p, _b), (dx_p, _c)) = (ip.device_ptr(&stream), ix.device_ptr(&stream), dx.device_ptr(&stream));
+    let dev = DeviceCsr { n: x.n, p: x.p, nnz: x.data.len(), indptr: ip_p, indptr_i64: false, indices: ix_p, data: dx_p };
+    // SAFETY: the three buffers above hold the CSR and outlive the call.
+    let gpu = unsafe { implicit_scaled_pca_device(&dev, &pr, 0) }.unwrap();
+    let sim = subspace_similarity(&mat(&host.embeddings), &mat(&gpu.embeddings), 10);
+    assert!(sim > 0.999, "top-10 subspace similarity {sim}");
+    for (a, b) in host.stdev.iter().zip(&gpu.stdev).take(10) {
+        assert!((a - b).abs() <= 1e-3 * a.abs(), "stdev {a} vs {b}");
+    }
+    for (a, b) in host.gene_mean.iter().zip(&gpu.gene_mean) {
+        assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "gene mean {a} vs {b}");
+    }
 }

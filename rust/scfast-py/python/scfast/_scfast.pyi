@@ -44,6 +44,24 @@ def pca_csr(
     Returns (embeddings (n_rows, k), loadings (n_cols, k), stdev (k,)), all float32.
     """
 
+def pca_csr_device(
+    n_rows: int,
+    n_cols: int,
+    nnz: int,
+    indptr: int,
+    indptr_i64: bool,
+    indices: int,
+    data: int,
+    n_comps: int,
+    seed: int,
+    scale: bool,
+    oversample: int,
+    power_iters: int,
+    device: str,
+    /,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    """pca_csr for a canonical CSR matrix already on the GPU (device pointers)."""
+
 def csr_view_info(
     n_rows: int,
     n_cols: int,
