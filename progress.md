@@ -138,6 +138,7 @@ Result, base e290045 -> da3c506, same container each (s, median of warm reps):
 |---|---|---|---|---|
 | Milan (e290045 vs 8384569, before the last 3 wins) | 1.28 -> 0.70 | 1.75 -> 0.96 | 8.2 -> 4.2 | 20.2 -> 11.5 |
 | Intel Xeon (final da3c506) | 1.57 -> 0.62 | 2.5 -> 0.86 | 15.0 -> 4.6 | 50.1 -> 12.2 |
+| AMD Genoa (final da3c506) | 1.00 -> 0.47 | 1.49 -> 0.66 | 7.2 -> 2.7 | 19.5 -> 7.1 (cold 24.5 -> 7.6) |
 Later wins on Genoa/Milan, each vs its parent: 32 lanes 8.5 -> 7.75 s, lane count in a register +
 rng streams 7.6 -> 7.15 s, branch-free due packing 7.95 -> 6.6 s (1.29M). Cold first call at 1.29M
 (fresh process): Milan 27.3 -> 11.6 s (fuzzy set 6 s -> 0.4-0.6 s). Mac M-series 12 threads (loaded
