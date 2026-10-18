@@ -72,12 +72,12 @@ footer { color: var(--text-muted); font-size: 12px; }
 <main>
   <header>
     <h1>1.29 million cells, clustered and embedded in <span id="hero-gpu"></span> seconds</h1>
-    <p>scfast is a Rust + CUDA engine for the core single-cell workflow (normalise, variable genes, PCA, neighbours, Leiden, UMAP) that reproduces Seurat's results. Real 10x data; every engine on the same machines.</p>
+    <p>scfast is a Rust + CUDA engine for the core single-cell workflow (normalise, variable genes, PCA, neighbours, Leiden, UMAP) that reproduces Seurat's results. Real 10x data; every engine on the same size of machine.</p>
   </header>
 
   <section class="hero">
     <div class="card stat"><div class="value" id="s1"></div><div class="label"><span class="swatch" style="background:var(--gpu)"></span>scfast GPU (one H100) on 1.29M mouse brain cells, normalise → UMAP</div></div>
-    <div class="card stat"><div class="value" id="s2"></div><div class="label"><span class="swatch" style="background:var(--cpu)"></span>scfast CPU (16 cores) vs Seurat on 100k cells, same machine</div></div>
+    <div class="card stat"><div class="value" id="s2"></div><div class="label"><span class="swatch" style="background:var(--cpu)"></span>scfast CPU vs Seurat on 100k mouse brain cells, both on 16 cores</div></div>
     <div class="card stat"><div class="value" id="s3"></div><div class="label">less memory than Scanpy at 1.29M cells (scfast CPU <span id="m1"></span> GB vs <span id="m2"></span> GB)</div></div>
   </section>
 
@@ -89,7 +89,7 @@ footer { color: var(--text-muted); font-size: 12px; }
   </section>
 
   <section class="card">
-    <h2>CPU only: same 16-core machine, compute time</h2>
+    <h2>CPU only: 16 cores each, compute time</h2>
     <p class="sub">Each panel on its own linear scale; the label shows how many times faster scfast is than Seurat.</p>
     <div class="grid3" id="cpu-panels"></div>
   </section>
