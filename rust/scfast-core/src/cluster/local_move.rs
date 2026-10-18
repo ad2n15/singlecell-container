@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
-use single_clustering::community_search::leiden::NeighborWeights;
 use single_clustering::network::CSRNetwork;
 
 /// single-clustering's improvement floor, relative to the total edge weight.
@@ -39,7 +38,79 @@ const ROUNDING_MARGIN: f64 = 1e-9;
 const EMPTY: u32 = u32::MAX;
 
 thread_local! {
-    static WEIGHTS: RefCell<NeighborWeights> = RefCell::new(NeighborWeights::with_capacity(0));
+    static WEIGHTS: RefCell<NeighborWeights> = RefCell::new(NeighborWeights::default());
+}
+
+/// Edge weight from one node to each community among its neighbours, in a small
+/// open-addressing table sized to the node's degree. single-clustering's accumulator is a
+/// dense array over all communities (16 bytes each), which at 1M+ nodes no longer fits in
+/// cache once every thread has one. Communities come back in first-touch order and each
+/// weight is summed in neighbour order, as there, so the sums are bit-identical.
+#[derive(Default)]
+struct NeighborWeights {
+    keys: Vec<u32>,
+    weights: Vec<f64>,
+    /// (community, table slot), first-touch order
+    touched: Vec<(u32, u32)>,
+    mask: usize,
+}
+
+impl NeighborWeights {
+    const FREE: u32 = u32::MAX;
+
+    fn collect(&mut self, graph: &CSRNetwork, membership: &[u32], v: usize) {
+        for &(_, slot) in &self.touched {
+            self.keys[slot as usize] = Self::FREE;
+        }
+        self.touched.clear();
+        let want = (2 * graph.degree(v)).next_power_of_two().max(16);
+        if self.keys.len() < want {
+            self.keys = vec![Self::FREE; want];
+            self.weights = vec![0.0; want];
+        }
+        self.mask = self.keys.len() - 1;
+        for (u, w) in graph.neighbors(v) {
+            if u == v {
+                continue;
+            }
+            let c = membership[u];
+            let mut slot = Self::hash(c) & self.mask;
+            loop {
+                let k = self.keys[slot];
+                if k == c {
+                    self.weights[slot] += w;
+                    break;
+                }
+                if k == Self::FREE {
+                    self.keys[slot] = c;
+                    self.weights[slot] = w;
+                    self.touched.push((c, slot as u32));
+                    break;
+                }
+                slot = (slot + 1) & self.mask;
+            }
+        }
+    }
+
+    #[inline]
+    fn hash(c: u32) -> usize {
+        (c.wrapping_mul(0x9E37_79B1) >> 7) as usize
+    }
+
+    /// Weight to community `c` from the last collected node, 0 if none.
+    fn weight_to(&self, c: u32) -> f64 {
+        let mut slot = Self::hash(c) & self.mask;
+        loop {
+            let k = self.keys[slot];
+            if k == c {
+                return self.weights[slot];
+            }
+            if k == Self::FREE {
+                return 0.0;
+            }
+            slot = (slot + 1) & self.mask;
+        }
+    }
 }
 
 /// Moves nodes of `graph` between the communities of `start` (community of each node) until
@@ -92,29 +163,28 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &[usize], resolution: f64, r
             .map(|&v| {
                 let v = v as usize;
                 WEIGHTS.with_borrow_mut(|nw| {
-                    nw.ensure_capacity(slots);
                     nw.collect(graph, &membership, v);
                     let (kv, sl) = (strength[v], self_loop[v]);
                     let old = membership[v];
-                    let w_old = nw.weight_to(old as usize);
+                    let w_old = nw.weight_to(old);
                     let base = gain(w_old, kv, sl, kc[old as usize] - kv);
-                    let (mut best, mut best_gain) = (old, base);
-                    for &c in nw.touched() {
-                        if c as u32 == old {
+                    let (mut best, mut best_gain, mut w_best) = (old, base, w_old);
+                    for &(c, slot) in &nw.touched {
+                        if c == old {
                             continue;
                         }
-                        let g = gain(nw.weight_to(c), kv, sl, kc[c]);
-                        if g > best_gain || (g == best_gain && (c as u32) < best) {
-                            (best, best_gain) = (c as u32, g);
+                        let w = nw.weights[slot as usize];
+                        let g = gain(w, kv, sl, kc[c as usize]);
+                        if g > best_gain || (g == best_gain && c < best) {
+                            (best, best_gain, w_best) = (c, g, w);
                         }
                     }
                     if size[old as usize] > 1 {
                         let g = gain(0.0, kv, sl, 0.0);
                         if g > best_gain {
-                            (best, best_gain) = (EMPTY, g);
+                            (best, best_gain, w_best) = (EMPTY, g, 0.0);
                         }
                     }
-                    let w_best = if best == EMPTY { 0.0 } else { nw.weight_to(best as usize) };
                     (best != old && best_gain - base > threshold).then_some((best, w_old, w_best))
                 })
             })
