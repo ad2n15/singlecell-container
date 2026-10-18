@@ -521,16 +521,19 @@ mod tests {
             }
         }
         let init: Vec<f32> = pts.iter().flat_map(|p| [p[1], p[0]]).collect();
-        let p = UmapParams { a: 0.583, b: 1.334, n_epochs: 200, negative_sample_rate: 5, learning_rate: 1.0, seed: 0 };
-        let e = optimize_layout(&g, &init, &p).unwrap();
-        let centre = |r: std::ops::Range<usize>| {
-            let m = r.len() as f32;
-            r.fold([0f32; 2], |acc, i| [acc[0] + e[2 * i] / m, acc[1] + e[2 * i + 1] / m])
-        };
-        let (c0, c1) = (centre(0..n / 2), centre(n / 2..n));
-        let d = |i: usize, c: [f32; 2]| (e[2 * i] - c[0]).powi(2) + (e[2 * i + 1] - c[1]).powi(2);
-        assert!(e.iter().all(|v| v.is_finite()));
-        let wrong = (0..n).filter(|&i| (i < n / 2) != (d(i, c0) < d(i, c1))).count();
-        assert_eq!(wrong, 0, "{wrong} cells lie nearer the other blob's centre");
+        for seed in 0..3 {
+            let p = UmapParams { a: 0.583, b: 1.334, n_epochs: 200, negative_sample_rate: 5, learning_rate: 1.0, seed };
+            let e = optimize_layout(&g, &init, &p).unwrap();
+            assert!(e.iter().all(|v| v.is_finite()));
+            // Each cell's 10 nearest cells in the layout come from its own blob. (A blob may
+            // stretch or split, so distance to the blob centres is not a stable criterion.)
+            let d = |i: usize, j: usize| (e[2 * i] - e[2 * j]).powi(2) + (e[2 * i + 1] - e[2 * j + 1]).powi(2);
+            let mixed = (0..n).filter(|&i| {
+                let mut o: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+                o.sort_by(|&x, &y| d(i, x).total_cmp(&d(i, y)));
+                o[..10].iter().any(|&j| (j < n / 2) != (i < n / 2))
+            }).count();
+            assert_eq!(mixed, 0, "seed {seed}: {mixed} cells have a neighbour from the other blob");
+        }
     }
 }
