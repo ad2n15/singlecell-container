@@ -139,27 +139,76 @@ fn cross(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
     c
 }
 
+/// Rows per chunk of the fused Gram-Schmidt passes: small enough that a chunk of the
+/// basis (1024 x up to 240 f64, 2 MB) is still in cache for its second product.
+const BCGS_ROWS: usize = 1024;
+
 /// Replace `y` by an orthonormal basis of the part of range(`y`) orthogonal to range(`q`)
 /// (`q` with orthonormal columns): block classical Gram-Schmidt run twice (BCGS2), each
-/// pass projecting out `q` and orthonormalising the block (CholeskyQR, TSQR fallback).
-/// `qty` is `q^T y` for the first pass, when the caller has it more cheaply than a pass
-/// over `q`. When `y` lies in range(`q`), the result is still orthonormal and orthogonal
-/// to `q`, spanning round-off directions.
+/// pass projecting out `q` and orthonormalising the block by CholeskyQR. `qty` is `q^T y`
+/// for the first pass, when the caller has it more cheaply than a pass over `q`.
+///
+/// The passes are fused so `q` is read twice: (1) `y -= q qty`, accumulating `y^T y = L0
+/// L0^T` and `q^T y`; (2) `y <- y L0^{-T} - q (q^T y L0^{-T})`, accumulating its Gram
+/// matrix `L1 L1^T`; (3) `y <- y L1^{-T}`. When a Gram matrix is too ill-conditioned for
+/// Cholesky, Householder QR takes over that step. When `y` lies in range(`q`), the
+/// result is still orthonormal and orthogonal to `q`, spanning round-off directions.
 pub(super) fn orthonormalize_against(q: MatRef<'_, f64>, mut y: MatMut<'_, f64>, qty: Mat<f64>) {
-    let mut c = qty;
-    for pass in 0..2 {
-        if pass > 0 {
-            c = cross(q, y.rb());
-        }
-        y.rb_mut().par_row_chunks_mut(TSQR_ROWS).zip(q.par_row_chunks(TSQR_ROWS)).for_each(|(yc, qc)| {
-            matmul(yc, Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
-        });
-        // One CholeskyQR round per pass: the second pass starts from a nearly orthonormal
-        // block and restores orthogonality to working precision.
-        if !cholesky_qr(y.rb_mut()) {
-            orthonormalize_chunked(y.rb_mut(), TSQR_ROWS);
-        }
+    let b = y.ncols();
+    let parts: Vec<(Mat<f64>, Mat<f64>)> = y
+        .rb_mut()
+        .par_row_chunks_mut(BCGS_ROWS)
+        .zip(q.par_row_chunks(BCGS_ROWS))
+        .map(|(mut yc, qc)| {
+            matmul(yc.rb_mut(), Accum::Add, qc, qty.as_ref(), -1.0, Par::Seq);
+            (mul_tn(yc.rb(), yc.rb()), mul_tn(qc, yc.rb()))
+        })
+        .collect();
+    let (mut g, mut qtr) = (Mat::<f64>::zeros(b, b), Mat::<f64>::zeros(q.ncols(), b));
+    for (pg, pq) in &parts {
+        g += pg;
+        qtr += pq;
     }
+    let second = match cholesky_inverse_t(g) {
+        Some(inv_t) => {
+            let c = mul(qtr.as_ref(), inv_t.as_ref());
+            let parts: Vec<Mat<f64>> = y
+                .rb_mut()
+                .par_row_chunks_mut(BCGS_ROWS)
+                .zip(q.par_row_chunks(BCGS_ROWS))
+                .map(|(mut yc, qc)| {
+                    let mut t = mul(yc.rb(), inv_t.as_ref());
+                    matmul(t.as_mut(), Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
+                    yc.copy_from(&t);
+                    mul_tn(t.as_ref(), t.as_ref())
+                })
+                .collect();
+            let mut g = Mat::<f64>::zeros(b, b);
+            for pg in &parts {
+                g += pg;
+            }
+            g
+        }
+        None => {
+            orthonormalize_chunked(y.rb_mut(), TSQR_ROWS);
+            let c = cross(q, y.rb());
+            y.rb_mut().par_row_chunks_mut(BCGS_ROWS).zip(q.par_row_chunks(BCGS_ROWS)).for_each(|(yc, qc)| {
+                matmul(yc, Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
+            });
+            cross(y.rb(), y.rb())
+        }
+    };
+    match cholesky_inverse_t(second) {
+        Some(inv_t) => right_multiply(y, inv_t.as_ref()),
+        None => orthonormalize_chunked(y, TSQR_ROWS),
+    }
+}
+
+/// `a b`, sequential (small matrices).
+pub(super) fn mul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+    let mut c = Mat::<f64>::zeros(a.nrows(), b.ncols());
+    matmul(c.as_mut(), Accum::Replace, a, b, 1.0, Par::Seq);
+    c
 }
 
 /// `a^T b`, sequential (small matrices).
@@ -169,33 +218,45 @@ pub(super) fn mul_tn(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
     c
 }
 
-/// Smallest accepted `min(diag L) / max(diag L)` in `cholesky_qr`: a condition number up to
-/// about 1e6, so the first round leaves an orthogonality error near `1e12 eps` that the
-/// second round removes.
+/// `a <- a m` over fixed row chunks in parallel.
+fn right_multiply(a: MatMut<'_, f64>, m: MatRef<'_, f64>) {
+    a.par_row_chunks_mut(BCGS_ROWS).for_each(|mut c| {
+        let t = mul(c.rb(), m);
+        c.copy_from(&t);
+    });
+}
+
+/// Smallest accepted `min(diag L) / max(diag L)` in `cholesky_inverse_t`: a condition
+/// number up to about 1e6, so one CholeskyQR round leaves an orthogonality error near
+/// `1e12 eps` that the next round removes.
 const CHOL_MIN_PIVOT_RATIO: f64 = 1e-6;
 
-/// One CholeskyQR round, `a <- a L^{-T}` with `a^T a = L L^T`; `false`, with `a`
-/// unchanged, when `a^T a` is not safely positive definite.
-fn cholesky_qr(a: MatMut<'_, f64>) -> bool {
-    let l = a.ncols();
-    let mut g = cross(a.rb(), a.rb());
+/// `L^{-T}` for the Cholesky factor of a Gram matrix `g = L L^T` (so `a L^{-T}` has
+/// orthonormal columns when `g = a^T a`); `None` when `g` is not safely positive definite.
+fn cholesky_inverse_t(mut g: Mat<f64>) -> Option<Mat<f64>> {
+    let l = g.nrows();
     let mut mem = MemBuffer::new(cholesky_in_place_scratch::<f64>(l, Par::Seq, Default::default()));
-    if cholesky_in_place(g.as_mut(), Default::default(), Par::Seq, MemStack::new(&mut mem), Default::default()).is_err() {
-        return false;
-    }
+    cholesky_in_place(g.as_mut(), Default::default(), Par::Seq, MemStack::new(&mut mem), Default::default()).ok()?;
     let (lo, hi) = (0..l).fold((f64::INFINITY, 0.0f64), |(lo, hi), i| (lo.min(g[(i, i)]), hi.max(g[(i, i)])));
     if !(lo > CHOL_MIN_PIVOT_RATIO * hi) {
-        return false;
+        return None;
     }
     let lower = Mat::from_fn(l, l, |i, j| if i >= j { g[(i, j)] } else { 0.0 });
     let mut inv = Mat::<f64>::zeros(l, l);
     invert_lower_triangular(inv.as_mut(), lower.as_ref(), Par::Seq);
-    a.par_row_chunks_mut(TSQR_ROWS).for_each(|mut c| {
-        let mut t = Mat::<f64>::zeros(c.nrows(), l);
-        matmul(t.as_mut(), Accum::Replace, c.rb(), inv.transpose(), 1.0, Par::Seq);
-        c.copy_from(&t);
-    });
-    true
+    Some(inv.transpose().to_owned())
+}
+
+/// One CholeskyQR round, `a <- a L^{-T}` with `a^T a = L L^T`; `false`, with `a`
+/// unchanged, when `a^T a` is not safely positive definite.
+fn cholesky_qr(a: MatMut<'_, f64>) -> bool {
+    match cholesky_inverse_t(cross(a.rb(), a.rb())) {
+        Some(inv_t) => {
+            right_multiply(a, inv_t.as_ref());
+            true
+        }
+        None => false,
+    }
 }
 
 /// Thin SVD `a = U diag(s) V^T` (a: m x n), singular values in non-increasing order.
