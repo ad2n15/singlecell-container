@@ -189,53 +189,47 @@ fn clip(g: f32) -> f32 {
 
 const LANES: usize = 32;
 
-/// Up to LANES pending samples of one head cell: the other cell's position and the weight of
-/// its step (2 for a graph edge, whose attraction is doubled for head-only updates; 1 for a
-/// negative sample, which repels; 0 for an empty lane).
+/// Pending samples of one head cell: the other cell's position and the weight of its step (2
+/// for a graph edge, whose attraction is doubled for head-only updates; 1 for a negative
+/// sample, which repels; 0 for an empty lane). The count of used lanes is kept by the caller,
+/// in a register.
 #[derive(Default)]
 struct Lanes {
     x: [f32; LANES],
     y: [f32; LANES],
     w: [f32; LANES],
-    m: usize,
 }
 
 impl Lanes {
-    /// Adds a sample; true when the lanes are full.
     #[inline(always)]
-    fn push(&mut self, o: [f32; 2], attract: bool) -> bool {
-        self.x[self.m] = o[0];
-        self.y[self.m] = o[1];
-        self.w[self.m] = if attract { 2.0 } else { 1.0 };
-        self.m += 1;
-        self.m == LANES
+    fn set(&mut self, l: usize, o: [f32; 2], w: f32) {
+        (self.x[l], self.y[l], self.w[l]) = (o[0], o[1], w);
     }
 
-    /// The summed clipped gradient steps at `cur` (umap-learn's formulas); empties the lanes.
+    /// The summed clipped gradient steps at `cur` of the first `m` lanes (umap-learn's formulas).
     #[inline(always)]
-    fn forces(&mut self, cur: [f32; 2], a: f32, b: f32, avx2: bool) -> [f32; 2] {
-        for l in self.m..self.m.next_multiple_of(8) {
-            (self.x[l], self.y[l], self.w[l]) = (0.0, 0.0, 0.0);
+    fn forces(&mut self, m: usize, cur: [f32; 2], a: f32, b: f32, avx2: bool) -> [f32; 2] {
+        for l in m..m.next_multiple_of(8) {
+            self.set(l, [0.0, 0.0], 0.0);
         }
         #[cfg(target_arch = "x86_64")]
         let f = if avx2 {
             // SAFETY: avx2 is true only when use_avx2() detected AVX2 and FMA.
-            unsafe { forces_avx2(self, cur, a, b) }
+            unsafe { forces_avx2(self, m, cur, a, b) }
         } else {
-            self.forces_scalar(cur, a, b)
+            self.forces_scalar(m, cur, a, b)
         };
         #[cfg(not(target_arch = "x86_64"))]
         let f = {
             let _ = avx2;
-            self.forces_scalar(cur, a, b)
+            self.forces_scalar(m, cur, a, b)
         };
-        self.m = 0;
         f
     }
 
-    fn forces_scalar(&self, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+    fn forces_scalar(&self, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
         let mut f = [0f32; 2];
-        for q in 0..self.m {
+        for q in 0..m {
             let dx = [cur[0] - self.x[q], cur[1] - self.y[q]];
             let d2 = dx[0] * dx[0] + dx[1] * dx[1];
             let w = self.w[q];
@@ -276,12 +270,12 @@ fn use_avx2() -> bool {
 /// chains overlap.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn forces_avx2(l: &Lanes, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+unsafe fn forces_avx2(l: &Lanes, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
     use std::arch::x86_64::*;
     let c = _mm256_set1_ps;
     let ci = _mm256_set1_epi32;
     let (mut sx, mut sy) = (_mm256_setzero_ps(), _mm256_setzero_ps());
-    for o in (0..l.m).step_by(8) {
+    for o in (0..m).step_by(8) {
         let (x, y, w) = (_mm256_loadu_ps(l.x[o..].as_ptr()), _mm256_loadu_ps(l.y[o..].as_ptr()), _mm256_loadu_ps(l.w[o..].as_ptr()));
         let (dx, dy) = (_mm256_sub_ps(c(cur[0]), x), _mm256_sub_ps(c(cur[1]), y));
         let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
@@ -409,43 +403,49 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         let (ep, prev) = (epoch as f32, (epoch - 1) as f32);
         let alpha = p.learning_rate * (1.0 - ep / p.n_epochs as f32);
         tasks.par_iter().enumerate().with_min_len(MIN_TASK_EDGES / CHUNK).for_each(|(c, &(r0, r1))| {
-            let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D) | 1;
+            let seed = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D);
+            // One xorshift stream per ring slot, so consecutive draws do not wait on each other.
+            let mut rngs: [u64; NEG_AHEAD] = std::array::from_fn(|s| seed.wrapping_add(s as u64 * 0xD1B5_4A32_D192_ED03) | 1);
             let draw = |rng: &mut u64| {
                 let q = (((xorshift(rng) >> 32) * n as u64) >> 32) as usize;
                 prefetch(&emb[q * DIM]);
                 q
             };
-            let mut ahead = [0usize; NEG_AHEAD];
-            for q in ahead.iter_mut() {
-                *q = draw(&mut rng);
-            }
+            let mut ahead: [usize; NEG_AHEAD] = std::array::from_fn(|s| draw(&mut rngs[s]));
             let mut slot = 0;
+            let mut lanes = Lanes::default();
             for j in r0..r1 {
-                let (cur, mut delta) = (get(j), [0f32; DIM]);
-                let mut lanes = Lanes::default();
-                let mut add = |lanes: &mut Lanes| {
-                    let f = lanes.forces(cur, a, b, avx2);
+                let (cur, mut delta, mut m) = (get(j), [0f32; DIM], 0);
+                let mut add = |lanes: &mut Lanes, m: &mut usize| {
+                    let f = lanes.forces(*m, cur, a, b, avx2);
                     delta[0] += f[0];
                     delta[1] += f[1];
+                    *m = 0;
                 };
                 for e in offsets[j]..offsets[j + 1] {
                     let (tail, ie) = edges[e];
                     if (ep * ie).floor() <= (prev * ie).floor() {
                         continue;
                     }
-                    if lanes.push(get(tail as usize), true) {
-                        add(&mut lanes);
+                    lanes.set(m, get(tail as usize), 2.0);
+                    m += 1;
+                    if m == LANES {
+                        add(&mut lanes, &mut m);
                     }
                     for _ in 0..n_neg {
-                        let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
+                        let q = std::mem::replace(&mut ahead[slot], draw(&mut rngs[slot]));
                         slot = (slot + 1) % NEG_AHEAD;
-                        if q != j && lanes.push(get(q), false) {
-                            add(&mut lanes);
+                        if q != j {
+                            lanes.set(m, get(q), 1.0);
+                            m += 1;
+                            if m == LANES {
+                                add(&mut lanes, &mut m);
+                            }
                         }
                     }
                 }
-                if lanes.m > 0 {
-                    add(&mut lanes);
+                if m > 0 {
+                    add(&mut lanes, &mut m);
                 }
                 if delta != [0.0; DIM] {
                     put(j, [cur[0] + alpha * delta[0], cur[1] + alpha * delta[1]]);
@@ -488,10 +488,10 @@ mod tests {
                 for q in 0..m {
                     // Some samples sit on the head itself (d2 = 0) or very close to it.
                     let o = match q % 4 { 0 => cur, 1 => [cur[0] + 1e-4, cur[1]], _ => [u(), u()] };
-                    l.push(o, q % 3 == 0);
+                    l.set(q, o, if q % 3 == 0 { 2.0 } else { 1.0 });
                 }
-                let want = l.forces_scalar(cur, a, b);
-                let got = unsafe { forces_avx2(&l, cur, a, b) };
+                let want = l.forces_scalar(m, cur, a, b);
+                let got = unsafe { forces_avx2(&l, m, cur, a, b) };
                 for d in 0..2 {
                     assert!((got[d] - want[d]).abs() <= 1e-4 * (1.0 + want[d].abs()), "{got:?} vs {want:?}");
                 }
