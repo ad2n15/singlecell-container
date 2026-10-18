@@ -122,7 +122,7 @@ const D = {
     { name: "Scanpy, 16 cores", s: 1161.6, kind: "ref" },
     { name: "rapids-singlecell, H100", s: null, kind: "ref", note: "out of GPU memory (80 GB)" },
     { name: "scfast CPU, 16 cores", s: 23.7, kind: "cpu" },
-    { name: "scfast GPU, H100", s: 7.16, kind: "gpu" },
+    { name: "scfast GPU, H100", s: 6.77, kind: "gpu" },
   ],
   cpu: [
     { title: "PBMC 68k", rows: [["Seurat", 121.4, "ref"], ["Scanpy", 57.2, "ref"], ["scfast", 1.94, "cpu"]] },
@@ -131,8 +131,8 @@ const D = {
   ],
   gpu: [
     { title: "PBMC 68k", rows: [["rapids", 2.84, "ref"], ["scfast", 0.68, "gpu"]] },
-    { title: "Mouse brain 500k", rows: [["rapids", 64.83, "ref"], ["scfast", 5.72, "gpu"]] },
-    { title: "Mouse brain 1.29M", rows: [["rapids", null, "ref", "out of memory"], ["scfast", 26.7, "gpu"]] },
+    { title: "Mouse brain 500k", rows: [["rapids", 64.83, "ref"], ["scfast", 5.35, "gpu"]] },
+    { title: "Mouse brain 1.29M", rows: [["rapids", null, "ref", "out of memory"], ["scfast", 12.0, "gpu"]] },
   ],
   parity: [
     ["PBMC 3k", "scfast CPU", 0.99995, 0.976, 0.947],
