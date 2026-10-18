@@ -126,7 +126,7 @@ the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weight
 
 - Scale path merged (agent): k-d tree kNN (exact <= 16 dims; eps=0.7 approximate in 'auto' above 50k, overlap >= 0.946 with exact), parallel Leiden (local moving, refinement, aggregation; thread-count independent; ARI 0.999 vs leidenalg at 100k), tiled PCA kernels, SNN in BFS order. PCA+kNN+SNN+Leiden: brain 500k Modal 193 -> 4.9 s; brain 1.29M Modal 17.4 s.
 - UMAP x86 fix (34f4535): Z-order relabelling + head-only updates; Modal 16 threads PBMC 68k 3.82 -> 1.07 s.
-| 10-18 02:41-03:10 BST | GPU real-data agent (app `scfast-gpu-real`): 5 wheel builds (16-core CPU), CUDA tests + PBMC 3k on L4, 2 rounds of H100 runs on 4 real datasets, 2 H100 PCA profiles (Modal billing report at 03:10) | ~1 H100-h, ~0.2 L4-h | 2.53 |
+| 10-18 02:41-03:29 BST | GPU real-data agent (app `scfast-gpu-real`): 7 wheel builds (16-core CPU), CUDA / Python tests + PBMC 3k on L4 (x4), 3 rounds of H100 runs on 4 real datasets, 2 H100 PCA profiles, L4 brain 100k / 500k (Modal billing report at 03:29: $3.69; the last ~10 min may still be missing) | ~1.4 H100-h, ~0.5 L4-h | ~3.9 |
 
 ## GPU path on real data, exact clip on the device (branch t3/1fc1e0a8) - done
 Merged `t3/gpu-bench-modal-hillclimb` into the perf/hillclimb base. CPU PCA = block Krylov + `Clipped`. CUDA PCA:
@@ -176,6 +176,20 @@ File to result (read + transfers + compute), scfast-gpu vs rapids: 68k 0.68 vs 2
 Before the device preprocess (CPU Rust front end, HVG CSR uploaded in `pca`): compute 0.69 / 1.58 / 5.83 / 19.07 s
 (normalize 0.10 / 0.40 / 2.34 / 11.62 s); before the cuSOLVER eigendecomposition PCA was 0.80 / 1.00 / 1.58 / 2.14 s.
 Remaining scfast-gpu floor: cuGraph Leiden (2.2 s at 1.29M), kNN (2.8 s), the raw upload (4.0 s, pageable memory).
+
+L4 24 GB box (cpu=8, 64 / 96 GB RAM), same data and reps, bench/results/gpu_l4_real:
+
+| engine | cells | read | to_gpu | normalize | hvg | scale | pca | neighbors | cluster | umap | to_cpu | compute | peak GPU GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rapids | brain 100,000 | 8.22 | 0.18 | 0.05 | 0.08 | 0.09 | 0.26 | 0.30 | 0.52 | 0.91 | 2.23 | 2.21 | 6.8 |
+| scfast-gpu | brain 100,000 | 0.50 | 0.16 | 0.07 | 0.00 | 0.03 | 0.29 | 0.23 | 1.02 | 0.91 | 0.21 | 2.56 | 2.2 |
+| rapids | brain 500,000 | | | out of memory | | | | | | | | fails | 23.7 |
+| scfast-gpu | brain 500,000 | 3.34 | 1.53 | 0.34 | 0.00 | 0.28 | 0.76 | 1.85 | 4.14 | 3.60 | 0.33 | 10.97 | 9.4 |
+
+rapids on the L4 at 500k: `normalize` fails allocating 4.1 GB with 23.7 GB in use. scfast-gpu's L4 Leiden (cuGraph on the SNN
+graph) is 2x rapids' at 100k (1.02 vs 0.52 s; on the H100 0.37 vs 0.34). L4 parity vs Seurat: scfast-gpu 100k 0.99997 /
+0.996 / ARI 0.60 (17 clusters; 21 on the H100: cuGraph Leiden is not deterministic across GPUs), 500k 0.99967 / 0.994 /
+0.54; rapids 100k 0.99997 / 0.995 / 0.61.
 
 Parity vs Seurat (top-10 PC similarity / kNN overlap / ARI): scfast-gpu 68k 0.99998 / 0.994 / 0.73, 100k 0.99997 / 0.996
 / 0.55, 500k 0.99967 / 0.994 / 0.48; rapids 68k 0.99998 / 0.974 / 0.53, 100k 0.99997 / 0.995 / 0.59, 500k 0.99967 /
