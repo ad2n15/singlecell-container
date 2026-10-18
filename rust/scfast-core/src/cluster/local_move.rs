@@ -29,6 +29,11 @@ const MAX_MOVES_PER_NODE: usize = 100;
 const MAX_BATCH: usize = 65_536;
 /// Applied moves per parallel task when collecting the neighbours to re-queue.
 const WAKE_CHUNK: usize = 512;
+/// Proposals per parallel task when collecting conflicting neighbours.
+const CONFLICT_CHUNK: usize = 1024;
+/// Relative distance from the floor below which a move decided on corrected weights is
+/// re-decided on a rescan (the corrections are exact up to a few ulps).
+const ROUNDING_MARGIN: f64 = 1e-9;
 /// Stands for "a fresh empty community" in a proposal.
 const EMPTY: u32 = u32::MAX;
 
@@ -69,15 +74,11 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
     let mut batch = Vec::with_capacity(batch_len);
     let mut proposals = Vec::with_capacity(batch_len);
     // per batch: the applied moves (node, from) in order, each moved node's 1-based position
-    // in that list, and the batch in which each community last gained or lost a node
+    // in that list, and each proposing node's 1-based position in the batch
     let mut applied: Vec<(u32, u32)> = Vec::new();
     let mut moved_at = vec![0u32; n];
     let mut proposed_at = vec![0u32; n];
-    let mut conflict = Vec::with_capacity(batch_len);
-    let mut changed_in = vec![0u32; slots];
-    let mut batch_id = 0u32;
     while !queue.is_empty() && moves < budget {
-        batch_id += 1;
         batch.clear();
         batch.extend(queue.drain(..batch_len.min(queue.len())));
         for &v in &batch {
@@ -116,46 +117,77 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             })
             .collect_into_vec(&mut proposals);
 
-        // whether a neighbour proposed earlier in the batch a move that may enter or leave
-        // the node's old or target community (a move to a fresh community may land anywhere)
+        // per proposal, in batch order: the neighbours that proposed earlier in the batch a
+        // move that may enter or leave its old or target community (a move to a fresh
+        // community may land anywhere), with their edge weights
         for (i, (&v, p)) in batch.iter().zip(&proposals).enumerate() {
             if p.is_some() {
                 proposed_at[v as usize] = i as u32 + 1;
             }
         }
-        (0..batch.len())
-            .into_par_iter()
-            .map(|i| {
-                let Some((target, _, _)) = proposals[i] else { return false };
-                let v = batch[i] as usize;
-                let old = membership[v];
-                graph.neighbors(v).any(|(u, _)| {
-                    let at = proposed_at[u] as usize;
-                    if at == 0 || at > i {
-                        return false;
+        let conflicts: Vec<Vec<(u32, u32, f64)>> = proposals
+            .par_chunks(CONFLICT_CHUNK)
+            .enumerate()
+            .map(|(chunk, props)| {
+                let mut out = Vec::new();
+                for (j, p) in props.iter().enumerate() {
+                    let Some((target, _, _)) = *p else { continue };
+                    let i = chunk * CONFLICT_CHUNK + j;
+                    let v = batch[i] as usize;
+                    let old = membership[v];
+                    for (u, w) in graph.neighbors(v) {
+                        let at = proposed_at[u] as usize;
+                        if at == 0 || at > i {
+                            continue;
+                        }
+                        let (u_target, _, _) = proposals[at - 1].expect("proposed_at marks proposals");
+                        let u_old = membership[u];
+                        if u_target == EMPTY || u_old == old || u_old == target || u_target == old || u_target == target {
+                            out.push((i as u32, u as u32, w));
+                        }
                     }
-                    let (u_target, _, _) = proposals[at - 1].expect("proposed_at marks proposals");
-                    let u_old = membership[u];
-                    u_target == EMPTY || u_old == old || u_old == target || u_target == old || u_target == target
-                })
+                }
+                out
             })
-            .collect_into_vec(&mut conflict);
+            .collect();
         for &v in &batch {
             proposed_at[v as usize] = 0;
         }
 
         applied.clear();
+        let mut conflicts = conflicts.iter().flatten().peekable();
         for (i, (&v, &p)) in batch.iter().zip(&proposals).enumerate() {
             let Some((mut target, mut w_old, mut w_target)) = p else { continue };
             let v = v as usize;
             let old = membership[v];
             let (kv, sl) = (strength[v], self_loop[v]);
-            // the weights from the proposal are stale only if a neighbour entered or left
-            // `old` or `target` earlier in this batch; recomputed in the same order, they
-            // are bit-identical to the proposal's when nothing changed
-            let stale = conflict[i]
-                && (changed_in[old as usize] == batch_id || (target != EMPTY && changed_in[target as usize] == batch_id));
-            if stale {
+            // The proposal's weights, corrected for the conflicting neighbours that have
+            // moved since. Unchanged, they are the ones a rescan would give bit for bit;
+            // corrected, they can differ from a rescan by rounding, so a decision within a
+            // rounding margin of the floor is made on a rescan.
+            let mut corrected = false;
+            let mut magnitude = w_old + w_target;
+            while let Some(&(_, u, w)) = conflicts.next_if(|c| c.0 as usize == i) {
+                let at = moved_at[u as usize] as usize;
+                if at == 0 {
+                    continue;
+                }
+                let (from, to) = (applied[at - 1].1, membership[u as usize]);
+                for (c, weight) in [(old, &mut w_old), (target, &mut w_target)] {
+                    if from == c {
+                        *weight -= w;
+                        corrected = true;
+                    }
+                    if to == c {
+                        *weight += w;
+                        corrected = true;
+                    }
+                }
+                magnitude += w;
+            }
+            let k_target = if target == EMPTY { 0.0 } else { kc[target as usize] };
+            let (mut g_target, mut g_old) = (gain(w_target, kv, sl, k_target), gain(w_old, kv, sl, kc[old as usize] - kv));
+            if corrected && (g_target - g_old - threshold).abs() <= ROUNDING_MARGIN * (magnitude + sl + g_target.abs() + g_old.abs()) {
                 (w_old, w_target) = (0.0, 0.0);
                 for (u, w) in graph.neighbors(v) {
                     if u != v {
@@ -167,9 +199,9 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
                         }
                     }
                 }
+                (g_target, g_old) = (gain(w_target, kv, sl, k_target), gain(w_old, kv, sl, kc[old as usize] - kv));
             }
-            let k_target = if target == EMPTY { 0.0 } else { kc[target as usize] };
-            if gain(w_target, kv, sl, k_target) - gain(w_old, kv, sl, kc[old as usize] - kv) <= threshold {
+            if g_target - g_old <= threshold {
                 continue;
             }
             if target == EMPTY {
@@ -191,8 +223,6 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             if size[old as usize] == 0 {
                 free.push(old);
             }
-            changed_in[old as usize] = batch_id;
-            changed_in[target as usize] = batch_id;
             moves += 1;
             applied.push((v as u32, old));
             moved_at[v] = applied.len() as u32;
