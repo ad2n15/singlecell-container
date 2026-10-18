@@ -128,23 +128,44 @@ the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weight
 ## UMAP at scale (agent, branch t3/bf1bab2f, 2026-10-18 01:45-06:00 BST)
 
 Harness: `bench/modal_umap.py` (cached kNN inputs on volume `scfast-data:umap_bench/`; A/B of git
-revisions in one container; PBMC 68k silhouette seeds 0-2; PNG of the 1.29M layout to
-bench/results/umap/). Modal containers differ up to 2x in speed (Milan vs Genoa), so only
-compare revisions within one run.
+revisions in one container; PBMC 68k silhouette of Seurat's clusters over N seeds; stray count;
+PNG of the 1.29M layout to bench/results/umap/, which is git-ignored). Modal `cpu=16` containers
+vary: AMD Milan (family 25 model 1), Genoa (25/17), Intel Xeon (6/85); speeds differ up to 2.5x,
+so only compare revisions within one run. All runs use 16 threads.
 
-Base e290045 (same container as each change):
-- 1.29M epochs 19-21 s of ~20 s; fuzzy set 1.0 s warm but 6.1 s on a cold first call (page faults).
-- 500k thread scaling (after the changes below): 1 thread 70 s, 8: 10 s, 16: 5.3 s, 32: 3.6 s. Near
-  linear, so the SGD is bound by instructions per sample (~50 cycles), not bandwidth.
+Result, base e290045 -> da3c506, same container each (s, median of warm reps):
+| container | PBMC 68k | brain 100k | 500k | 1.29M |
+|---|---|---|---|---|
+| Milan (e290045 vs 8384569, before the last 3 wins) | 1.28 -> 0.70 | 1.75 -> 0.96 | 8.2 -> 4.2 | 20.2 -> 11.5 |
+| Intel Xeon (final da3c506) | 1.57 -> 0.62 | 2.5 -> 0.86 | 15.0 -> 4.6 | 50.1 -> 12.2 |
+Later wins on Genoa/Milan, each vs its parent: 32 lanes 8.5 -> 7.75 s, lane count in a register +
+rng streams 7.6 -> 7.15 s, branch-free due packing 7.95 -> 6.6 s (1.29M). Cold first call at 1.29M
+(fresh process): Milan 27.3 -> 11.6 s (fuzzy set 6 s -> 0.4-0.6 s). Mac M-series 12 threads (loaded
+machine): PBMC 0.56 -> 0.46-0.55 s, 1.29M 12.6-13.0 -> 8.1-10.1 s (scalar path; no AVX2 on arm).
+Quality: PBMC 68k silhouette mean over 10 seeds, Modal x86: 0.4029 base, 0.4037 final; Mac:
+0.4037 base, 0.4095 final (range 0.39-0.43 for every version). 1.29M PNGs (base, final): same
+islands; strays (cells beyond 1.5x the 99.9th-percentile radius) 0-4 in every version, the same
+outlier cells (nearest kNN neighbour far away), e.g. Mac seeds 0-2 base 3/0/3, final 2/2/3.
 
-Kept:
-- 49352c4 negative samples drawn 16 ahead and prefetched: 1.29M 17.3 -> 14.2 s, 500k 6.9 -> 5.8 s.
-- b1e4684 stateless epoch schedule (edge due when floor(epoch/eps) steps up, negative_sample_rate
-  negatives per sample), heads from row offsets: 8 read-only bytes per edge per epoch: 14.2 -> 14.0 s, 500k 5.8 -> 5.1 s.
-- 219e759 fuzzy union via parallel transpose, no per-row Vecs: same graph bit for bit; 500k cold 2.6 -> 0.21 s.
+Where the time went (Milan, 500k, 1 thread, after the AVX2 kernel): 62 s; negatives without memory
+reads 63 s (memory is not the bound); no force maths 35 s. The 8-lane kernel was a ~170-cycle
+dependency chain per call -> 32 lanes (four independent groups). Thread scaling 1 -> 16 threads 13.4x.
 
-Rejected: per-row batch with polynomial pow (autovectoriser did not vectorise it; 1.29M 14.4 -> 22.5 s);
-scalar polynomial pow (30.7 -> 40.4 s); prefetch distance 32 (= 16).
+Kept (in order): 49352c4 prefetch negatives 16 ahead; b1e4684 stateless epoch schedule (edge due
+when floor(epoch/eps) steps up, negative_sample_rate negatives per sample; 8 read-only bytes per
+edge per epoch); 219e759 fuzzy union via parallel transpose (same graph bit for bit); 45d2838 AVX2+FMA
+8-lane force kernel with polynomial pow (runtime-detected; scalar powf elsewhere); 98d9d3d blob test by
+layout neighbours (the centre criterion failed 7/30 seeds on the base too); 8384569 parallel edge
+setup; 4245389 32 lanes; 810200f lane count in a register, rng stream per prefetch slot; c05c84e
+branch-free due packing; da3c506 cleanup.
+
+Rejected (same-container A/B): autovectorised per-row batch (+50 %); scalar polynomial pow (+30 %);
+prefetch distance 32; rcp+Newton instead of divisions; negatives in blocks of 8 from 8 streams;
+rows sorted by rate; one-floor due test; 64 lanes (all within noise).
+
+Remaining ideas: NEON kernel for arm (Mac); the scalar lane-filling loop (rng, ring, two loads and
+three stores per sample) is now about half the time; per-epoch barrier cost at PBMC size.
+Spend: about $1.9 of the $3 budget (`modal billing report`, app scfast-umap).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
