@@ -358,21 +358,19 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
     // Heads are implicit in the row offsets of the relabelled graph.
     let wmax = graph.weights.iter().copied().fold(0f32, f32::max);
     let cutoff = wmax / p.n_epochs as f32;
-    let mut offsets = Vec::with_capacity(n + 1);
-    offsets.push(0usize);
-    let mut tails = Vec::new();
-    let mut inv_eps = Vec::new();
-    for &i in &order {
+    let kept = |i: u32| {
         let i = i as usize;
-        for q in graph.indptr[i]..graph.indptr[i + 1] {
-            let wq = graph.weights[q];
-            if wq >= cutoff && wq > 0.0 {
-                tails.push(rank[graph.indices[q] as usize]);
-                inv_eps.push(wq / wmax);
-            }
-        }
-        offsets.push(tails.len());
+        (graph.indptr[i]..graph.indptr[i + 1]).filter(|&q| graph.weights[q] >= cutoff && graph.weights[q] > 0.0)
+    };
+    let mut offsets = vec![0usize; n + 1];
+    let counts: Vec<usize> = order.par_iter().map(|&i| kept(i).count()).collect();
+    for (r, c) in counts.into_iter().enumerate() {
+        offsets[r + 1] = offsets[r] + c;
     }
+    // (tail, 1 / eps) per edge, rows in relabelled order.
+    let edges: Vec<(u32, f32)> = order.par_iter().flat_map_iter(|&i| {
+        kept(i).map(|q| (rank[graph.indices[q] as usize], graph.weights[q] / wmax))
+    }).collect();
     // Tasks are runs of whole rows of about CHUNK edges, so each head is written by one task.
     const CHUNK: usize = 4096;
     let mut tasks = vec![0usize];
@@ -421,11 +419,11 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     delta[1] += f[1];
                 };
                 for e in offsets[j]..offsets[j + 1] {
-                    let ie = inv_eps[e];
+                    let (tail, ie) = edges[e];
                     if (ep * ie).floor() <= (prev * ie).floor() {
                         continue;
                     }
-                    if lanes.push(get(tails[e] as usize), true) {
+                    if lanes.push(get(tail as usize), true) {
                         add(&mut lanes);
                     }
                     for _ in 0..n_neg {
