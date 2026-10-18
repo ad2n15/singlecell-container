@@ -3,7 +3,7 @@
 //! The tree is implicit and balanced: node `v` has children `2v + 1` and `2v + 2`, and
 //! splits its point range at the middle along the dimension of largest spread, so all
 //! leaves sit at one depth and hold `LEAF_SIZE / 2 ..= LEAF_SIZE` points. Each node keeps
-//! its bounding box. Points are stored in tree order as f64, each leaf as one contiguous
+//! its bounding box. Points are stored in tree order (f32), each leaf as one contiguous
 //! block laid out dimension-major, so the leaf scan vectorises.
 //!
 //! Every distance is `exact_d2` (f64, same summation order), and a node is skipped only
@@ -25,11 +25,11 @@ struct Tree {
     depth: usize,
     /// Original index of the point at each tree position.
     perm: Vec<u32>,
-    /// Points in tree order as f64; leaf `[s, e)` is the block `s * d .. e * d`, holding
+    /// Points in tree order (f32, as given; widened to f64 when used); leaf `[s, e)` is the block `s * d .. e * d`, holding
     /// dimension `t` of its points at `t * (e - s) ..`.
-    pts: Vec<f64>,
+    pts: Vec<f32>,
     /// Per node: d lower then d upper box bounds.
-    boxes: Vec<f64>,
+    boxes: Vec<f32>,
 }
 
 impl Tree {
@@ -43,7 +43,7 @@ impl Tree {
         split(x, &mut perm, depth);
         let first_leaf = (1usize << depth) - 1;
         let leaves: Vec<(usize, usize)> = (0..1usize << depth).map(|l| range(n, depth, first_leaf + l)).collect();
-        let mut pts = vec![0f64; n * d];
+        let mut pts = vec![0f32; n * d];
         let mut blocks = Vec::with_capacity(leaves.len());
         let mut rest = pts.as_mut_slice();
         for &(s, e) in &leaves {
@@ -55,19 +55,19 @@ impl Tree {
             let len = e - s;
             for (j, &i) in perm[s..e].iter().enumerate() {
                 for (t, &v) in x.row(i as usize).iter().enumerate() {
-                    blk[t * len + j] = v as f64;
+                    blk[t * len + j] = v;
                 }
             }
         });
         let n_nodes = (1usize << (depth + 1)) - 1;
-        let mut boxes = vec![0f64; n_nodes * 2 * d];
+        let mut boxes = vec![0f32; n_nodes * 2 * d];
         boxes[first_leaf * 2 * d..].par_chunks_mut(2 * d).zip(&leaves).for_each(|(b, &(s, e))| {
             let len = e - s;
             let blk = &pts[s * d..e * d];
             for t in 0..d {
                 let col = &blk[t * len..(t + 1) * len];
-                b[t] = col.iter().copied().fold(f64::INFINITY, f64::min);
-                b[d + t] = col.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                b[t] = col.iter().copied().fold(f32::INFINITY, f32::min);
+                b[d + t] = col.iter().copied().fold(f32::NEG_INFINITY, f32::max);
             }
         });
         for v in (0..first_leaf).rev() {
@@ -87,7 +87,7 @@ impl Tree {
         let leaf = (1usize << self.depth) - 1 + leaf_of(self.perm.len(), self.depth, pos);
         let (s, e) = range(self.perm.len(), self.depth, leaf);
         for (t, v) in q.iter_mut().enumerate() {
-            *v = self.pts[s * self.d + t * (e - s) + pos - s];
+            *v = self.pts[s * self.d + t * (e - s) + pos - s] as f64;
         }
         q
     }
@@ -99,7 +99,7 @@ impl Tree {
         let (lo, hi) = b.split_at(self.d);
         let mut s = 0.0;
         for t in 0..self.d {
-            let g = (lo[t] - q[t]).max(q[t] - hi[t]).max(0.0);
+            let g = (lo[t] as f64 - q[t]).max(q[t] - hi[t] as f64).max(0.0);
             s += g * g;
         }
         s
@@ -198,18 +198,18 @@ fn pop_min(h: &mut Vec<Pending>) -> Option<Pending> {
 /// Squared distances from `q` to the points of a dimension-major leaf block. The first
 /// dimension initialises `acc` (`0 + x == x`), so the sums match `exact_d2` bit for bit.
 #[inline]
-fn leaf_d2(blk: &[f64], q: &[f64], acc: &mut [f64]) {
+fn leaf_d2(blk: &[f32], q: &[f64], acc: &mut [f64]) {
     let len = acc.len();
     let mut cols = blk.chunks_exact(len).zip(q);
     if let Some((col, &q0)) = cols.next() {
         for (a, &v) in acc.iter_mut().zip(col) {
-            let g = q0 - v;
+            let g = q0 - v as f64;
             *a = g * g;
         }
     }
     for (col, &qt) in cols {
         for (a, &v) in acc.iter_mut().zip(col) {
-            let g = qt - v;
+            let g = qt - v as f64;
             *a += g * g;
         }
     }
