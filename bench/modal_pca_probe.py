@@ -1,6 +1,9 @@
 """Times scfast.preprocess and scfast.pca on Modal cpu=16 for several scfast builds side by side.
 
-    SCFAST_PROBE_BUILDS=base=/tmp/base/rust,new=rust uvx modal run bench/modal_pca_probe.py --sizes 100000,1290549
+    SCFAST_PROBE_BUILDS=base=/tmp/base/rust,new=rust uvx modal run bench/modal_pca_probe.py::main --sizes 100000,1290549
+    SCFAST_PROBE_BUILDS=base=/tmp/base/rust,new=rust uvx modal run bench/modal_pca_probe.py::bench_main
+
+`main` times preprocess and pca alone with phase timers; `bench_main` runs bench/run_py.py.
 
 Each build is a `rust/` tree (`git archive <rev> rust | tar -x -C /tmp/base` for a commit; the
 default `new` is this checkout's `rust/`; point at a snapshot when editing the checkout during
