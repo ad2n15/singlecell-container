@@ -28,6 +28,8 @@ Constraints from the user (2026-10-17):
 | 10-17 23:28 | Seurat + Scanpy brain 500k, 1 rep + warm-up (16 cores, 128 GB; Seurat 38 min, Scanpy 20 min) | 15 core-h | ~1.7 |
 | 10-17 23:45 | Scanpy brain 1.29M, 1 rep + warm-up (16 cores, 192 GB, 43 min) | 11 core-h | ~1.7 |
 | 10-18 00:30 | baselines agent total: `modal billing report` says $3.36 for app scfast-baselines up to 00:00 BST; estimate incl. last 30 min | | ~4.5 |
+| 10-17 22:40-23:50 UTC | GPU agent: image build, wheel builds, CUDA tests, L4 benches and profiling (app `scfast-bench`, Modal billing report) | ~1.3 L4-h + builds | 2.06 |
+| 10-18 00:00-02:10 UTC | GPU agent: L4 profiling, final L4 run (4 engines), H100 runs 500k / 1M (app `scfast-bench`, billing report) | ~2 L4-h, ~0.4 H100-h | ~4.1 |
 
 ## Done
 - Baseline, Mac M-series 12 threads, 100k synthetic cells, compute s (excl. read): Seurat 87.3, Scanpy 50.3, scfast-cpu 33.9 (UMAP 29.5).
@@ -127,6 +129,134 @@ the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weight
 
 - Scale path merged (agent): k-d tree kNN (exact <= 16 dims; eps=0.7 approximate in 'auto' above 50k, overlap >= 0.946 with exact), parallel Leiden (local moving, refinement, aggregation; thread-count independent; ARI 0.999 vs leidenalg at 100k), tiled PCA kernels, SNN in BFS order. PCA+kNN+SNN+Leiden: brain 500k Modal 193 -> 4.9 s; brain 1.29M Modal 17.4 s.
 - UMAP x86 fix (34f4535): Z-order relabelling + head-only updates; Modal 16 threads PBMC 68k 3.82 -> 1.07 s.
+| 10-18 02:41-03:29 BST | GPU real-data agent (app `scfast-gpu-real`): 7 wheel builds (16-core CPU), CUDA / Python tests + PBMC 3k on L4 (x4), 3 rounds of H100 runs on 4 real datasets, 2 H100 PCA profiles, L4 brain 100k / 500k (Modal billing report at 03:29: $3.69; the last ~10 min may still be missing) | ~1.4 H100-h, ~0.5 L4-h | ~3.9 |
+
+## GPU path on real data, exact clip on the device (branch t3/1fc1e0a8) - done
+Merged `t3/gpu-bench-modal-hillclimb` into the perf/hillclimb base. CPU PCA = block Krylov + `Clipped`. CUDA PCA:
+- Clip, exact: a scaled value (x - m) / sd exceeds the clip c only at a stored entry, and there the clipped value
+  equals the scaled value of x' = m + c sd. So the `cap` kernel replaces the stored values on the device by
+  min(x, m + c sd) (constant genes: no cap), and the operator keeps the unclipped means: Z_c = (X' - 1 m^T) diag(1/sd)
+  exactly. Z_c V, Z_c^T U and the scores U = Z_c V need nothing else. The Gram correction needs the column sums s of X'
+  (one more `colstats` pass): G_c = diag(1/sd) (X'^T X' - m s^T - s m^T + n m m^T) diag(1/sd). Same for host-input
+  and device-input (CuPy) paths; this is equivalent to G - Z^T C - (Z^T C)^T + C^T C without forming C.
+- Gram eigendecomposition: on the device (`gram_finish` kernel + cuSOLVER `syevd`) for <= 4096 genes. The host one (faer)
+  took 2.3 s of 2.4 s for the PCA at brain 100k on the H100 box; the device one 0.06 s, PCA 0.17 s warm (CPU 1.0 s).
+  The exact eigenpairs also beat the Krylov Rayleigh-Ritz on parity (PBMC 3k kNN overlap 0.998 vs 0.968).
+  Above 4096 genes: gene-side block Krylov on the host Gram matrix (same `power_iters` meaning as the CPU).
+- Device preprocess: `scfast.preprocess` takes a cupyx CSR or, above 2^31 - 1 non-zeros, a `(data, indices, indptr,
+  shape)` tuple of CuPy arrays. CuPy kernels (row_stats, clipped_sums, hvg_count, hvg_fill) do the passes; the per-gene
+  vst step is the CPU's Rust code (`preprocess::vst_from_sums`, split out of `preprocess()`). The counts are integers,
+  so library sizes and per-gene sums are exact: brain 100k gives the CPU's HVG list and a bitwise-identical HVG CSR in
+  0.08 s (CPU 0.40 s); PBMC 3k the same 2,000 HVGs with two near-ties (2e-14) swapped in order.
+- scfast-gpu engine (bench/run_py.py): scfast.read_10x_h5 on the CPU, `to_gpu` uploads the raw counts (as rapids),
+  then preprocess / PCA / kNN / SNN / Leiden on the device, cuML UMAP. `pca()` on a CuPy matrix now passes its clip
+  (it was always 10).
+- Tests (L4): `cargo test --release --features cuda,cugraph` all pass, incl. new `gpu_pca_clip_matches_cpu_clip`
+  (18,581 clipped entries; clip vs no clip on the CPU 0.972; GPU clip vs CPU clip top-10 0.9999999984, loadings
+  0.9999999993, both input paths). Python `tests/python/test_scfast_py.py`: 106 pass, 2 fail by design on a GPU box
+  (`test_pca_parameter_errors` / `test_knn_parameter_errors` with `device="cuda"` expect the no-GPU RuntimeError).
+- PBMC 3k parity, scfast-gpu on L4 vs Seurat: PC similarity 1.0, kNN overlap 0.998, ARI 0.89 (CPU: 0.99995 / 0.976).
+
+Real data, H100 80 GB box (cpu=16, i.e. 32 logical; 64-200 GB RAM), volume `scfast-data`, 1 warm-up + 2 measured reps,
+medians in s. Compute = normalize..umap. Results: bench/results/gpu_h100_real (merged; parity vs Seurat in parity.jsonl,
+vs Scanpy in parity_vs_scanpy.jsonl; outputs and per-run folders bench/results/h100_* are git-ignored, also on volume
+`scfast-bench` under results/h100_*).
+
+| engine | cells | read | to_gpu | normalize | hvg | scale | pca | neighbors | cluster | umap | to_cpu | compute | peak GPU GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rapids | PBMC 68,260 | 2.00 | 0.04 | 0.00 | 0.03 | 0.02 | 0.06 | 0.09 | 0.26 | 0.16 | 0.18 | 0.62 | 3.6 |
+| scfast-gpu | PBMC 68,260 | 0.09 | 0.06 | 0.01 | 0.00 | 0.02 | 0.05 | 0.09 | 0.20 | 0.15 | 0.01 | 0.52 | 2.3 |
+| rapids | brain 100,000 | 10.27 | 0.32 | 0.01 | 0.04 | 0.04 | 0.06 | 0.14 | 0.34 | 0.57 | 0.27 | 1.20 | 7.6 |
+| scfast-gpu | brain 100,000 | 0.28 | 0.29 | 0.02 | 0.00 | 0.03 | 0.08 | 0.14 | 0.37 | 0.57 | 0.05 | 1.20 | 3.0 |
+| rapids | brain 500,000 | 57.74 | 1.44 | 0.03 | 0.11 | 0.23 | 0.22 | 1.32 | 1.31 | 1.06 | 1.37 | 4.28 | 33.6 |
+| scfast-gpu | brain 500,000 | 1.18 | 1.07 | 0.06 | 0.00 | 0.15 | 0.28 | 0.68 | 0.85 | 1.04 | 0.19 | 3.06 | 10.2 |
+| rapids | brain 1,290,549 | 150 (warm-up) | ok | out of memory | | | | | | | | fails | 85 |
+| scfast-gpu | brain 1,290,549 | 14.31 | 3.97 | 0.15 | 0.00 | 0.49 | 0.70 | 2.83 | 2.23 | 0.40 | 0.62 | 6.80 | 43.3 |
+
+rapids at 1.29M: `normalize` fails allocating 20.9 GB (the `counts` layer copy of 2.6B non-zeros) with 85 GB in use.
+File to result (read + transfers + compute), scfast-gpu vs rapids: 68k 0.68 vs 2.84 s; 100k 1.82 vs 12.06; 500k 5.50 vs
+64.83; 1.29M 25.7 vs fails. Compute only: 0.52 vs 0.62, 1.20 vs 1.20, 3.06 vs 4.28, 6.80 vs fails.
+Before the device preprocess (CPU Rust front end, HVG CSR uploaded in `pca`): compute 0.69 / 1.58 / 5.83 / 19.07 s
+(normalize 0.10 / 0.40 / 2.34 / 11.62 s); before the cuSOLVER eigendecomposition PCA was 0.80 / 1.00 / 1.58 / 2.14 s.
+Remaining scfast-gpu floor: cuGraph Leiden (2.2 s at 1.29M), kNN (2.8 s), the raw upload (4.0 s, pageable memory).
+
+L4 24 GB box (cpu=8, 64 / 96 GB RAM), same data and reps, bench/results/gpu_l4_real:
+
+| engine | cells | read | to_gpu | normalize | hvg | scale | pca | neighbors | cluster | umap | to_cpu | compute | peak GPU GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rapids | brain 100,000 | 8.22 | 0.18 | 0.05 | 0.08 | 0.09 | 0.26 | 0.30 | 0.52 | 0.91 | 2.23 | 2.21 | 6.8 |
+| scfast-gpu | brain 100,000 | 0.50 | 0.16 | 0.07 | 0.00 | 0.03 | 0.29 | 0.23 | 1.02 | 0.91 | 0.21 | 2.56 | 2.2 |
+| rapids | brain 500,000 | | | out of memory | | | | | | | | fails | 23.7 |
+| scfast-gpu | brain 500,000 | 3.34 | 1.53 | 0.34 | 0.00 | 0.28 | 0.76 | 1.85 | 4.14 | 3.60 | 0.33 | 10.97 | 9.4 |
+
+rapids on the L4 at 500k: `normalize` fails allocating 4.1 GB with 23.7 GB in use. scfast-gpu's L4 Leiden (cuGraph on the SNN
+graph) is 2x rapids' at 100k (1.02 vs 0.52 s; on the H100 0.37 vs 0.34). L4 parity vs Seurat: scfast-gpu 100k 0.99997 /
+0.996 / ARI 0.60 (17 clusters; 21 on the H100: cuGraph Leiden is not deterministic across GPUs), 500k 0.99967 / 0.994 /
+0.54; rapids 100k 0.99997 / 0.995 / 0.61.
+
+Parity vs Seurat (top-10 PC similarity / kNN overlap / ARI): scfast-gpu 68k 0.99998 / 0.994 / 0.73, 100k 0.99997 / 0.996
+/ 0.55, 500k 0.99967 / 0.994 / 0.48; rapids 68k 0.99998 / 0.974 / 0.53, 100k 0.99997 / 0.995 / 0.59, 500k 0.99967 /
+0.992 / 0.50. ARI vs Seurat is low for every engine on real data, scanpy included (0.56-0.60). 1.29M has no Seurat run;
+vs Scanpy: scfast-gpu 0.99868 / 0.999 / 0.59.
+
+Reproduce (per-session wheel / target / app so concurrent sessions do not collide):
+    export SCFAST_APP=scfast-gpu-real SCFAST_WHEELS=/vol/wheels-gpureal SCFAST_TARGET=/cache/target-gpureal
+    uvx modal run bench/modal_app.py::build
+    SCFAST_GPU=L4 uvx modal run bench/modal_app.py::rust_tests
+    SCFAST_GPU=L4 uvx modal run bench/modal_app.py::bench --tag pbmc3k --name gpu_pbmc3k_l4 --sizes 2638 --engines scfast-gpu --reps 1
+    SCFAST_GPU=H100 SCFAST_CPUS=16 SCFAST_MEM_GB=128 uvx modal run bench/modal_app.py::bench --tag real:brain --name h100_brain500k --sizes 500000 --engines scfast-gpu,rapids --reps 2
+    (PBMC 3k: data/pbmc3k/data and the Seurat outputs in results/gpu_pbmc3k_l4/outputs/seurat on volume scfast-bench)
+
+## GPU path (branch t3/837279cd, GPU agent round 2) - done
+Compute seconds (excl. read), 1 measured rep after a warm-up, synthetic 10-type data (bench/synth.py + prep.py).
+L4 box: 8 CPU cores, 48 GB. H100 box: 8 CPU cores, 160 GB. Results in bench/results/{l4_final,h100_500k,h100_1m} (git-ignored; also on volume `scfast-bench`).
+
+| engine | GPU | cells | to_gpu | norm | hvg | scale | pca | neighbors | cluster | umap | to_cpu | compute |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| scanpy | (L4 box CPU) | 100k | - | 0.99 | 2.34 | 3.61 | 33.20 | 9.46 | 5.97 | 87.15 | - | 142.72 |
+| scfast-cpu | (L4 box CPU) | 100k | - | 0.96 | 2.29 | 2.34 | 0.46 | 1.43 | 1.99 | 11.19 | - | 20.66 |
+| rapids | L4 | 100k | 0.22 | 0.03 | 0.05 | 0.07 | 0.27 | 0.30 | 0.54 | 0.23 | 0.36 | 2.07 |
+| scfast-gpu | L4 | 100k | 0.22 | 0.03 | 0.05 | 0.04 | 0.20 | 0.27 | 0.62 | 0.24 | 0.07 | 1.74 |
+| scanpy | (L4 box CPU) | 500k | - | 4.65 | 11.09 | 16.90 | 232.83 | 62.23 | 37.99 | 485.02 | - | 850.71 |
+| scfast-cpu | (L4 box CPU) | 500k | - | 4.71 | 11.12 | 11.16 | 1.99 | 27.19 | 13.15 | 46.42 | - | 115.74 |
+| rapids | L4 | 500k | 1.10 | 0.14 | 0.17 | 0.36 | 1.17 | 3.96 | 3.41 | 1.29 | 1.77 | 13.36 |
+| scfast-gpu | L4 | 500k | 0.63 | 0.14 | 0.17 | 0.21 | 0.65 | 1.57 | 3.19 | 1.31 | 0.32 | 8.20 |
+| rapids | H100 | 500k | 0.69 | 0.02 | 0.08 | 0.13 | 0.23 | 1.35 | 1.19 | 0.40 | 1.40 | 5.49 |
+| scfast-gpu | H100 | 500k | 0.56 | 0.02 | 0.07 | 0.08 | 0.31 | 0.65 | 0.72 | 0.38 | 0.26 | 3.05 |
+| rapids | H100 | 1M | 2.51 | 0.04 | 0.13 | 0.27 | 0.43 | 4.23 | 1.60 | 0.32 | 2.68 | 12.21 |
+| scfast-gpu | H100 | 1M | 1.51 | 0.04 | 0.13 | 1.11 | 0.42 | 1.93 | 1.27 | 0.30 | 0.29 | 7.00 |
+
+Read (scanpy read_10x_h5, all engines): ~8 s at 100k, ~39 s at 500k, ~55-68 s at 1M. It dwarfs GPU compute.
+
+Parity (bench/parity.py): vs scanpy at 100k every engine ARI 1.0, PC similarity >= 0.9999. scfast kNN overlap vs scanpy 0.94
+(both scfast engines, from the shared unclipped PCA), rapids 0.999. ARI vs truth at 500k: rapids 1.0, scfast-cpu 0.93 (11
+clusters), scfast-gpu 0.85 (12); H100 1M scfast-gpu 0.93 (11). The 500k split is Seurat's objective: directed RB quality at
+res 0.5 on the 500k SNN is truth 2,696,230 < CPU Leiden (11) 2,697,092 < cuGraph (12) 2,698,180. Open decision: accept,
+or scale resolution with n. (Diagonal at half weight in cuGraph under-splits at res 1 and 2: 100k 13/20 vs CPU 14/22.)
+
+What changed (commits 99f1ee0..3b74cba):
+- Image: prebuilt `rapids-singlecell-cu12` 0.18.1 + RAPIDS 26.10 wheels (no CMake). Modal: touch mounted sources so cargo
+  rebuilds; `script` entrypoint runs a profiling script on the GPU box.
+- CUDA bugs: cuGraph dtype enum (INT32 = 2, not 0); Leiden max_level = n_iterations (2) gave 580 fragments, now 100 (rapids
+  engine had the same bug via rsc); kNN `topk` O(n^2) with L1 thrash; serial symmetry check before cuGraph (2 s at 500k).
+- kNN: fused kernel (|r|^2 - 2 q.r, 4 queries per thread, NVRTC per dims/cap), Morton order, tile pruning by bounding box.
+- PCA: Gram path (f64-atomic X^T X on device, subspace iteration on host); takes a CuPy CSR (device copy, colstats kernel).
+- SNN with cuSPARSE from CuPy indices; Leiden on cuGraph device views; UMAP fuzzy graph with CuPy (= cuML to 4e-6).
+- Both GPU engines: cudaMallocAsync via RMM (RMM's fixed pool ran out at 500k on the L4).
+- Rust UMAP vs cuML: cuML (0.24 s at 100k on L4) kept; Rust UMAP is 11.7 s on the 8-core Modal box (1.3 s on the Mac; unexplained).
+
+Reproduce:
+    uvx modal run bench/modal_app.py::build --no-tests
+    uvx modal run bench/modal_app.py::rust_tests                      # all CUDA / cuGraph tests on an L4
+    uvx modal run bench/modal_app.py::gen --tag synth --sizes 100000,500000
+    uvx modal run bench/modal_app.py::gen --tag synth_1m --sizes 1000000
+    uvx modal run bench/modal_app.py::bench --tag synth --name l4_final --sizes 100000,500000 --engines scfast-gpu,rapids,scfast-cpu,scanpy
+    SCFAST_GPU=H100 SCFAST_MEM_GB=160 uvx modal run bench/modal_app.py::bench --tag synth --name h100_500k --sizes 500000 --engines scfast-gpu,rapids
+    SCFAST_GPU=H100 SCFAST_MEM_GB=160 uvx modal run bench/modal_app.py::bench --tag synth_1m --name h100_1m --sizes 1000000 --engines scfast-gpu,rapids
+    uv run --no-project --with numpy --with pandas --with scikit-learn --with scipy python bench/parity.py --run bench/results/l4_final --reference scanpy
+
+Remaining ideas: cuGraph Leiden is the floor of `cluster` (3.0 s at 500k on L4, renumbering does not matter); kNN host parts
+(Morton order, re-rank) at 1M; read path (CPU agent).
 
 - GPU round 2 (agent, branch t3/gpu-bench-modal-hillclimb, NOT merged yet): synthetic, compute s: L4 100k rapids 2.07 / scfast-gpu 1.74; L4 500k 13.36 / 8.20; H100 500k 5.49 / 3.05; H100 1M 12.21 / 7.00. CUDA bugs fixed: cuGraph dtype enum, Leiden max_level=2 (580 fragments), O(n^2) kNN top-k, stale cargo builds, serial symmetry check. Its device Gram-matrix PCA does not apply Seurat's clip -> merge aborted; GPU round 3 merges it with an exact device clip and runs the real-data H100 headline.
 

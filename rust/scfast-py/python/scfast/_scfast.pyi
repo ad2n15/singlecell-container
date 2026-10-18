@@ -45,6 +45,25 @@ def pca_csr(
     Returns (embeddings (n_rows, k), loadings (n_cols, k), stdev (k,)), all float32.
     """
 
+def pca_csr_device(
+    n_rows: int,
+    n_cols: int,
+    nnz: int,
+    indptr: int,
+    indptr_i64: bool,
+    indices: int,
+    data: int,
+    n_comps: int,
+    seed: int,
+    scale: bool,
+    oversample: int,
+    power_iters: int,
+    device: str,
+    clip: float | None = None,
+    /,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    """pca_csr for a canonical CSR matrix already on the GPU (device pointers)."""
+
 def csr_view_info(
     n_rows: int,
     n_cols: int,
@@ -113,6 +132,20 @@ def leiden_csr(
     RuntimeError.
     """
 
+def leiden_coo_device(
+    n: int,
+    nnz: int,
+    src: int,
+    dst: int,
+    weights: int,
+    resolution: float,
+    seed: int,
+    device: str,
+    /,
+) -> npt.NDArray[np.int32]:
+    """Leiden on cuGraph for a COO graph already on the device (int32 / int32 / float32
+    device pointers, nnz each). Unchecked beyond sizes."""
+
 def leiden_device(device: str, /) -> dict[str, Any]:
     """Resolve a Leiden device string.
 
@@ -132,6 +165,19 @@ def inflate_chunks(
     /,
 ) -> npt.NDArray[np.float32] | npt.NDArray[np.int32]:
     """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32 or int32."""
+
+def vst_from_sums(
+    sum: npt.NDArray[np.float64],
+    sumsq: npt.NDArray[np.float64],
+    max: npt.NDArray[np.float64],
+    nnz: npt.NDArray[np.uint64],
+    n_rows: int,
+    span: float,
+    clip: float,
+    /,
+) -> dict[str, Any]:
+    """vst statistics from per-gene sums of the raw counts: {"mean", "variance",
+    "variance_expected", "variance_standardized", "sd": float64, "needs_clip": bool}."""
 
 def preprocess_csr(
     n_rows: int,
