@@ -5,7 +5,6 @@
 use std::cell::RefCell;
 
 use rayon::prelude::*;
-use single_clustering::network::grouping::NetworkGrouping;
 use single_clustering::network::CSRNetwork;
 
 /// Groups per parallel task.
@@ -15,19 +14,18 @@ thread_local! {
     static ACC: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Collapses each group of `grouping` into one node: node weights summed, a group's
-/// internal weight becomes a self-loop, weight between groups an edge.
-pub(super) fn aggregate<G: NetworkGrouping>(graph: &CSRNetwork, grouping: &G) -> CSRNetwork {
+/// Collapses each group (`group[v]`, below `n_groups`, every group non-empty) into one node:
+/// node weights summed, a group's internal weight becomes a self-loop, weight between groups
+/// an edge.
+pub(super) fn aggregate(graph: &CSRNetwork, group: &[u32], n_groups: usize) -> CSRNetwork {
     let n = graph.node_count();
-    let n_groups = grouping.group_count();
-    let group: Vec<u32> = (0..n).map(|v| grouping.get_group(v) as u32).collect();
 
     let mut node_weights = vec![0.0f64; n_groups];
     for (v, &g) in group.iter().enumerate() {
         node_weights[g as usize] += graph.node_weight(v);
     }
     let mut starts = vec![0usize; n_groups + 1];
-    for &g in &group {
+    for &g in group {
         starts[g as usize + 1] += 1;
     }
     for g in 0..n_groups {
@@ -121,7 +119,7 @@ mod tests {
     use super::*;
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use single_clustering::network::grouping::VectorGrouping;
+    use single_clustering::network::grouping::{NetworkGrouping, VectorGrouping};
 
     #[test]
     fn matches_single_clustering_aggregate() {
@@ -138,7 +136,8 @@ mod tests {
         let graph = CSRNetwork::from_edges(n, &edges).unwrap();
         let assign: Vec<usize> = (0..n).map(|v| (v / 7 + v % 3) % 500).collect();
         let grouping = VectorGrouping::from_assignments(&assign);
-        let (ours, theirs) = (aggregate(&graph, &grouping), graph.aggregate(&grouping));
+        let group: Vec<u32> = (0..n).map(|v| grouping.get_group(v) as u32).collect();
+        let (ours, theirs) = (aggregate(&graph, &group, grouping.group_count()), graph.aggregate(&grouping));
         assert_eq!(ours.node_count(), theirs.node_count());
         for v in 0..ours.node_count() {
             assert_eq!(ours.neighbors(v).collect::<Vec<_>>(), theirs.neighbors(v).collect::<Vec<_>>(), "node {v}");

@@ -37,7 +37,7 @@ use std::cmp::Reverse;
 
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use single_clustering::community_search::leiden::{LeidenConfig, Objective, Partition, Rb};
+use single_clustering::community_search::leiden::LeidenConfig;
 use single_clustering::network::CSRNetwork;
 use single_clustering::ClusteringError;
 
@@ -149,52 +149,44 @@ impl Clusterer for SingleClusteringLeiden {
 /// (bit-identical) [`aggregate::aggregate`].
 fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
     let config = LeidenConfig::default();
-    let objective = Rb::new(params.resolution);
     let mut rng = ChaCha8Rng::seed_from_u64(params.seed);
     let n = graph.node_count();
     let mut labels: Vec<usize> = (0..n).collect();
     let mut stagnant = 0;
     for _ in 0..params.n_iterations {
         let mut level_rng = ChaCha8Rng::seed_from_u64(rng.next_u64());
-        let mut level_graph = graph.clone();
+        let mut coarse_graph: Option<CSRNetwork> = None;
         let mut membership = labels.clone();
         let mut node_at_level: Vec<usize> = (0..n).collect();
         let mut improvement = 0.0;
-        let mut partition;
+        let mut moved;
         let mut level = 0;
         loop {
-            let start = Partition::from_membership(&level_graph, &membership);
-            let moved = local_move::local_move(&level_graph, &start, params.resolution, &mut level_rng);
-            partition = Partition::from_membership(&level_graph, &moved);
-            improvement += objective.quality(&partition) - objective.quality(&start);
+            let level_graph = coarse_graph.as_ref().unwrap_or(graph);
+            moved = local_move::local_move(level_graph, &membership, params.resolution, &mut level_rng);
+            improvement += rb_quality(level_graph, &moved, params.resolution) - rb_quality(level_graph, &membership, params.resolution);
             level += 1;
             if level == config.max_levels {
                 break;
             }
-            let refined = refine::refine(
-                &level_graph,
-                partition.membership_raw(),
-                params.resolution,
-                config.refine_randomness,
-                &mut level_rng,
-            );
-            let mut collapse_by = Partition::from_membership(&level_graph, &refined);
-            let grouping = collapse_by.renumber_into_grouping();
-            let coarse = aggregate::aggregate(&level_graph, &grouping);
+            let moved_u32: Vec<u32> = moved.iter().map(|&c| c as u32).collect();
+            let refined = refine::refine(level_graph, &moved_u32, params.resolution, config.refine_randomness, &mut level_rng);
+            let (group, n_groups) = renumber_ascending(&refined);
+            let coarse = aggregate::aggregate(level_graph, &group, n_groups);
             if coarse.node_count() >= level_graph.node_count() {
                 break;
             }
             membership = vec![0; coarse.node_count()];
-            for v in 0..level_graph.node_count() {
-                membership[collapse_by.membership(v)] = partition.membership(v);
+            for (v, &g) in group.iter().enumerate() {
+                membership[g as usize] = moved[v];
             }
             for slot in node_at_level.iter_mut() {
-                *slot = collapse_by.membership(*slot);
+                *slot = group[*slot] as usize;
             }
-            level_graph = coarse;
+            coarse_graph = Some(coarse);
         }
-        partition.renumber();
-        labels = node_at_level.iter().map(|&v| partition.membership(v)).collect();
+        let (final_ids, _) = renumber_ascending(&moved);
+        labels = node_at_level.iter().map(|&v| final_ids[v] as usize).collect();
         if improvement <= config.tolerance * graph.total_weight().abs().max(1.0) {
             stagnant += 1;
             if stagnant >= config.patience {
@@ -207,6 +199,39 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
     labels
 }
 
+/// single-clustering's RB quality `sum_c [internal_c - resolution * K_c^2 / 4m]` (internal
+/// weight counting each edge and loop once), with the edge scan in parallel.
+fn rb_quality(graph: &CSRNetwork, membership: &[usize], resolution: f64) -> f64 {
+    let four_m = 4.0 * graph.total_weight();
+    if four_m == 0.0 {
+        return 0.0;
+    }
+    let internal: f64 = (0..graph.node_count())
+        .into_par_iter()
+        .map(|v| graph.neighbors(v).filter(|&(u, _)| u >= v && membership[u] == membership[v]).map(|(_, w)| w).sum::<f64>())
+        .sum();
+    let mut strength = vec![0f64; membership.iter().copied().max().map_or(0, |m| m + 1)];
+    for (v, &c) in membership.iter().enumerate() {
+        strength[c] += graph.strength(v);
+    }
+    internal - resolution * strength.iter().map(|k| k * k).sum::<f64>() / four_m
+}
+
+/// Community ids renumbered 0.. in ascending order of the old id (as single-clustering's
+/// `Partition::renumber`), and the number of communities.
+fn renumber_ascending(ids: &[usize]) -> (Vec<u32>, usize) {
+    let mut new_id = vec![u32::MAX; ids.iter().copied().max().map_or(0, |m| m + 1)];
+    for &c in ids {
+        new_id[c] = 0;
+    }
+    let mut next = 0;
+    for id in new_id.iter_mut().filter(|id| **id == 0) {
+        *id = next;
+        next += 1;
+    }
+    (ids.iter().map(|&c| new_id[c]).collect(), next as usize)
+}
+
 /// Nodes in breadth-first order (`order[new] = old`), restarting at the lowest unvisited
 /// node. Graph neighbours end up close in memory, so the membership and community
 /// lookups of each local move hit a few cache lines instead of ~2k scattered ones (the
@@ -214,23 +239,26 @@ fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
 /// Errors on an index out of range.
 fn bfs_order(g: &SparseGraph) -> Result<Vec<u32>> {
     let n = g.n;
-    if let Some(&j) = g.indices.iter().find(|&&j| j as usize >= n) {
+    if let Some(&j) = g.indices.par_iter().find_first(|&&j| j as usize >= n) {
         return Err(Error::InvalidInput(format!("graph index {j} out of range for {n} nodes")));
     }
-    let mut seen = vec![false; n];
+    // a bitset stays in L2 at 1M+ nodes, where a Vec<bool> does not
+    let mut seen = vec![0u64; n.div_ceil(64)];
     let mut order = Vec::with_capacity(n);
     for root in 0..n {
-        if seen[root] {
+        if seen[root / 64] & (1 << (root % 64)) != 0 {
             continue;
         }
-        seen[root] = true;
+        seen[root / 64] |= 1 << (root % 64);
         let mut head = order.len();
         order.push(root as u32);
         while head < order.len() {
             let v = order[head] as usize;
             head += 1;
             for &j in &g.indices[g.indptr[v]..g.indptr[v + 1]] {
-                if !std::mem::replace(&mut seen[j as usize], true) {
+                let (word, bit) = (j as usize / 64, 1u64 << (j % 64));
+                if seen[word] & bit == 0 {
+                    seen[word] |= bit;
                     order.push(j);
                 }
             }
