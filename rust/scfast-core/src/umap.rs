@@ -422,17 +422,22 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
                     delta[1] += f[1];
                     *m = 0;
                 };
-                for e in offsets[j]..offsets[j + 1] {
-                    let (tail, ie) = edges[e];
-                    if (ep * ie).floor() <= (prev * ie).floor() {
-                        continue;
+                // The due tails of each run of up to 64 edges are packed without branches
+                // (whether an edge is due is close to random), then sampled.
+                for run in edges[offsets[j]..offsets[j + 1]].chunks(64) {
+                    let (mut due, mut k) = ([0u32; 64], 0);
+                    for &(tail, ie) in run {
+                        due[k] = tail;
+                        k += ((ep * ie).floor() > (prev * ie).floor()) as usize;
                     }
-                    lanes.set(m, get(tail as usize), 2.0);
-                    m += 1;
-                    if m == LANES {
-                        add(&mut lanes, &mut m);
+                    for &tail in &due[..k] {
+                        lanes.set(m, get(tail as usize), 2.0);
+                        m += 1;
+                        if m == LANES {
+                            add(&mut lanes, &mut m);
+                        }
                     }
-                    for _ in 0..n_neg {
+                    for _ in 0..k * n_neg {
                         let q = std::mem::replace(&mut ahead[slot], draw(&mut rngs[slot]));
                         slot = (slot + 1) % NEG_AHEAD;
                         if q != j {
