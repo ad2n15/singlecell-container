@@ -583,7 +583,7 @@ def test_knn_hnsw_recall_and_auto_threshold():
     ref, _ = brute_knn(x, 20)
     with kernel():
         h_idx, h_dist = scfast.knn(x, k=20, method="hnsw", seed=0)
-        a_hnsw, _ = scfast.knn(x, k=20, method="auto", auto_threshold=1000)    # 1500 >= 1000: HNSW
+        a_hnsw, _ = scfast.knn(x, k=20, method="auto", auto_threshold=1000)    # 1500 >= 1000, 10 dims: k-d tree
         a_exact, _ = scfast.knn(x, k=20, method="auto", auto_threshold=10_000)  # exact
     np.testing.assert_array_equal(h_idx[:, 0], np.arange(1500))
     assert np.all(np.diff(h_dist, axis=1) >= 0)

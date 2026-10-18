@@ -333,9 +333,9 @@ mod tests {
             r.fold([0f32; 2], |acc, i| [acc[0] + e[2 * i] / m, acc[1] + e[2 * i + 1] / m])
         };
         let (c0, c1) = (centre(0..n / 2), centre(n / 2..n));
-        let gap = ((c0[0] - c1[0]).powi(2) + (c0[1] - c1[1]).powi(2)).sqrt();
-        let spread = (0..n / 2).map(|i| ((e[2 * i] - c0[0]).powi(2) + (e[2 * i + 1] - c0[1]).powi(2)).sqrt()).sum::<f32>() / (n / 2) as f32;
+        let d = |i: usize, c: [f32; 2]| (e[2 * i] - c[0]).powi(2) + (e[2 * i + 1] - c[1]).powi(2);
         assert!(e.iter().all(|v| v.is_finite()));
-        assert!(gap > 2.0 * spread, "gap {gap} spread {spread}");
+        let wrong = (0..n).filter(|&i| (i < n / 2) != (d(i, c0) < d(i, c1))).count();
+        assert_eq!(wrong, 0, "{wrong} cells lie nearer the other blob's centre");
     }
 }

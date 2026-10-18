@@ -173,9 +173,10 @@ class ScfastEngine:
     'normalize' is scfast.preprocess, one Rust pass that log-normalises, computes Seurat's
     vst statistics (the HVGs are Seurat's, not scanpy's seurat_v3), selects the HVGs and
     builds their CSR, so 'hvg' and 'scale' only hand that CSR on (scfast's PCA scales and
-    clips implicitly). Leiden clusters Seurat's SNN graph; UMAP
-    lays out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN distances go
-    to obsp["distances"] so the parity outputs line up.
+    clips implicitly). kNN is scfast's "auto": exact below 50k cells, the eps = 0.7 k-d tree
+    above (about 0.95 of the exact neighbours; scfast.knn). Leiden clusters Seurat's SNN
+    graph; UMAP lays out the kNN graph (umap-learn's fuzzy set) from a PCA start. The kNN
+    distances go to obsp["distances"] so the parity outputs line up.
     """
 
     device = "cpu"
@@ -216,7 +217,7 @@ class ScfastEngine:
         import numpy as np
         import scipy.sparse as sp
 
-        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="exact",
+        idx, dist = self.scfast.knn(np.ascontiguousarray(a.obsm["X_pca"][:, : cfg.dims]), k=cfg.k, method="auto",
                                     device=self.scfast_device)
         n = idx.shape[0]
         rows = np.repeat(np.arange(n), cfg.k - 1)

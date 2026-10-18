@@ -446,6 +446,17 @@ fn leiden_same_seed_gives_identical_labels() {
 }
 
 #[test]
+fn leiden_is_identical_across_thread_counts() {
+    // large enough that local moving runs in multi-node parallel batches
+    let (g, truth) = blob_graph(&[6000, 5000, 4000, 3000, 2000], 6.0, 5);
+    let p = ClusterParams::default();
+    let many = leiden(&g, &p).unwrap();
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| leiden(&g, &p).unwrap());
+    assert_eq!(many, one);
+    assert!(ari(&many, &truth) > 0.99, "ARI {}", ari(&many, &truth));
+}
+
+#[test]
 fn leiden_on_seurat_snn_agrees_with_seurat_labels() {
     let fx = SeuratFixture::load();
     let g = snn_from_knn(&fx.knn, &SnnParams::default()).unwrap();
