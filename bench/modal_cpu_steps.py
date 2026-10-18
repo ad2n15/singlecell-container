@@ -119,11 +119,10 @@ def inputs(names: str = ",".join(DATA)):
 
 
 @app.local_entrypoint()
-def steps(names: str = "brain100k,brain500k,brain1290k,synth1m", reps: int = 3, tag: str = "modal"):
-    jobs = []
-    for n in names.split(","):
-        jobs.append(("before", n, "exact", reps))
-        jobs.append(("after", n, "exact,kdtree", reps))
+def steps(names: str = "brain100k,brain500k,brain1290k,synth1m", reps: int = 3, tag: str = "modal",
+          builds: str = "before,after"):
+    methods = {"before": "exact", "after": "exact,kdtree"}
+    jobs = [(b, n, methods[b], reps) for n in names.split(",") for b in builds.split(",")]
     dst = ROOT / "bench" / "results" / "cpu_steps"
     dst.mkdir(parents=True, exist_ok=True)
     for r in run_steps.starmap(jobs, order_outputs=False):
