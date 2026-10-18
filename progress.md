@@ -163,6 +163,8 @@ Tried and dropped (evidence in commit messages / this list):
   +-10% run-to-run noise; reverted.
 - `select_columns` in one pass with per-chunk buffers: slower on the Mac (0.22 -> 0.32 s)
   and on x86 at 1.29M (0.75 -> 0.97 s).
+- `select_columns` with a per-row rank bitset instead of the per-row sort: 0.63 -> 0.61 s
+  at 1.29M on x86, not kept (the sort is not where the time goes).
 - Gram-matrix exact PCA: not tried; sum of nnz_row^2 is ~4e10 scattered updates at 1.29M,
   more than the whole Krylov run.
 - MAP_POPULATE / huge pages for K: page faults for 2.9 GB cost 0.06 s on 16 threads on
