@@ -187,8 +187,8 @@ The `bench/results/demo_data/` folder is not in git. It holds the three input fi
   and about 7.3 s for the core steps on B200-class GPUs, with a different workflow
   (`bench/results/REFERENCES.md`). scfast's 6.8 s on an H100 is in the same range, not "10× faster than rapids".
 
-## Pending
+## Final GPU number
 
-A 30-minute subagent job overlaps the file read with the GPU upload at 1.29 million cells.
-The file → result time is now 12.0 s; the upload step it targets is 1.8 s. If the change works,
-`bench/results/FINAL.md` will show the new number. Use 12.0 s unless FINAL.md changes.
+The GPU file → result time at 1.29 million cells stays at 12.0 s. A last test overlapped the
+file read with the GPU upload; it saved about 0.1 s, inside the noise, so it was not merged
+(branch `t3/gpu-read-upload-overlap`, which also lowers peak host memory by 19 GB).
