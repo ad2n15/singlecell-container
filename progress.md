@@ -13,6 +13,10 @@ Constraints from the user (2026-10-17):
 
 | When | What | GPU-h / CPU-h | Est. $ |
 |---|---|---|---|
+| to 00:30 | Real-data agent: downloads, prep, Seurat/Scanpy baselines (cpu=16) | CPU | ~4.5 |
+| to 01:30 | Scale agent: cpu_steps on Modal | CPU | ~2.5 |
+| to 01:00 | GPU agent: builds, CUDA tests, L4 runs | L4 + builds | ~2.1+ (more since) |
+| 00:30-01:40 | Orchestrator: scfast-cpu PBMC 68k / brain 100k, UMAP probes | CPU | ~0.6 |
 | 10-17 23:11 | baselines agent: download raw data (2 cores, 8 GB, ~3 min) | 0.1 core-h | 0.01 |
 | 10-17 23:16 | prep PBMC 68k (4 cores, 16 GB, ~1 min) | 0.1 core-h | 0.01 |
 | 10-17 23:16 | prep brain 100k/500k/all (4 cores, 160 GB, ~12 min) | 0.8 core-h | 0.30 |
@@ -117,6 +121,9 @@ What changed (all deterministic for any thread count; bit-identical where stated
 Tried and dropped: f32 inner power iterations in PCA (5% after tiling); fixed leaf cap for
 the k-d tree (recall fell with n); Leiden apply shortcuts via speculative weights (fallback
 54% of moves) and via corrections (net 7%, not bit-identical).
+
+- Scale path merged (agent): k-d tree kNN (exact <= 16 dims; eps=0.7 approximate in 'auto' above 50k, overlap >= 0.946 with exact), parallel Leiden (local moving, refinement, aggregation; thread-count independent; ARI 0.999 vs leidenalg at 100k), tiled PCA kernels, SNN in BFS order. PCA+kNN+SNN+Leiden: brain 500k Modal 193 -> 4.9 s; brain 1.29M Modal 17.4 s.
+- UMAP x86 fix (34f4535): Z-order relabelling + head-only updates; Modal 16 threads PBMC 68k 3.82 -> 1.07 s.
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
