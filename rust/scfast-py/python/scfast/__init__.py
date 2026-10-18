@@ -526,7 +526,8 @@ def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
     Returns
     -------
     (X, barcodes, gene_names)
-        X: scipy.sparse.csr_matrix, float32 counts, int32 indices, ready for
+        X: scipy.sparse.csr_matrix, float32 counts, int32 indices (int64 above 2^31 - 1
+        non-zeros), ready for
         :func:`preprocess`. barcodes, gene_names: str arrays. Files with features other
         than Gene Expression raise ``ValueError``.
     """
@@ -544,10 +545,11 @@ def read_10x_h5(path: str | Any) -> tuple[Any, np.ndarray, np.ndarray]:
         else:
             names = g["gene_names"][()].astype(str)
         indptr = g["indptr"][()]
-        if int(indptr[-1]) > _I32_MAX:
-            raise ValueError(f"{path}: {int(indptr[-1])} non-zeros do not fit int32 indices")
-        X = sp.csr_matrix((_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], np.int32),
-                           indptr.astype(np.int32)), shape=(n_cells, n_genes))
+        # scipy wants indices and indptr in one dtype: int64 once the non-zeros pass int32.
+        wide = int(indptr[-1]) > _I32_MAX
+        indices = _read_values(path, g["indices"], np.int32)
+        X = sp.csr_matrix((_read_values(path, g["data"], np.float32), indices.astype(np.int64) if wide else indices,
+                           indptr.astype(np.int64 if wide else np.int32)), shape=(n_cells, n_genes))
         barcodes = g["barcodes"][()].astype(str)
     return X, barcodes, names
 
