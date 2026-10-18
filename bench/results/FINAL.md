@@ -9,15 +9,15 @@ Every engine reads the same QC'd files (`bench/prep.py`).
 
 | Dataset | Cells | Seurat 5.6 | Scanpy 1.12 | **scfast-cpu** | vs Seurat | vs Scanpy |
 |---|---:|---:|---:|---:|---:|---:|
-| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **2.2 s** | **55×** | **26×** |
-| Mouse brain | 100,000 | 194.6 s | 75.8 s | **2.6 s** | **75×** | **29×** |
-| Mouse brain | 500,000 | 966.8 s | 488.7 s | **11.1 s** | **87×** | **44×** |
-| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **26.7 s** | – | **44×** |
+| PBMC 68k | 68,260 | 121.4 s | 57.2 s | **1.8 s** | **67×** | **32×** |
+| Mouse brain | 100,000 | 194.6 s | 75.8 s | **2.4 s** | **80×** | **31×** |
+| Mouse brain | 500,000 | 966.8 s | 488.7 s | **11.3 s** | **86×** | **43×** |
+| Mouse brain | 1,290,549 | not run (~3 h published) | 1,161.6 s | **26.9 s** | – | **43×** |
 
 Peak memory at 1.29M cells: scfast 46 GB, Scanpy 150 GB. Reading the 1.29M file: scfast 3.8 s,
 Scanpy 101 s.
 
-scfast-cpu numbers are the median of three runs of the final code on fresh containers
+scfast-cpu numbers are the median of five runs of the final code on fresh containers
 (`bench/results/cpu16_final_rounds/`). Modal's cpu=16 containers land on AMD Milan, AMD Genoa or
 Intel Xeon at random, and the same build differs by up to ~2.5× between them on memory-bound
 steps; Seurat and Scanpy ran once, on containers whose CPU was not recorded. The speed-ups are
@@ -64,9 +64,9 @@ core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
 
 | | Seurat (16 cores) | Scanpy (16 cores) | scfast CPU (16 cores) | rapids-singlecell (H100) | **scfast GPU (H100)** |
 |---|---:|---:|---:|---:|---:|
-| Compute | ~3 h (published) | 1,161.6 s | 26.7 s | out of memory | **6.8 s** |
-| File → result | – | 1,262.6 s | 30.5 s | – | **12.0 s** |
-| vs Scanpy (compute) | – | 1× | 44× | – | **172×** |
+| Compute | ~3 h (published) | 1,161.6 s | 26.9 s | out of memory | **6.8 s** |
+| File → result | – | 1,262.6 s | 30.8 s | – | **12.0 s** |
+| vs Scanpy (compute) | – | 1× | 43× | – | **172×** |
 
 ## Live on a laptop (Apple M-series, 12 threads, 24 GB)
 
