@@ -15,9 +15,11 @@ use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
 };
 use faer::linalg::qr::no_pivoting::factor::{qr_in_place, qr_in_place_scratch, recommended_block_size};
+use faer::linalg::evd::{self_adjoint_evd, self_adjoint_evd_scratch, ComputeEigenvectors};
+use faer::linalg::matmul::matmul;
 use faer::linalg::svd::{svd, svd_scratch, ComputeSvdVectors};
 use faer::reborrow::{Reborrow, ReborrowMut};
-use faer::{Conj, Mat, MatMut, MatRef, Par};
+use faer::{Accum, Conj, Mat, MatMut, MatRef, Par};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -112,6 +114,53 @@ pub(super) fn orthonormalize_chunked(mut a: MatMut<'_, f64>, chunk_rows: usize) 
         apply_q(ac.rb(), f.coeff.as_ref(), t.as_mut());
         ac.copy_from(&t);
     });
+}
+
+/// `a b`, sequential.
+pub(super) fn mul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+    let mut c = Mat::<f64>::zeros(a.nrows(), b.ncols());
+    matmul(c.as_mut(), Accum::Replace, a, b, 1.0, Par::Seq);
+    c
+}
+
+/// `a^T a` for a tall `a`: fixed row chunks in parallel, partial sums added in chunk order.
+pub(super) fn gram(a: MatRef<'_, f64>) -> Mat<f64> {
+    let (m, l) = a.shape();
+    let parts: Vec<Mat<f64>> = a
+        .par_row_chunks(TSQR_ROWS)
+        .map(|c| {
+            let mut g = Mat::<f64>::zeros(l, l);
+            matmul(g.as_mut(), Accum::Replace, c.transpose(), c, 1.0, Par::Seq);
+            g
+        })
+        .collect();
+    let mut g = Mat::<f64>::zeros(l, l);
+    for part in &parts {
+        g += part;
+    }
+    debug_assert!(m == 0 || !parts.is_empty());
+    g
+}
+
+/// Relative eigenvalue floor of `whitening`: directions with `λ < GRAM_RTOL λ_max` are
+/// numerically dependent and dropped (keeping them would amplify round-off by `λ^{-1/2}`).
+const GRAM_RTOL: f64 = 1e-10;
+
+/// For a symmetric positive semi-definite Gram matrix `g = K^T K`, `T = E_r Λ_r^{-1/2}`
+/// over the eigenpairs with `λ >= GRAM_RTOL λ_max` (largest first), so `K T` has
+/// orthonormal columns spanning range(K) up to the dropped directions.
+pub(super) fn whitening(g: MatRef<'_, f64>) -> Result<Mat<f64>> {
+    let l = g.nrows();
+    let mut u = Mat::<f64>::zeros(l, l);
+    let mut s = faer::diag::Diag::<f64>::zeros(l);
+    let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<f64>(l, ComputeEigenvectors::Yes, Par::Seq, Default::default()));
+    self_adjoint_evd(g, s.as_mut(), Some(u.as_mut()), Par::Seq, MemStack::new(&mut mem), Default::default())
+        .map_err(|e| Error::Backend { context: "faer symmetric eigendecomposition", message: format!("{e:?}") })?;
+    let mut order: Vec<usize> = (0..l).collect();
+    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
+    let floor = order.first().map_or(0.0, |&i| s[i]) * GRAM_RTOL;
+    let keep: Vec<usize> = order.into_iter().filter(|&i| s[i] > floor && s[i] > 0.0).collect();
+    Ok(Mat::from_fn(l, keep.len(), |r, c| u[(r, keep[c])] / s[keep[c]].sqrt()))
 }
 
 /// Thin SVD `a = U diag(s) V^T` (a: m x n), singular values in non-increasing order.

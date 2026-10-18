@@ -15,8 +15,9 @@
 //!    (genes x b, b = n_comps + oversample) from ChaCha8 seeded with `seed`; `power_iters`
 //!    subspace iterations, re-orthonormalising after every product and keeping every
 //!    cells x b block, so the basis K spans the Krylov space (width b x (power_iters + 1));
-//!    then the thin SVD of the genes x width matrix `Z^T K`.
-//! 3. Embeddings `K V_b diag(d)`, loadings `U_b`, all in f64, returned as f32.
+//!    then Rayleigh-Ritz on range(K) through the width x width Gram matrix `K^T K` and the
+//!    `Z^T y` products the iteration already computed (see `block_krylov_svd`).
+//! 3. Embeddings `K C diag(d)`, loadings `U_b`, all in f64, returned as f32.
 //!
 //! # Memory
 //!
@@ -235,6 +236,17 @@ fn validate<I: Idx, T: Real>(x: &CsrView<'_, I, T>, params: &PcaParams) -> Resul
 /// Block Krylov SVD (Musco & Musco 2015): subspace iteration that keeps every
 /// power-iteration block, so the basis spans `[Z Ω, (Z Z^T) Z Ω, ...]` and the
 /// top singular vectors converge much faster when singular values are close.
+///
+/// Returns the raw basis K (cells x width, each block orthonormal), the left singular
+/// vectors `U_b`, the singular values and the coefficients C (width x r) of the right
+/// singular vectors in K, so the embeddings are `K C diag(d)`.
+///
+/// K is never orthonormalised as a whole. Every block's `Z^T y` is needed for the next
+/// block anyway, so `Z^T K` costs one extra product; with `K^T K = E Λ E^T` the columns of
+/// `K T`, `T = E Λ^{-1/2}`, are an orthonormal basis of range(K), and `Z^T (K T) = (Z^T K) T`.
+/// Directions with tiny `λ` (blocks that became nearly dependent) are dropped. At least
+/// `b` remain: K contains an orthonormal block of width `b`, so `K^T K` has `b`
+/// eigenvalues of at least 1.
 fn block_krylov_svd<O: Operator>(
     op: &O,
     b: usize,
@@ -245,6 +257,7 @@ fn block_krylov_svd<O: Operator>(
     let blocks = (iters + 1).min(n.min(p) / b);
     let width = blocks * b;
     let mut k = faer::Mat::<f64>::zeros(n, width);
+    let mut ztk = faer::Mat::<f64>::zeros(p, width);
     let omega = dense::gaussian(p, b, seed);
     let mut y = faer::Mat::<f64>::zeros(n, b);
     op.apply(omega.as_ref(), y.as_mut())?;
@@ -260,22 +273,17 @@ fn block_krylov_svd<O: Operator>(
     }
     for i in 0..blocks {
         k.as_mut().submatrix_mut(0, i * b, n, b).copy_from(y.as_ref());
+        let mut g = op.apply_t(y.as_ref())?;
+        ztk.as_mut().submatrix_mut(0, i * b, p, b).copy_from(g.as_ref());
         if i + 1 < blocks {
-            let mut g = op.apply_t(y.as_ref())?;
             dense::orthonormalize(g.as_mut());
             op.apply(g.as_ref(), y.as_mut())?;
             dense::orthonormalize(y.as_mut());
         }
     }
-    dense::orthonormalize(k.as_mut());
-    // B^T = Z^T K (p x width), one block of b columns per product.
-    let mut bt = faer::Mat::<f64>::zeros(p, width);
-    for i in 0..blocks {
-        let part = op.apply_t(k.as_ref().submatrix(0, i * b, n, b))?;
-        bt.as_mut().submatrix_mut(0, i * b, p, b).copy_from(part.as_ref());
-    }
-    let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;
-    Ok((k, ub, d, vb))
+    let t = dense::whitening(dense::gram(k.as_ref()).as_ref())?;
+    let (ub, d, vb) = dense::thin_svd(dense::mul(ztk.as_ref(), t.as_ref()).as_ref())?;
+    Ok((k, ub, d, dense::mul(t.as_ref(), vb.as_ref())))
 }
 
 fn embed(q: faer::MatRef<'_, f64>, vb: faer::MatRef<'_, f64>, d: &[f64], signs: &[f64], k: usize) -> RowMajor {
