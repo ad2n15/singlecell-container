@@ -161,14 +161,22 @@ Tried and dropped (evidence in commit messages / this list):
 - Skipping the per-block orthonormalisation of `y`: same loss (it is the Gram route).
 - Tile-major product kernels (L2-sized gene tables for Zen3): +5% on x86, inside the
   +-10% run-to-run noise; reverted.
-- `select_columns` in one pass with per-chunk buffers: slower on the Mac (0.22 -> 0.32 s).
+- `select_columns` in one pass with per-chunk buffers: slower on the Mac (0.22 -> 0.32 s)
+  and on x86 at 1.29M (0.75 -> 0.97 s).
 - Gram-matrix exact PCA: not tried; sum of nnz_row^2 is ~4e10 scattered updates at 1.29M,
   more than the whole Krylov run.
 - MAP_POPULATE / huge pages for K: page faults for 2.9 GB cost 0.06 s on 16 threads on
   Modal, not worth it.
 
-Where the time goes now (1.29M, x86, second call): pca 2.6 s = Z^T u x7 0.84 + Z v x6 0.55
-+ Gram-Schmidt 0.72 + the rest 0.5; normalize 2.3 s = pass 1 1.4 + HVG select ~0.6 + pass 2 0.1.
+Where the time goes now (1.29M, x86, `modal_pca_probe.py::main`, second call): pca 2.6 s =
+Z^T u x7 0.84 + Z v x6 0.55 + Gram-Schmidt 0.72 + the rest 0.5; normalize 2.3-2.7 s =
+pass 1 1.4 + HVG select 0.75 + pass 2 0.1. The harness pca step (3.7 s) is slower than
+a second call in the probe (2.6-2.9 s): the first call at 1.29M is ~0.5 s slower, all in
+the first Z v products; page faults explain only ~0.06 s of it. Not resolved.
+Next candidates: select_columns on x86 (count pass is 0.02 s on the Mac, so the 0.75 s is
+not memory bandwidth; needs a profiler), f32 sparse products (parity risk).
+
+Spend: Modal billing for scfast-pca-probe + scfast-pf-probe apps: $0.69 (budget $3).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
