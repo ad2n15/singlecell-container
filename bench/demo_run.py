@@ -55,6 +55,10 @@ def main() -> None:
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.scatter(emb[:, 0], emb[:, 1], c=labels, s=max(0.05, min(2.0, 2e5 / n)), cmap="tab20", linewidths=0)
     ax.set_title(f"{n:,} cells, {len(np.unique(labels))} clusters, {total:.1f} s end to end")
+    lo, hi = np.quantile(emb, [0.0005, 0.9995], axis=0)  # a few isolated cells would stretch the view
+    pad = 0.03 * (hi - lo)
+    ax.set_xlim(lo[0] - pad[0], hi[0] + pad[0])
+    ax.set_ylim(lo[1] - pad[1], hi[1] + pad[1])
     ax.set_xticks([])
     ax.set_yticks([])
     fig.savefig(a.out, dpi=110, bbox_inches="tight")
