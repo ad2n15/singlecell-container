@@ -95,9 +95,14 @@ def _cpu_model() -> str:
         if sys.platform == "darwin":
             return subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"],
                                   capture_output=True, text=True, timeout=5).stdout.strip()
+        # Sandboxes (Modal) can hide the model name; vendor, family and model still tell CPU
+        # generations apart (AMD family 25 model 1 Milan, model 17 Genoa).
+        info = {}
         for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                return line.split(":", 1)[1].strip()
+            key, _, value = line.partition(":")
+            info.setdefault(key.strip(), value.strip())
+        if "model name" in info:
+            return f"{info['model name']} ({info.get('vendor_id')} family {info.get('cpu family')} model {info.get('model')})"
     except Exception:
         pass
     return platform.processor() or "unknown"
