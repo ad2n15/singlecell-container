@@ -38,8 +38,8 @@ const MIN_TASK_EDGES: usize = 16_384;
 
 /// `indices` / `distances` are (n, k) row-major with the cell itself in column 0.
 pub fn fuzzy_simplicial_set(indices: &[u32], distances: &[f32], n: usize, k: usize) -> Result<FuzzyGraph> {
-    if indices.len() != n * k || distances.len() != n * k || k < 2 {
-        return Err(Error::InvalidInput(format!("kNN arrays must be {n} x {k} with k >= 2")));
+    if indices.len() != n * k || distances.len() != n * k || k < 2 || n * k > u32::MAX as usize {
+        return Err(Error::InvalidInput(format!("kNN arrays must be {n} x {k} with k >= 2 and n k < 2^32")));
     }
     let mean_all = distances.iter().map(|&d| d as f64).sum::<f64>() / distances.len() as f64;
     let target = (k as f32).log2();
@@ -79,57 +79,68 @@ pub fn fuzzy_simplicial_set(indices: &[u32], distances: &[f32], n: usize, k: usi
         }
     });
 
-    let mut deg = vec![0usize; n + 1];
-    for (p, &j) in indices.iter().enumerate() {
-        if w[p] > 0.0 {
-            deg[p / k + 1] += 1;
-            deg[j as usize + 1] += 1;
+    // Row i of the union holds its own kNN edges and the reversed edges j -> i, gathered
+    // through a transpose filled in parallel; blocks of rows merge into a few large vectors.
+    let incoming: Vec<AtomicU32> = (0..=n).map(|_| AtomicU32::new(0)).collect();
+    indices.par_iter().zip(w.par_iter()).for_each(|(&j, &wp)| {
+        if wp > 0.0 {
+            incoming[j as usize + 1].fetch_add(1, Relaxed);
         }
+    });
+    let mut start = vec![0usize; n + 1];
+    for j in 0..n {
+        start[j + 1] = start[j] + incoming[j + 1].load(Relaxed) as usize;
     }
-    for i in 0..n {
-        deg[i + 1] += deg[i];
-    }
-    let total = deg[n];
-    let mut cols = vec![0u32; total];
-    let mut vals = vec![0f32; total];
-    let mut fill = deg.clone();
-    for (p, &j) in indices.iter().enumerate() {
-        if w[p] > 0.0 {
-            let (i, j) = (p / k, j as usize);
-            cols[fill[i]] = j as u32;
-            vals[fill[i]] = w[p];
-            fill[i] += 1;
-            cols[fill[j]] = i as u32;
-            vals[fill[j]] = w[p];
-            fill[j] += 1;
-        }
-    }
-
-    let rows: Vec<Vec<(u32, f32)>> = (0..n).into_par_iter().map(|i| {
-        let mut r: Vec<(u32, f32)> = cols[deg[i]..deg[i + 1]].iter().copied().zip(vals[deg[i]..deg[i + 1]].iter().copied()).collect();
-        r.sort_unstable_by_key(|e| e.0);
-        let mut out: Vec<(u32, f32)> = Vec::with_capacity(r.len());
-        for (c, v) in r {
-            match out.last_mut() {
-                Some(last) if last.0 == c => last.1 = last.1 + v - last.1 * v,
-                _ => out.push((c, v)),
+    let cursor: Vec<AtomicU32> = start[..n].iter().map(|&s| AtomicU32::new(s as u32)).collect();
+    let src: Vec<AtomicU32> = (0..start[n]).map(|_| AtomicU32::new(0)).collect();
+    w.par_chunks(k).enumerate().for_each(|(i, wi)| {
+        for (q, &wp) in wi.iter().enumerate() {
+            if wp > 0.0 {
+                let pos = cursor[indices[i * k + q] as usize].fetch_add(1, Relaxed);
+                src[pos as usize].store((i * k + q) as u32, Relaxed);
             }
         }
-        out
+    });
+
+    const ROWS: usize = 4096;
+    let blocks: Vec<(Vec<usize>, Vec<u32>, Vec<f32>)> = (0..n.div_ceil(ROWS)).into_par_iter().map(|bl| {
+        let (mut lens, mut cols, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        let mut r: Vec<(u32, f32)> = Vec::new();
+        for i in bl * ROWS..((bl + 1) * ROWS).min(n) {
+            r.clear();
+            r.extend((i * k..(i + 1) * k).filter(|&p| w[p] > 0.0).map(|p| (indices[p], w[p])));
+            r.extend(src[start[i]..start[i + 1]].iter().map(|p| {
+                let p = p.load(Relaxed) as usize;
+                ((p / k) as u32, w[p])
+            }));
+            r.sort_unstable_by_key(|e| e.0);
+            let before = cols.len();
+            for &(c, v) in &r {
+                if cols.len() > before && *cols.last().unwrap() == c {
+                    let last: &mut f32 = vals.last_mut().unwrap();
+                    *last = *last + v - *last * v;
+                } else {
+                    cols.push(c);
+                    vals.push(v);
+                }
+            }
+            lens.push(cols.len() - before);
+        }
+        (lens, cols, vals)
     }).collect();
 
     let mut indptr = Vec::with_capacity(n + 1);
     indptr.push(0);
-    for r in &rows {
-        indptr.push(indptr.last().unwrap() + r.len());
+    for (lens, _, _) in &blocks {
+        for l in lens {
+            indptr.push(indptr.last().unwrap() + l);
+        }
     }
     let mut indices_out = Vec::with_capacity(indptr[n]);
     let mut weights = Vec::with_capacity(indptr[n]);
-    for r in rows {
-        for (c, v) in r {
-            indices_out.push(c);
-            weights.push(v);
-        }
+    for (_, cols, vals) in &blocks {
+        indices_out.extend_from_slice(cols);
+        weights.extend_from_slice(vals);
     }
     Ok(FuzzyGraph { indptr, indices: indices_out, weights })
 }
@@ -154,9 +165,157 @@ fn morton(x: u32, y: u32) -> u32 {
     spread(x) | (spread(y) << 1)
 }
 
+/// Hints the cache to load the line holding `p`; negative samples are drawn ahead and
+/// prefetched, so their random reads over the embedding overlap.
+#[inline(always)]
+fn prefetch<T>(p: *const T) {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        std::arch::x86_64::_mm_prefetch(p as *const i8, std::arch::x86_64::_MM_HINT_T0)
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        std::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, readonly, preserves_flags))
+    }
+}
+
+/// Negative samples drawn this many draws before they are used.
+const NEG_AHEAD: usize = 16;
+
 #[inline(always)]
 fn clip(g: f32) -> f32 {
     g.clamp(-4.0, 4.0)
+}
+
+const LANES: usize = 32;
+
+/// Pending samples of one head cell: the other cell's position and the weight of its step (2
+/// for a graph edge, whose attraction is doubled for head-only updates; 1 for a negative
+/// sample, which repels; 0 for an empty lane). The count of used lanes is kept by the caller,
+/// in a register.
+#[derive(Default)]
+struct Lanes {
+    x: [f32; LANES],
+    y: [f32; LANES],
+    w: [f32; LANES],
+}
+
+impl Lanes {
+    #[inline(always)]
+    fn set(&mut self, l: usize, o: [f32; 2], w: f32) {
+        (self.x[l], self.y[l], self.w[l]) = (o[0], o[1], w);
+    }
+
+    /// The summed clipped gradient steps at `cur` of the first `m` lanes (umap-learn's formulas).
+    #[inline(always)]
+    fn forces(&mut self, m: usize, cur: [f32; 2], a: f32, b: f32, avx2: bool) -> [f32; 2] {
+        for l in m..m.next_multiple_of(8) {
+            self.set(l, [0.0, 0.0], 0.0);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if avx2 {
+            // SAFETY: avx2 is true only when use_avx2() detected AVX2 and FMA.
+            return unsafe { forces_avx2(self, m, cur, a, b) };
+        }
+        let _ = avx2;
+        self.forces_scalar(m, cur, a, b)
+    }
+
+    fn forces_scalar(&self, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+        let mut f = [0f32; 2];
+        for q in 0..m {
+            let dx = [cur[0] - self.x[q], cur[1] - self.y[q]];
+            let d2 = dx[0] * dx[0] + dx[1] * dx[1];
+            let w = self.w[q];
+            for d in 0..2 {
+                f[d] += w * if w > 1.5 {
+                    if d2 > 0.0 {
+                        let pb = d2.powf(b);
+                        clip(-2.0 * a * b * pb / (d2 * (a * pb + 1.0)) * dx[d])
+                    } else {
+                        0.0
+                    }
+                } else if d2 > 0.0 {
+                    clip(2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) * dx[d])
+                } else {
+                    4.0
+                };
+            }
+        }
+        f
+    }
+}
+
+#[inline]
+fn use_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// `Lanes::forces_scalar` 8 lanes at a time (lanes up to the next multiple of 8 must have
+/// weight 0), with `d2^b` as `exp2(b log2 d2)` from polynomials (relative error below 1e-5)
+/// instead of a libm `powf` per sample. The groups are independent, so their long dependency
+/// chains overlap.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn forces_avx2(l: &Lanes, m: usize, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+    use std::arch::x86_64::*;
+    let c = _mm256_set1_ps;
+    let ci = _mm256_set1_epi32;
+    let (mut sx, mut sy) = (_mm256_setzero_ps(), _mm256_setzero_ps());
+    for o in (0..m).step_by(8) {
+        let (x, y, w) = (_mm256_loadu_ps(l.x[o..].as_ptr()), _mm256_loadu_ps(l.y[o..].as_ptr()), _mm256_loadu_ps(l.w[o..].as_ptr()));
+        let (dx, dy) = (_mm256_sub_ps(c(cur[0]), x), _mm256_sub_ps(c(cur[1]), y));
+        let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
+        let d2c = _mm256_max_ps(d2, c(f32::MIN_POSITIVE));
+
+        // log2(d2c) = e + log2(r), r in [sqrt(1/2), sqrt(2)), ln r = 2 atanh((r - 1) / (r + 1)).
+        let bits = _mm256_castps_si256(d2c);
+        let mant = _mm256_and_si256(bits, ci(0x007F_FFFF));
+        let big = _mm256_cmpgt_epi32(mant, ci(0x0035_04F3));
+        let e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), ci(127)), big));
+        let r = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
+        let t = _mm256_div_ps(_mm256_sub_ps(r, c(1.0)), _mm256_add_ps(r, c(1.0)));
+        let t2 = _mm256_mul_ps(t, t);
+        let mut s = _mm256_fmadd_ps(t2, c(1.0 / 7.0), c(1.0 / 5.0));
+        s = _mm256_fmadd_ps(t2, s, c(1.0 / 3.0));
+        s = _mm256_fmadd_ps(t2, s, c(1.0));
+        let ln_r = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
+        let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_r, c(std::f32::consts::LOG2_E), e));
+        let z = _mm256_min_ps(_mm256_max_ps(z, c(-126.0)), c(126.0));
+
+        // 2^z = 2^i e^(f ln 2), i = round(z), |f| <= 1/2.
+        let i = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(z);
+        let f = _mm256_mul_ps(_mm256_sub_ps(z, i), c(std::f32::consts::LN_2));
+        let mut p = _mm256_fmadd_ps(f, c(1.0 / 720.0), c(1.0 / 120.0));
+        for k in [1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0] {
+            p = _mm256_fmadd_ps(f, p, c(k));
+        }
+        let scale = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(i), ci(127)), 23));
+        let pb = _mm256_mul_ps(p, scale);
+
+        let att = _mm256_cmp_ps::<_CMP_GT_OQ>(w, c(1.5));
+        let num = _mm256_blendv_ps(c(2.0 * b), _mm256_mul_ps(c(-2.0 * a * b), pb), att);
+        let den = _mm256_mul_ps(_mm256_blendv_ps(_mm256_add_ps(d2, c(0.001)), d2c, att), _mm256_fmadd_ps(c(a), pb, c(1.0)));
+        let g = _mm256_div_ps(num, den);
+        let clip8 = |v: __m256| _mm256_min_ps(_mm256_max_ps(v, c(-4.0)), c(4.0));
+        let zero = _mm256_blendv_ps(c(4.0), c(0.0), att);
+        let live = _mm256_cmp_ps::<_CMP_GT_OQ>(d2, c(0.0));
+        let fx = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dx)), live));
+        let fy = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dy)), live));
+        sx = _mm256_add_ps(sx, fx);
+        sy = _mm256_add_ps(sy, fy);
+    }
+    let (mut ox, mut oy) = ([0f32; 8], [0f32; 8]);
+    _mm256_storeu_ps(ox.as_mut_ptr(), sx);
+    _mm256_storeu_ps(oy.as_mut_ptr(), sy);
+    [ox.iter().sum(), oy.iter().sum()]
 }
 
 /// SGD layout of `graph` starting from `init` (n x 2, row-major). Returns the n x 2 embedding.
@@ -191,22 +350,34 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
         rank[i as usize] = r as u32;
     }
 
+    // Edge e is sampled at the epochs where floor(epoch / eps_e) steps up, with eps_e =
+    // wmax / w_e, and draws `negative_sample_rate` negatives each time: umap-learn's schedule
+    // without its per-edge counters, so an epoch reads 8 bytes per edge and writes none.
+    // Heads are implicit in the row offsets of the relabelled graph.
     let wmax = graph.weights.iter().copied().fold(0f32, f32::max);
     let cutoff = wmax / p.n_epochs as f32;
-    let mut heads = Vec::new();
-    let mut tails = Vec::new();
-    let mut eps = Vec::new();
-    for (r, &i) in order.iter().enumerate() {
+    let kept = |i: u32| {
         let i = i as usize;
-        for q in graph.indptr[i]..graph.indptr[i + 1] {
-            let wq = graph.weights[q];
-            if wq >= cutoff && wq > 0.0 {
-                heads.push(r as u32);
-                tails.push(rank[graph.indices[q] as usize]);
-                eps.push(wmax / wq);
-            }
+        (graph.indptr[i]..graph.indptr[i + 1]).filter(|&q| graph.weights[q] >= cutoff && graph.weights[q] > 0.0)
+    };
+    let mut offsets = vec![0usize; n + 1];
+    let counts: Vec<usize> = order.par_iter().map(|&i| kept(i).count()).collect();
+    for (r, c) in counts.into_iter().enumerate() {
+        offsets[r + 1] = offsets[r] + c;
+    }
+    // (tail, 1 / eps) per edge, rows in relabelled order.
+    let edges: Vec<(u32, f32)> = order.par_iter().flat_map_iter(|&i| {
+        kept(i).map(|q| (rank[graph.indices[q] as usize], graph.weights[q] / wmax))
+    }).collect();
+    // Tasks are runs of whole rows of about CHUNK edges, so each head is written by one task.
+    const CHUNK: usize = 4096;
+    let mut tasks = vec![0usize];
+    for r in 1..=n {
+        if offsets[r] - offsets[*tasks.last().unwrap()] >= CHUNK || r == n {
+            tasks.push(r);
         }
     }
+    let tasks: Vec<(usize, usize)> = tasks.windows(2).map(|w| (w[0], w[1])).collect();
 
     let emb: Vec<AtomicU32> = order.iter().flat_map(|&i| {
         let span = &span;
@@ -214,66 +385,70 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
     }).collect();
 
     let (a, b) = (p.a, p.b);
-    let neg_rate = p.negative_sample_rate as f32;
-    let mut next = eps.clone();
-    let mut next_neg: Vec<f32> = eps.iter().map(|e| e / neg_rate).collect();
-    let chunk = 4096;
+    let n_neg = p.negative_sample_rate;
+    let avx2 = use_avx2();
     let get = |i: usize| [f32::from_bits(emb[i * DIM].load(Relaxed)), f32::from_bits(emb[i * DIM + 1].load(Relaxed))];
     let put = |i: usize, v: [f32; DIM]| {
         emb[i * DIM].store(v[0].to_bits(), Relaxed);
         emb[i * DIM + 1].store(v[1].to_bits(), Relaxed);
     };
 
-    for epoch in 0..p.n_epochs {
-        let ep = epoch as f32;
+    for epoch in 1..p.n_epochs {
+        let (ep, prev) = (epoch as f32, (epoch - 1) as f32);
         let alpha = p.learning_rate * (1.0 - ep / p.n_epochs as f32);
-        next.par_chunks_mut(chunk).zip(next_neg.par_chunks_mut(chunk)).enumerate().with_min_len(MIN_TASK_EDGES / chunk).for_each(|(c, (nx, nn))| {
-            let base = c * chunk;
-            let mut rng = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(base as u64 * 0x2545_F491_4F6C_DD1D) | 1;
-            let mut row = (usize::MAX, [0f32; DIM], [0f32; DIM]);
-            for t in 0..nx.len() {
-                if nx[t] > ep {
-                    continue;
-                }
-                let e = base + t;
-                let (j, kk) = (heads[e] as usize, tails[e] as usize);
-                if j != row.0 {
-                    if row.0 != usize::MAX {
-                        put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
+        tasks.par_iter().enumerate().with_min_len(MIN_TASK_EDGES / CHUNK).for_each(|(c, &(r0, r1))| {
+            let seed = (p.seed ^ 0x9E37_79B9_7F4A_7C15).wrapping_mul(epoch as u64 + 1).wrapping_add(c as u64 * 0x2545_F491_4F6C_DD1D);
+            // One xorshift stream per ring slot, so consecutive draws do not wait on each other.
+            let mut rngs: [u64; NEG_AHEAD] = std::array::from_fn(|s| seed.wrapping_add(s as u64 * 0xD1B5_4A32_D192_ED03) | 1);
+            let draw = |rng: &mut u64| {
+                let q = (((xorshift(rng) >> 32) * n as u64) >> 32) as usize;
+                prefetch(&emb[q * DIM]);
+                q
+            };
+            let mut ahead: [usize; NEG_AHEAD] = std::array::from_fn(|s| draw(&mut rngs[s]));
+            let mut slot = 0;
+            let mut lanes = Lanes::default();
+            for j in r0..r1 {
+                let (cur, mut delta, mut m) = (get(j), [0f32; DIM], 0);
+                let mut add = |lanes: &mut Lanes, m: &mut usize| {
+                    let f = lanes.forces(*m, cur, a, b, avx2);
+                    delta[0] += f[0];
+                    delta[1] += f[1];
+                    *m = 0;
+                };
+                // The due tails of each run of up to 64 edges are packed without branches
+                // (whether an edge is due is close to random), then sampled.
+                for run in edges[offsets[j]..offsets[j + 1]].chunks(64) {
+                    let (mut due, mut k) = ([0u32; 64], 0);
+                    for &(tail, ie) in run {
+                        due[k] = tail;
+                        k += ((ep * ie).floor() > (prev * ie).floor()) as usize;
                     }
-                    row = (j, get(j), [0.0; DIM]);
-                }
-                let (cur0, delta) = (row.1, &mut row.2);
-                let oth = get(kk);
-                let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
-                let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                if d2 > 0.0 {
-                    let pb = d2.powf(b);
-                    let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
-                    for d in 0..DIM {
-                        delta[d] += 2.0 * clip(gc * dx[d]) * alpha;
+                    for &tail in &due[..k] {
+                        lanes.set(m, get(tail as usize), 2.0);
+                        m += 1;
+                        if m == LANES {
+                            add(&mut lanes, &mut m);
+                        }
+                    }
+                    for _ in 0..k * n_neg {
+                        let q = std::mem::replace(&mut ahead[slot], draw(&mut rngs[slot]));
+                        slot = (slot + 1) % NEG_AHEAD;
+                        if q != j {
+                            lanes.set(m, get(q), 1.0);
+                            m += 1;
+                            if m == LANES {
+                                add(&mut lanes, &mut m);
+                            }
+                        }
                     }
                 }
-                nx[t] += eps[e];
-                let eneg = eps[e] / neg_rate;
-                let n_neg = ((ep - nn[t]) / eneg) as usize;
-                for _ in 0..n_neg {
-                    let q = (((xorshift(&mut rng) >> 32) * n as u64) >> 32) as usize;
-                    if q == j {
-                        continue;
-                    }
-                    let o = get(q);
-                    let dx = [cur0[0] - o[0], cur0[1] - o[1]];
-                    let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                    let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
-                    for d in 0..DIM {
-                        delta[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
-                    }
+                if m > 0 {
+                    add(&mut lanes, &mut m);
                 }
-                nn[t] += n_neg as f32 * eneg;
-            }
-            if row.0 != usize::MAX {
-                put(row.0, [row.1[0] + row.2[0], row.1[1] + row.2[1]]);
+                if delta != [0.0; DIM] {
+                    put(j, [cur[0] + alpha * delta[0], cur[1] + alpha * delta[1]]);
+                }
             }
         });
     }
@@ -295,6 +470,33 @@ pub fn umap(indices: &[u32], distances: &[f32], n: usize, k: usize, init: &[f32]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_forces_match_scalar() {
+        if !use_avx2() {
+            return;
+        }
+        let (a, b) = (0.583, 1.334);
+        let mut s = 11u64;
+        let mut u = || (xorshift(&mut s) % 100_000) as f32 / 5000.0;
+        for m in 1..=LANES {
+            for _ in 0..500 {
+                let mut l = Lanes::default();
+                let cur = [u(), u()];
+                for q in 0..m {
+                    // Some samples sit on the head itself (d2 = 0) or very close to it.
+                    let o = match q % 4 { 0 => cur, 1 => [cur[0] + 1e-4, cur[1]], _ => [u(), u()] };
+                    l.set(q, o, if q % 3 == 0 { 2.0 } else { 1.0 });
+                }
+                let want = l.forces_scalar(m, cur, a, b);
+                let got = unsafe { forces_avx2(&l, m, cur, a, b) };
+                for d in 0..2 {
+                    assert!((got[d] - want[d]).abs() <= 1e-4 * (1.0 + want[d].abs()), "{got:?} vs {want:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn two_blobs_separate() {
@@ -326,16 +528,19 @@ mod tests {
             }
         }
         let init: Vec<f32> = pts.iter().flat_map(|p| [p[1], p[0]]).collect();
-        let p = UmapParams { a: 0.583, b: 1.334, n_epochs: 200, negative_sample_rate: 5, learning_rate: 1.0, seed: 0 };
-        let e = optimize_layout(&g, &init, &p).unwrap();
-        let centre = |r: std::ops::Range<usize>| {
-            let m = r.len() as f32;
-            r.fold([0f32; 2], |acc, i| [acc[0] + e[2 * i] / m, acc[1] + e[2 * i + 1] / m])
-        };
-        let (c0, c1) = (centre(0..n / 2), centre(n / 2..n));
-        let d = |i: usize, c: [f32; 2]| (e[2 * i] - c[0]).powi(2) + (e[2 * i + 1] - c[1]).powi(2);
-        assert!(e.iter().all(|v| v.is_finite()));
-        let wrong = (0..n).filter(|&i| (i < n / 2) != (d(i, c0) < d(i, c1))).count();
-        assert_eq!(wrong, 0, "{wrong} cells lie nearer the other blob's centre");
+        for seed in 0..3 {
+            let p = UmapParams { a: 0.583, b: 1.334, n_epochs: 200, negative_sample_rate: 5, learning_rate: 1.0, seed };
+            let e = optimize_layout(&g, &init, &p).unwrap();
+            assert!(e.iter().all(|v| v.is_finite()));
+            // Each cell's 10 nearest cells in the layout come from its own blob. (A blob may
+            // stretch or split, so distance to the blob centres is not a stable criterion.)
+            let d = |i: usize, j: usize| (e[2 * i] - e[2 * j]).powi(2) + (e[2 * i + 1] - e[2 * j + 1]).powi(2);
+            let mixed = (0..n).filter(|&i| {
+                let mut o: Vec<usize> = (0..n).filter(|&j| j != i).collect();
+                o.sort_by(|&x, &y| d(i, x).total_cmp(&d(i, y)));
+                o[..10].iter().any(|&j| (j < n / 2) != (i < n / 2))
+            }).count();
+            assert_eq!(mixed, 0, "seed {seed}: {mixed} cells have a neighbour from the other blob");
+        }
     }
 }
