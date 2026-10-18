@@ -34,7 +34,7 @@ image = (
 
 WORKER = r"""
 import sys, time, json, numpy as np, scfast
-ds, reps, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+ds, reps, out, n_sil = sys.argv[1], int(sys.argv[2]), sys.argv[3], int(sys.argv[4])
 d = "/data/umap_bench/" + ds
 i, dist, p = np.load(d + "/idx.npy"), np.load(d + "/dist.npy"), np.load(d + "/init.npy")
 ts = []
@@ -46,7 +46,7 @@ if ds == "pbmc68k":
     lab = np.load(d + "/labels.npy")
     s = np.random.default_rng(0).choice(len(lab), 15000, replace=False)
     res["sil"] = [float(silhouette_score(u[s], lab[s]))]
-    for seed in (1, 2):
+    for seed in range(1, n_sil):
         v = scfast.umap(i, dist, p, seed=seed); res["sil"].append(float(silhouette_score(v[s], lab[s])))
 np.save(out, u)
 r = np.linalg.norm(u - np.median(u, 0), axis=1)
@@ -74,6 +74,9 @@ def build(rev: str, tar: bytes) -> str:
         tarfile.open(fileobj=io.BytesIO(tar)).extractall(src)
         subprocess.run(f"rm -rf {whl_dir} && maturin build --release -q -m rust/scfast-py/Cargo.toml -o {whl_dir}",
                        shell=True, cwd=src, check=True)
+        if rev == "WORKTREE":
+            subprocess.run("cargo test --release -q --manifest-path rust/Cargo.toml -p scfast-core umap 2>&1 | grep -E 'panicked|test result' -A4",
+                           shell=True, cwd=src)
         vol.commit()
     site = f"/tmp/site/{rev}"
     subprocess.run(f"pip install -q --no-deps --target {site} {whl_dir}/*.whl", shell=True, check=True)
@@ -81,7 +84,8 @@ def build(rev: str, tar: bytes) -> str:
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=16, memory=16384, timeout=3600)
-def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None, threads: list[int]) -> dict:
+def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None, threads: list[int],
+        sil_seeds: int = 3) -> dict:
     import json
 
     sites = {rev: build(rev, tar) for rev, tar in srcs.items()}
@@ -93,7 +97,7 @@ def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None,
             for th in threads:
                 out = f"/tmp/{rev}_{ds}.npy"
                 env = {**os.environ, "PYTHONPATH": site, "RAYON_NUM_THREADS": str(th)}
-                r = subprocess.run(["python", "-c", WORKER, ds, str(reps), out], env=env, capture_output=True, text=True)
+                r = subprocess.run(["python", "-c", WORKER, ds, str(reps), out, str(sil_seeds)], env=env, capture_output=True, text=True)
                 key = f"{rev} {ds}" + (f" t{th}" if th != 16 else "")
                 results[key] = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
                 if r.stderr.strip():
@@ -181,10 +185,11 @@ def setup(sizes: str = "100000,500000,1290549", pbmc_dir: str = "/tmp/sc/mu",
 
 
 @app.local_entrypoint()
-def main(revs: str = "HEAD,WORKTREE", sizes: str = "1290549", pbmc: bool = True, reps: int = 2, threads: str = "16"):
+def main(revs: str = "HEAD,WORKTREE", sizes: str = "1290549", pbmc: bool = True, reps: int = 2, threads: str = "16",
+         sil_seeds: int = 3):
     srcs = {sha(r): rust_tar(r) for r in revs.split(",")}
     datasets = (["pbmc68k"] if pbmc else []) + [f"brain{s}" for s in sizes.split(",") if s]
-    out = run.remote(srcs, datasets, reps, datasets[-1] if sizes else None, [int(t) for t in threads.split(",")])
+    out = run.remote(srcs, datasets, reps, datasets[-1] if sizes else None, [int(t) for t in threads.split(",")], sil_seeds)
     for k, v in out["results"].items():
         print(k, v)
     dest = ROOT / "bench/results/umap"

@@ -187,6 +187,139 @@ fn clip(g: f32) -> f32 {
     g.clamp(-4.0, 4.0)
 }
 
+const LANES: usize = 8;
+
+/// Up to LANES pending samples of one head cell: the other cell's position and the weight of
+/// its step (2 for a graph edge, whose attraction is doubled for head-only updates; 1 for a
+/// negative sample, which repels; 0 for an empty lane).
+#[derive(Default)]
+struct Lanes {
+    x: [f32; LANES],
+    y: [f32; LANES],
+    w: [f32; LANES],
+    m: usize,
+}
+
+impl Lanes {
+    /// Adds a sample; true when the lanes are full.
+    #[inline(always)]
+    fn push(&mut self, o: [f32; 2], attract: bool) -> bool {
+        self.x[self.m] = o[0];
+        self.y[self.m] = o[1];
+        self.w[self.m] = if attract { 2.0 } else { 1.0 };
+        self.m += 1;
+        self.m == LANES
+    }
+
+    /// The summed clipped gradient steps at `cur` (umap-learn's formulas); empties the lanes.
+    #[inline(always)]
+    fn forces(&mut self, cur: [f32; 2], a: f32, b: f32, avx2: bool) -> [f32; 2] {
+        #[cfg(target_arch = "x86_64")]
+        let f = if avx2 {
+            // SAFETY: avx2 is true only when use_avx2() detected AVX2 and FMA.
+            unsafe { forces_avx2(self, cur, a, b) }
+        } else {
+            self.forces_scalar(cur, a, b)
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let f = {
+            let _ = avx2;
+            self.forces_scalar(cur, a, b)
+        };
+        *self = Lanes::default();
+        f
+    }
+
+    fn forces_scalar(&self, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+        let mut f = [0f32; 2];
+        for q in 0..self.m {
+            let dx = [cur[0] - self.x[q], cur[1] - self.y[q]];
+            let d2 = dx[0] * dx[0] + dx[1] * dx[1];
+            let w = self.w[q];
+            for d in 0..2 {
+                f[d] += w * if w > 1.5 {
+                    if d2 > 0.0 {
+                        let pb = d2.powf(b);
+                        clip(-2.0 * a * b * pb / (d2 * (a * pb + 1.0)) * dx[d])
+                    } else {
+                        0.0
+                    }
+                } else if d2 > 0.0 {
+                    clip(2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) * dx[d])
+                } else {
+                    4.0
+                };
+            }
+        }
+        f
+    }
+}
+
+#[inline]
+fn use_avx2() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+
+/// `Lanes::forces_scalar` over all 8 lanes at once, with `d2^b` as `exp2(b log2 d2)` from
+/// polynomials (relative error below 1e-5) instead of a libm `powf` per sample.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn forces_avx2(l: &Lanes, cur: [f32; 2], a: f32, b: f32) -> [f32; 2] {
+    use std::arch::x86_64::*;
+    let c = _mm256_set1_ps;
+    let ci = _mm256_set1_epi32;
+    let (x, y, w) = (_mm256_loadu_ps(l.x.as_ptr()), _mm256_loadu_ps(l.y.as_ptr()), _mm256_loadu_ps(l.w.as_ptr()));
+    let (dx, dy) = (_mm256_sub_ps(c(cur[0]), x), _mm256_sub_ps(c(cur[1]), y));
+    let d2 = _mm256_fmadd_ps(dx, dx, _mm256_mul_ps(dy, dy));
+    let d2c = _mm256_max_ps(d2, c(f32::MIN_POSITIVE));
+
+    // log2(d2c) = e + log2(m), m in [sqrt(1/2), sqrt(2)), ln m = 2 atanh((m - 1) / (m + 1)).
+    let bits = _mm256_castps_si256(d2c);
+    let mant = _mm256_and_si256(bits, ci(0x007F_FFFF));
+    let big = _mm256_cmpgt_epi32(mant, ci(0x0035_04F3));
+    let e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), ci(127)), big));
+    let m = _mm256_castsi256_ps(_mm256_or_si256(mant, _mm256_blendv_epi8(ci(0x3F80_0000), ci(0x3F00_0000), big)));
+    let t = _mm256_div_ps(_mm256_sub_ps(m, c(1.0)), _mm256_add_ps(m, c(1.0)));
+    let t2 = _mm256_mul_ps(t, t);
+    let mut s = _mm256_fmadd_ps(t2, c(1.0 / 7.0), c(1.0 / 5.0));
+    s = _mm256_fmadd_ps(t2, s, c(1.0 / 3.0));
+    s = _mm256_fmadd_ps(t2, s, c(1.0));
+    let ln_m = _mm256_mul_ps(_mm256_mul_ps(c(2.0), t), s);
+    let z = _mm256_mul_ps(c(b), _mm256_fmadd_ps(ln_m, c(std::f32::consts::LOG2_E), e));
+    let z = _mm256_min_ps(_mm256_max_ps(z, c(-126.0)), c(126.0));
+
+    // 2^z = 2^i e^(f ln 2), i = round(z), |f| <= 1/2.
+    let i = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(z);
+    let f = _mm256_mul_ps(_mm256_sub_ps(z, i), c(std::f32::consts::LN_2));
+    let mut p = _mm256_fmadd_ps(f, c(1.0 / 720.0), c(1.0 / 120.0));
+    for k in [1.0 / 24.0, 1.0 / 6.0, 0.5, 1.0, 1.0] {
+        p = _mm256_fmadd_ps(f, p, c(k));
+    }
+    let scale = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(_mm256_cvtps_epi32(i), ci(127)), 23));
+    let pb = _mm256_mul_ps(p, scale);
+
+    let att = _mm256_cmp_ps::<_CMP_GT_OQ>(w, c(1.5));
+    let num = _mm256_blendv_ps(c(2.0 * b), _mm256_mul_ps(c(-2.0 * a * b), pb), att);
+    let den = _mm256_mul_ps(_mm256_blendv_ps(_mm256_add_ps(d2, c(0.001)), d2c, att), _mm256_fmadd_ps(c(a), pb, c(1.0)));
+    let g = _mm256_div_ps(num, den);
+    let clip8 = |v: __m256| _mm256_min_ps(_mm256_max_ps(v, c(-4.0)), c(4.0));
+    let zero = _mm256_blendv_ps(c(4.0), c(0.0), att);
+    let live = _mm256_cmp_ps::<_CMP_GT_OQ>(d2, c(0.0));
+    let fx = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dx)), live));
+    let fy = _mm256_mul_ps(w, _mm256_blendv_ps(zero, clip8(_mm256_mul_ps(g, dy)), live));
+    let (mut ox, mut oy) = ([0f32; 8], [0f32; 8]);
+    _mm256_storeu_ps(ox.as_mut_ptr(), fx);
+    _mm256_storeu_ps(oy.as_mut_ptr(), fy);
+    [ox.iter().sum(), oy.iter().sum()]
+}
+
 /// SGD layout of `graph` starting from `init` (n x 2, row-major). Returns the n x 2 embedding.
 pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Result<Vec<f32>> {
     const DIM: usize = 2;
@@ -257,6 +390,7 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
 
     let (a, b) = (p.a, p.b);
     let n_neg = p.negative_sample_rate;
+    let avx2 = use_avx2();
     let get = |i: usize| [f32::from_bits(emb[i * DIM].load(Relaxed)), f32::from_bits(emb[i * DIM + 1].load(Relaxed))];
     let put = |i: usize, v: [f32; DIM]| {
         emb[i * DIM].store(v[0].to_bits(), Relaxed);
@@ -279,41 +413,34 @@ pub fn optimize_layout(graph: &FuzzyGraph, init: &[f32], p: &UmapParams) -> Resu
             }
             let mut slot = 0;
             for j in r0..r1 {
-                let (cur0, mut delta) = (get(j), [0f32; DIM]);
-                let mut touched = false;
+                let (cur, mut delta) = (get(j), [0f32; DIM]);
+                let mut lanes = Lanes::default();
+                let mut add = |lanes: &mut Lanes| {
+                    let f = lanes.forces(cur, a, b, avx2);
+                    delta[0] += f[0];
+                    delta[1] += f[1];
+                };
                 for e in offsets[j]..offsets[j + 1] {
                     let ie = inv_eps[e];
                     if (ep * ie).floor() <= (prev * ie).floor() {
                         continue;
                     }
-                    touched = true;
-                    let oth = get(tails[e] as usize);
-                    let dx = [cur0[0] - oth[0], cur0[1] - oth[1]];
-                    let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                    if d2 > 0.0 {
-                        let pb = d2.powf(b);
-                        let gc = -2.0 * a * b * pb / (d2 * (a * pb + 1.0));
-                        for d in 0..DIM {
-                            delta[d] += 2.0 * clip(gc * dx[d]) * alpha;
-                        }
+                    if lanes.push(get(tails[e] as usize), true) {
+                        add(&mut lanes);
                     }
                     for _ in 0..n_neg {
                         let q = std::mem::replace(&mut ahead[slot], draw(&mut rng));
                         slot = (slot + 1) % NEG_AHEAD;
-                        if q == j {
-                            continue;
-                        }
-                        let o = get(q);
-                        let dx = [cur0[0] - o[0], cur0[1] - o[1]];
-                        let d2 = dx[0] * dx[0] + dx[1] * dx[1];
-                        let gc = if d2 > 0.0 { 2.0 * b / ((0.001 + d2) * (a * d2.powf(b) + 1.0)) } else { 0.0 };
-                        for d in 0..DIM {
-                            delta[d] += if gc > 0.0 { clip(gc * dx[d]) } else { 4.0 } * alpha;
+                        if q != j && lanes.push(get(q), false) {
+                            add(&mut lanes);
                         }
                     }
                 }
-                if touched {
-                    put(j, [cur0[0] + delta[0], cur0[1] + delta[1]]);
+                if lanes.m > 0 {
+                    add(&mut lanes);
+                }
+                if delta != [0.0; DIM] {
+                    put(j, [cur[0] + alpha * delta[0], cur[1] + alpha * delta[1]]);
                 }
             }
         });
@@ -336,6 +463,33 @@ pub fn umap(indices: &[u32], distances: &[f32], n: usize, k: usize, init: &[f32]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_forces_match_scalar() {
+        if !use_avx2() {
+            return;
+        }
+        let (a, b) = (0.583, 1.334);
+        let mut s = 11u64;
+        let mut u = || (xorshift(&mut s) % 100_000) as f32 / 5000.0;
+        for m in 1..=LANES {
+            for _ in 0..500 {
+                let mut l = Lanes::default();
+                let cur = [u(), u()];
+                for q in 0..m {
+                    // Some samples sit on the head itself (d2 = 0) or very close to it.
+                    let o = match q % 4 { 0 => cur, 1 => [cur[0] + 1e-4, cur[1]], _ => [u(), u()] };
+                    l.push(o, q % 3 == 0);
+                }
+                let want = l.forces_scalar(cur, a, b);
+                let got = unsafe { forces_avx2(&l, cur, a, b) };
+                for d in 0..2 {
+                    assert!((got[d] - want[d]).abs() <= 1e-4 * (1.0 + want[d].abs()), "{got:?} vs {want:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn two_blobs_separate() {
