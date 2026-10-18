@@ -292,9 +292,7 @@ def run(
         with timed("neighbors"):
             rsc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=rep, random_state=seed)
         with timed("leiden"):
-            rsc.tl.leiden(
-                adata, resolution=resolution, random_state=seed, n_iterations=2, key_added=CLUSTER_KEY
-            )
+            rsc.tl.leiden(adata, resolution=resolution, random_state=seed, key_added=CLUSTER_KEY)
         with timed("umap"):
             rsc.tl.umap(adata, random_state=seed)
         gpu_pool_peak = int(pool.total_bytes())

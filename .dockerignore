@@ -1,8 +1,10 @@
 .git
-rust/target
-rust/scfast-r/src/rust/target
+**/target
 bench/results
 data
 **/__pycache__
 **/.pytest_cache
-*.so
+**/*.egg-info
+**/*.so
+**/*.o
+**/*.dylib
