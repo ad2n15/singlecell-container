@@ -121,18 +121,18 @@ const D = {
     { name: "Seurat (published)", s: 10800, kind: "ref", note: "~3 h, published, 16 cores" },
     { name: "Scanpy, 16 cores", s: 1161.6, kind: "ref" },
     { name: "rapids-singlecell, H100", s: null, kind: "ref", note: "out of GPU memory (80 GB)" },
-    { name: "scfast CPU, 16 cores", s: 46.3, kind: "cpu" },
-    { name: "scfast GPU, H100", s: 6.80, kind: "gpu" },
+    { name: "scfast CPU, 16 cores", s: 23.7, kind: "cpu" },
+    { name: "scfast GPU, H100", s: 7.16, kind: "gpu" },
   ],
   cpu: [
-    { title: "PBMC 68k", rows: [["Seurat", 121.4, "ref"], ["Scanpy", 57.2, "ref"], ["scfast", 3.40, "cpu"]] },
-    { title: "Mouse brain 100k", rows: [["Seurat", 194.6, "ref"], ["Scanpy", 75.8, "ref"], ["scfast", 3.23, "cpu"]] },
-    { title: "Mouse brain 500k", rows: [["Seurat", 966.8, "ref"], ["Scanpy", 488.7, "ref"], ["scfast", 21.4, "cpu"]] },
+    { title: "PBMC 68k", rows: [["Seurat", 121.4, "ref"], ["Scanpy", 57.2, "ref"], ["scfast", 1.94, "cpu"]] },
+    { title: "Mouse brain 100k", rows: [["Seurat", 194.6, "ref"], ["Scanpy", 75.8, "ref"], ["scfast", 2.40, "cpu"]] },
+    { title: "Mouse brain 500k", rows: [["Seurat", 966.8, "ref"], ["Scanpy", 488.7, "ref"], ["scfast", 8.99, "cpu"]] },
   ],
   gpu: [
     { title: "PBMC 68k", rows: [["rapids", 2.84, "ref"], ["scfast", 0.68, "gpu"]] },
-    { title: "Mouse brain 500k", rows: [["rapids", 64.83, "ref"], ["scfast", 5.50, "gpu"]] },
-    { title: "Mouse brain 1.29M", rows: [["rapids", null, "ref", "out of memory"], ["scfast", 25.7, "gpu"]] },
+    { title: "Mouse brain 500k", rows: [["rapids", 64.83, "ref"], ["scfast", 5.72, "gpu"]] },
+    { title: "Mouse brain 1.29M", rows: [["rapids", null, "ref", "out of memory"], ["scfast", 26.7, "gpu"]] },
   ],
   parity: [
     ["PBMC 3k", "scfast CPU", 0.99995, 0.976, 0.947],
@@ -143,8 +143,8 @@ const D = {
     ["Brain 100k", "scfast CPU", 1.000, 0.963, 0.693],
     ["Brain 500k", "scfast CPU", 1.000, 0.959, 0.565],
   ],
-  mem: { scfast: 45.3, scanpy: 150.3 },
-  foot: "Compute = normalise → HVG → scale → PCA → neighbours → Leiden → UMAP, medians after a warm-up. CPU: Modal cpu=16 (AMD EPYC). GPU: NVIDIA H100 80 GB, 16 CPU cores. Data: 10x PBMC 68k and 1.3M E18 mouse brain cells. Source: bench/results/FINAL.md.",
+  mem: { scfast: 45.9, scanpy: 150.3 },
+  foot: "Compute = normalise → HVG → scale → PCA → neighbours → Leiden → UMAP, medians after a warm-up. CPU: Modal cpu=16 containers (AMD EPYC Milan/Genoa or Intel Xeon, assigned per run; the same build varies up to 2.5x between them, far less than the gaps shown). GPU: NVIDIA H100 80 GB, 16 CPU cores. Data: 10x PBMC 68k and 1.3M E18 mouse brain cells. Source: bench/results/FINAL.md.",
 };
 
 const css = n => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(n).trim();
