@@ -134,9 +134,17 @@ impl Clusterer for SingleClusteringLeiden {
         let (indptr, indices, weights) = renumber(graph, &order);
         let network = CSRNetwork::from_csr_parts(indptr, indices, weights, None).map_err(map_err)?;
 
-        // On a pool worker, the per-batch parallel loops that fit one chunk run inline instead of
-        // waking the pool from the caller's thread (thousands of small batches on small graphs).
-        let clustering = rayon::scope(|_| leiden_rb(&network, params));
+        // Leiden synchronises after every small batch of moves, so past a few threads per
+        // ~60k nodes the wake-ups cost more than the work: 4 threads up to 250k nodes, 12 from
+        // 750k (measured on AMD EPYC and Apple M: 16 threads were 1.8x slower than 4 at 100k).
+        // Running inside the pool also keeps one-chunk parallel loops inline. Labels do not
+        // depend on the thread count.
+        let threads = (graph.n / LEIDEN_NODES_PER_THREAD).clamp(4, 12).min(rayon::current_num_threads());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| Error::Backend { context: "leiden thread pool", message: e.to_string() })?;
+        let clustering = pool.install(|| leiden_rb(&network, params));
         let mut labels = vec![0usize; graph.n];
         for (&old, &c) in order.iter().zip(&clustering) {
             labels[old as usize] = c;
@@ -144,6 +152,8 @@ impl Clusterer for SingleClusteringLeiden {
         Ok(relabel_by_size(&labels))
     }
 }
+
+const LEIDEN_NODES_PER_THREAD: usize = 62_500;
 
 /// single-clustering 0.7.0's `leiden` (RB, refinement on, its default tolerance, patience
 /// and level cap) with its sequential local move and refinement replaced by the parallel
