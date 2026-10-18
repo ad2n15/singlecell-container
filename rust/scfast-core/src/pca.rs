@@ -122,14 +122,15 @@ pub fn implicit_scaled_pca<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaPa
 
 /// [`implicit_scaled_pca`] on a chosen [`Device`] (docs/scfast-integration.md Phase 6).
 ///
-/// `Device::Cpu` is exactly [`implicit_scaled_pca`]. `Device::Cuda(i)` runs the two sparse
-/// products of every Krylov step on the GPU (NVRTC CSR kernels with the mean / 1/sd
-/// correction applied on device, f32) and keeps the gene statistics, TSQR and the small SVD
-/// on the CPU in f64; it needs the `cuda` feature, a visible device and enough device memory
-/// for the CSR plus a few cells x l buffers, otherwise it returns [`Error::Gpu`] without
-/// touching the CPU path (callers that asked for `"auto"` can retry on the CPU). The GPU
-/// result is not bitwise equal to the CPU one (f32 products, atomics); the parity target
-/// is a top-10 PC subspace similarity above 0.99.
+/// `Device::Cpu` is exactly [`implicit_scaled_pca`]. `Device::Cuda(i)` computes the gene
+/// statistics on the CPU, uploads the CSR (f32 values) and runs `gram_svd` there: the
+/// Gram matrix Z^T Z and, up to 4096 genes, its exact eigendecomposition (cuSOLVER) on the
+/// device, then one product for the cell scores; the clip is applied exactly (see
+/// `cuda_pca`). It needs the `cuda` feature, a visible device and enough device memory for
+/// the CSR, the Gram matrix and a few cells x b buffers, otherwise it returns [`Error::Gpu`]
+/// without touching the CPU path (callers that asked for `"auto"` can retry on the CPU).
+/// The GPU result is not bitwise equal to the CPU one (f32 products, atomics, exact rather
+/// than Krylov eigenvectors); the parity target is a top-10 PC subspace similarity above 0.99.
 pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &PcaParams, device: Device) -> Result<PcaResult> {
     validate(&x, params)?;
     let (n, p) = (x.n_rows, x.n_cols);
