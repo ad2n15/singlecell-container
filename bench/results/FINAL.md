@@ -37,9 +37,30 @@ ARI 0.70–0.71**, and scfast against itself 0.67–0.79 (0.73–0.81 run to con
 agreement with Seurat sits inside that band, and its agreement with the published Zheng et al.
 PBMC 68k labels (ARI 0.274) equals Seurat's (0.283).
 
-## GPU
+## GPU: real 10x data, NVIDIA H100 80 GB (Modal, 16 CPU cores)
 
-(filled in below once the L4 / H100 runs finish)
+| Dataset | Cells | rapids-singlecell | **scfast-gpu** | file → result, rapids | **file → result, scfast-gpu** |
+|---|---:|---:|---:|---:|---:|
+| PBMC 68k | 68,260 | 0.62 s | **0.52 s** | 2.84 s | **0.68 s** |
+| Mouse brain | 100,000 | 1.20 s | **1.20 s** | 12.06 s | **1.82 s** |
+| Mouse brain | 500,000 | 4.28 s | **3.06 s** | 64.83 s | **5.50 s** |
+| Mouse brain | 1,290,549 | **out of GPU memory** | **6.80 s** | fails | **25.7 s** |
+
+The first two columns are compute (normalise → UMAP); "file → result" adds reading the file and the
+host ⇄ GPU transfers. On a 24 GB L4, rapids-singlecell already runs out of memory at 500k cells,
+where scfast-gpu finishes in 11.0 s. scfast-gpu vs Seurat: PC similarity 0.9997–1.0000, kNN overlap
+0.994–0.998 at every size (PBMC 3k on an L4: 1.0 / 0.998).
+
+Published reference for about 1M cells of the same dataset (`REFERENCES.md`): rapids-singlecell's
+core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
+
+## The headline: 1.29 million mouse brain cells
+
+| | Seurat (16 cores) | Scanpy (16 cores) | scfast CPU (16 cores) | rapids-singlecell (H100) | **scfast GPU (H100)** |
+|---|---:|---:|---:|---:|---:|
+| Compute | ~3 h (published) | 1,161.6 s | 46.3 s | out of memory | **6.8 s** |
+| File → result | – | 1,262.6 s | 61.6 s | – | **25.7 s** |
+| vs Scanpy (compute) | – | 1× | 25× | – | **171×** |
 
 ## What changed overnight
 
