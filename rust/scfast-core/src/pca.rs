@@ -32,6 +32,8 @@
 //! and every faer call runs with `Par::Seq` inside its task, so a given seed and input give
 //! bitwise-identical output for any number of rayon threads (on the same machine and build).
 
+use faer::reborrow::{Reborrow, ReborrowMut};
+
 use crate::device::Device;
 use crate::error::{Error, Result};
 use crate::types::{CsrView, Idx, Real, RowMajor};
@@ -189,7 +191,8 @@ pub fn implicit_scaled_pca_on<I: Idx, T: Real>(x: CsrView<'_, I, T>, params: &Pc
             loadings.data[j * k + c] = (ub[(j, c)] * signs[c]) as f32;
         }
     }
-    let embeddings = embed(q.as_ref(), vb.as_ref(), &d, &signs, k);
+    let q = faer::MatRef::from_column_major_slice(&q, n, vb.nrows());
+    let embeddings = embed(q, vb.as_ref(), &d, &signs, k);
     let denom = ((n - 1) as f64).sqrt();
     Ok(PcaResult {
         embeddings,
@@ -247,39 +250,42 @@ fn block_krylov_svd<O: Operator>(
     b: usize,
     iters: usize,
     seed: u64,
-) -> Result<(faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
+) -> Result<(Vec<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>)> {
     let (n, p) = (op.nrows(), op.ncols());
     let blocks = (iters + 1).min(n.min(p) / b);
     let width = blocks * b;
-    let mut k = faer::Mat::<f64>::zeros(n, width);
+    // K, column-major. `vec!` of zeros is a lazily zeroed allocation, so its pages are first
+    // touched by the parallel products below rather than by a serial fill.
+    let mut kbuf = vec![0.0f64; n * width];
+    let mut k = faer::MatMut::from_column_major_slice_mut(&mut kbuf, n, width);
     let mut bt = faer::Mat::<f64>::zeros(p, width);
     let omega = dense::gaussian(p, b, seed);
-    let mut y = faer::Mat::<f64>::zeros(n, b);
-    op.apply(omega.as_ref(), y.as_mut())?;
+    op.apply(omega.as_ref(), k.rb_mut().subcols_mut(0, b))?;
     drop(omega);
-    dense::orthonormalize(y.as_mut());
+    dense::orthonormalize(k.rb_mut().subcols_mut(0, b));
     // A basis capped by min(n, p) cannot hold every block: the surplus iterations refine
     // the start block instead.
     for _ in blocks..iters + 1 {
-        let mut g = op.apply_t(y.as_ref())?;
+        let mut g = op.apply_t(k.rb().subcols(0, b))?;
         dense::orthonormalize(g.as_mut());
-        op.apply(g.as_ref(), y.as_mut())?;
-        dense::orthonormalize(y.as_mut());
+        op.apply(g.as_ref(), k.rb_mut().subcols_mut(0, b))?;
+        dense::orthonormalize(k.rb_mut().subcols_mut(0, b));
     }
     for i in 0..blocks {
-        k.as_mut().submatrix_mut(0, i * b, n, b).copy_from(y.as_ref());
-        let mut g = op.apply_t(y.as_ref())?;
-        bt.as_mut().submatrix_mut(0, i * b, p, b).copy_from(g.as_ref());
+        let mut g = op.apply_t(k.rb().subcols(i * b, b))?;
+        bt.as_mut().subcols_mut(i * b, b).copy_from(g.as_ref());
         if i + 1 < blocks {
             dense::orthonormalize(g.as_mut());
-            op.apply(g.as_ref(), y.as_mut())?;
+            let (done, rest) = k.rb_mut().split_at_col_mut((i + 1) * b);
+            let mut y = rest.subcols_mut(0, b);
+            op.apply(g.as_ref(), y.rb_mut())?;
             // K^T y = K^T Z g = (Z^T K)^T g: the first projection needs no pass over K.
             let kty = dense::mul_tn(bt.as_ref().subcols(0, (i + 1) * b), g.as_ref());
-            dense::orthonormalize_against(k.as_ref().subcols(0, (i + 1) * b), y.as_mut(), kty);
+            dense::orthonormalize_against(done.rb(), y, kty);
         }
     }
     let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;
-    Ok((k, ub, d, vb))
+    Ok((kbuf, ub, d, vb))
 }
 
 fn embed(q: faer::MatRef<'_, f64>, vb: faer::MatRef<'_, f64>, d: &[f64], signs: &[f64], k: usize) -> RowMajor {
