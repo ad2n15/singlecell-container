@@ -62,6 +62,20 @@ core steps ≈ 7.3 s on a B200, Scanpy ≈ 13 min on a 32-core Threadripper.
 | File → result | – | 1,262.6 s | 30.8 s | – | **12.0 s** |
 | vs Scanpy (compute) | – | 1× | 49× | – | **172×** |
 
+## Live on a laptop (Apple M-series, 12 threads, 24 GB)
+
+`python bench/demo_run.py --input <matrix.h5> --out umap.png` runs the whole workflow and draws the
+UMAP; times are from process start, including the file read. Inputs for a demo are in
+`bench/results/demo_data/` (git-ignored).
+
+| Dataset | Cells | scfast, file → UMAP image |
+|---|---:|---:|
+| PBMC 68k | 68,260 | 1.3 s |
+| Mouse brain | 100,000 | 2.2 s |
+| Mouse brain | 500,000 | 11.3 s |
+
+For comparison, Seurat needs 121 s, 195 s and 967 s for these on 16 server cores (compute only).
+
 ## What changed overnight
 
 See `progress.md` for the step-by-step log with evidence.
