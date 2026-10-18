@@ -292,9 +292,9 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         return self.cp.asarray(x)
 
     def knn_search(self, x, k):
-        if x.shape[0] <= CAGRA_MIN_CELLS:
+        if x.shape[0] <= CUVS_MIN_CELLS:
             return ScfastEngine.knn_search(self, x, k)
-        return cagra_knn(self.cp.asarray(x, dtype=self.cp.float32), k)
+        return cuvs_knn(self.cp.asarray(x, dtype=self.cp.float32), k)
 
     def neighbors(self, a, cfg):
         super().neighbors(a, cfg)
@@ -304,17 +304,17 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
                               "params": {"n_neighbors": cfg.k, "method": "umap", "metric": "euclidean"}}
 
 
-CAGRA_MIN_CELLS = 200_000
+CUVS_MIN_CELLS = 200_000
 
 
-def cagra_knn(x, k):
-    """Approximate kNN from cuVS CAGRA, in scfast.knn's layout: the cell itself in column 0,
+def cuvs_knn(x, k):
+    """Approximate kNN from cuVS IVF-Flat, in scfast.knn's layout: the cell itself in column 0,
     then k - 1 neighbours by increasing Euclidean distance (int32 / float32, on the host)."""
     import cupy as cp
-    from cuvs.neighbors import cagra
+    from cuvs.neighbors import ivf_flat
 
-    index = cagra.build(cagra.IndexParams(graph_degree=32, intermediate_graph_degree=64, build_algo="nn_descent"), x)
-    d, i = cagra.search(cagra.SearchParams(itopk_size=64), index, x, k)
+    index = ivf_flat.build(ivf_flat.IndexParams(n_lists=1024, metric="sqeuclidean"), x)
+    d, i = ivf_flat.search(ivf_flat.SearchParams(n_probes=32), index, x, k)
     d, i = cp.asarray(d), cp.asarray(i).astype(cp.int32)
     n = x.shape[0]
     is_self = i == cp.arange(n, dtype=cp.int32)[:, None]
