@@ -251,7 +251,7 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
     scfast.read_10x_h5(arrays=True) reads on the CPU into float32 data, int32 indices and
     int64 indptr at any size; 'to_gpu' uploads those raw counts. scfast.preprocess then runs on the device (the HVGs are
     Seurat's vst ones, as scfast-cpu), PCA (clip exact), kNN and the SNN graph run on
-    scfast's CUDA backend, Leiden on cuGraph there (the backend used is recorded as
+    scfast's CUDA backend (above CUVS_MIN_CELLS the kNN is cuVS IVF-Flat), Leiden on cuGraph there (the backend used is recorded as
     `leiden_device` in the environment file), and UMAP is rapids-singlecell's (cuML) on the
     fuzzy simplicial set built on the GPU from the same kNN (fuzzy_graph_gpu).
     """
