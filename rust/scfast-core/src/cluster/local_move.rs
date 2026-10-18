@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use rand::seq::SliceRandom;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
-use single_clustering::community_search::leiden::{NeighborWeights, Partition};
+use single_clustering::community_search::leiden::NeighborWeights;
 use single_clustering::network::CSRNetwork;
 
 /// single-clustering's improvement floor, relative to the total edge weight.
@@ -42,16 +42,17 @@ thread_local! {
     static WEIGHTS: RefCell<NeighborWeights> = RefCell::new(NeighborWeights::with_capacity(0));
 }
 
-/// Moves nodes of `graph` between the communities of `start` until no single move improves
-/// the RB objective by more than the floor. Returns the new membership.
-pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64, rng: &mut ChaCha8Rng) -> Vec<usize> {
+/// Moves nodes of `graph` between the communities of `start` (community of each node) until
+/// no single move improves the RB objective by more than the floor. Returns the new
+/// membership.
+pub(super) fn local_move(graph: &CSRNetwork, start: &[usize], resolution: f64, rng: &mut ChaCha8Rng) -> Vec<usize> {
     let n = graph.node_count();
-    let four_m = 4.0 * start.total_weight();
-    let threshold = MIN_GAIN_RELATIVE * start.total_weight().abs().max(1.0);
+    let four_m = 4.0 * graph.total_weight();
+    let threshold = MIN_GAIN_RELATIVE * graph.total_weight().abs().max(1.0);
     let strength: Vec<f64> = (0..n).into_par_iter().map(|v| graph.strength(v)).collect();
     let self_loop: Vec<f64> = (0..n).into_par_iter().map(|v| graph.self_loop_weight(v)).collect();
-    let mut membership: Vec<u32> = (0..n).map(|v| start.membership(v) as u32).collect();
-    let slots = start.slots().max(n) + 1;
+    let mut membership: Vec<u32> = start.iter().map(|&c| c as u32).collect();
+    let slots = start.iter().copied().max().map_or(0, |m| m + 1).max(n) + 1;
     let mut kc = vec![0f64; slots];
     let mut size = vec![0u32; slots];
     for (v, &c) in membership.iter().enumerate() {
