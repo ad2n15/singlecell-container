@@ -12,7 +12,7 @@ Compute = normalise → UMAP (median of measured repeats, summed). Read and CPU�
 |---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 68,260 | seurat | 121.37 | 4.64 | 0.00 | – | – | 1.00× | –× | – | – | – | baseline |
 | 68,260 | scanpy | 57.18 | 2.00 | 0.00 | 6.41 | – | 2.12× | –× | 1.000 | 0.974 | 0.559 | fails parity |
-| 68,260 | scfast-cpu | 1.94 | 0.10 | 0.00 | 1.07 | – | 62.63× | –× | 1.000 | 0.945 | 0.705 | fails parity |
+| 68,260 | scfast-cpu | 1.80 | 0.11 | 0.00 | 1.09 | – | 67.39× | –× | 1.000 | 0.945 | 0.705 | fails parity |
 
 Parity thresholds: PC similarity ≥ 0.99, kNN overlap ≥ 0.9, ARI ≥ 0.9. Adoption: parity passes and, at ≥ 100,000 cells, ≥ 1.5× faster or ≥ 2.0× less peak memory. Scanpy and rapids run their own pipelines (different HVG, graph and Leiden implementations), so their parity is informative only; the rule is meant for scfast.
 
@@ -45,14 +45,14 @@ Median wall time in seconds (min–max over measured repeats); peak RSS within t
 | 68,260 | scanpy | neighbors | 5.392 | 5.140–5.428 | 3 | 6.41 | process |
 | 68,260 | scanpy | cluster | 2.949 | 2.820–3.621 | 3 | 6.41 | process |
 | 68,260 | scanpy | umap | 34.455 | 34.336–34.984 | 3 | 6.41 | process |
-| 68,260 | scfast-cpu | read | 0.103 | 0.082–0.141 | 3 | 1.06 | process |
-| 68,260 | scfast-cpu | normalize | 0.073 | 0.072–0.092 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | scale | 0.002 | 0.002–0.002 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | pca | 0.304 | 0.303–0.309 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | neighbors | 0.169 | 0.164–0.182 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | cluster | 0.859 | 0.857–0.897 | 3 | 1.07 | process |
-| 68,260 | scfast-cpu | umap | 0.531 | 0.524–0.536 | 3 | 1.07 | process |
+| 68,260 | scfast-cpu | read | 0.112 | 0.085–0.134 | 3 | 1.03 | process |
+| 68,260 | scfast-cpu | normalize | 0.079 | 0.073–0.086 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | hvg | 0.000 | 0.000–0.000 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | scale | 0.002 | 0.002–0.002 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | pca | 0.301 | 0.297–0.311 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | neighbors | 0.167 | 0.167–0.179 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | cluster | 0.718 | 0.679–0.759 | 3 | 1.09 | process |
+| 68,260 | scfast-cpu | umap | 0.534 | 0.522–0.542 | 3 | 1.09 | process |
 
 ## Start-up (cold)
 
