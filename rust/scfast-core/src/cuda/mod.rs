@@ -296,6 +296,19 @@ extern "C" __global__ void xtx(const long long* __restrict__ indptr,
   }
 }
 
+// The mean / 1/sd correction of the X^T X upper triangle g[a * p + b] (a <= b) in place:
+// (g - mu_a s_b - s_a mu_b + n mu_a mu_b) inv_sd_a inv_sd_b, s the column sums of X. In
+// column-major terms this is the lower triangle of Z^T Z, which is what syevd reads.
+extern "C" __global__ void gram_finish(double* __restrict__ g, const double* __restrict__ mean,
+                                       const double* __restrict__ colsum, const double* __restrict__ inv_sd,
+                                       double n, int p) {
+  const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= (long long)p * p) return;
+  const int a = (int)(tid / p), b = (int)(tid - (long long)a * p);
+  if (b < a) return;
+  g[tid] = (g[tid] - mean[a] * colsum[b] - colsum[a] * mean[b] + n * mean[a] * mean[b]) * inv_sd[a] * inv_sd[b];
+}
+
 // vals[t] = min(vals[t], caps[indices[t]]) over all nnz stored entries (grid-stride).
 extern "C" __global__ void cap(const unsigned int* __restrict__ indices, float* __restrict__ vals,
                                const float* __restrict__ caps, unsigned long long nnz) {
@@ -419,6 +432,7 @@ pub(crate) struct Gpu {
     pub xtx: CudaFunction,
     pub colstats: CudaFunction,
     pub cap: CudaFunction,
+    pub gram_finish: CudaFunction,
     /// `knn` compiled per (dims, cap).
     knn: Mutex<HashMap<(usize, usize), CudaFunction>>,
     pub ordinal: usize,
@@ -458,7 +472,8 @@ impl Gpu {
         let xtx = f("xtx")?;
         let colstats = f("colstats")?;
         let cap = f("cap")?;
-        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, xtx, colstats, cap, knn: Mutex::new(HashMap::new()), ordinal })
+        let gram_finish = f("gram_finish")?;
+        Ok(Gpu { ctx, stream, module, zv, ztu, ztu_finish, xtx, colstats, cap, gram_finish, knn: Mutex::new(HashMap::new()), ordinal })
     }
 
     /// The `knn` kernel for `d` dims and `cap` candidates, and the reference points per
@@ -538,7 +553,7 @@ mod tests {
     /// Rust side loads is defined, and the compile-time constants agree.
     #[test]
     fn kernel_source_names_every_entry_point() {
-        for name in ["zv", "ztu", "ztu_finish", "xtx", "colstats", "cap"] {
+        for name in ["zv", "ztu", "ztu_finish", "xtx", "colstats", "cap", "gram_finish"] {
             assert!(KERNELS.contains(&format!("__global__ void {name}(")), "kernel {name} missing");
         }
         assert!(KNN_KERNEL.contains("__global__ void knn("));

@@ -337,27 +337,23 @@ fn block_krylov_svd<O: Operator>(op: &O, b: usize, iters: usize, seed: u64) -> R
 const GRAM_MAX_GENES: usize = 8192;
 
 /// Largest gene count for which [`gram_svd`] takes the exact eigendecomposition of the Gram
-/// matrix (0.3 s at 2,000 genes, cubic in the gene count).
+/// matrix on the device (cuSOLVER; cubic in the gene count).
 #[cfg(feature = "cuda")]
 const EIG_MAX_GENES: usize = 4096;
 
 /// [`block_krylov_svd`] for the device: G = Z^T Z (genes x genes) in one pass over the
-/// data, then on the host either its exact eigendecomposition (up to [`EIG_MAX_GENES`]) or
-/// the gene-side Krylov basis `[Ω, G Ω, ..., G^q Ω]` (Z times it is the cell-side basis of
+/// data, then either its exact eigendecomposition on the device (up to [`EIG_MAX_GENES`]) or,
+/// on the host, the gene-side Krylov basis `[Ω, G Ω, ..., G^q Ω]` (Z times it is the cell-side basis of
 /// `block_krylov_svd`, so the same `power_iters` gives the same subspace) with Rayleigh-Ritz
 /// on `K^T G K`; then one `apply` for the cell scores. Avoids 2 (power_iters + 1) cells x b
 /// round trips and their host QR factorisations. Returns (U, V, S, I) so that `embed` gives Z V.
 #[cfg(feature = "cuda")]
 fn gram_svd(op: &cuda::CudaScaledOp, b: usize, iters: usize, seed: u64) -> Result<Svd> {
-    let g = op.gram()?;
     let (n, p) = (op.nrows(), op.ncols());
     let (vr, lambda) = if p <= EIG_MAX_GENES {
-        let e = g
-            .self_adjoint_eigen(faer::Side::Lower)
-            .map_err(|e| Error::Backend { context: "faer self-adjoint eigendecomposition", message: format!("{e:?}") })?;
-        let (u, ev) = (e.U(), e.S().column_vector());
-        (faer::Mat::from_fn(p, b, |j, c| u[(j, p - 1 - c)]), (0..b).map(|c| ev[p - 1 - c]).collect::<Vec<f64>>())
+        op.gram_top_eigen(b)?
     } else {
+        let g = op.gram()?;
         let blocks = (iters + 1).min(p / b);
         let mut k = faer::Mat::<f64>::zeros(p, blocks * b);
         let mut v = dense::gaussian(p, b, seed);

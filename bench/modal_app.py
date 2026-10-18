@@ -40,7 +40,7 @@ RSC = "0.18.1"  # rapids-singlecell-cu12: prebuilt CUDA kernels, no CMake build
 app = modal.App(os.environ.get("SCFAST_APP", "scfast-bench"))
 bench_vol = modal.Volume.from_name("scfast-bench", create_if_missing=True)
 data_vol = modal.Volume.from_name("scfast-data", create_if_missing=True)  # real datasets, prep/<dataset>/
-session = modal.Secret.from_dict({"SCFAST_WHEELS": WHEELS, "CARGO_TARGET_DIR": TARGET})
+session = modal.Secret.from_dict({"SCFAST_WHEELS": WHEELS, "CARGO_TARGET_DIR": TARGET, "SCFAST_CPUS": str(CPUS)})
 cargo_vol = modal.Volume.from_name("scfast-cargo", create_if_missing=True)
 
 image = (
@@ -190,7 +190,8 @@ def bench_remote(tag: str, name: str, sizes: str, engines: str, reps: int = 1, e
     return f"results/{name}"
 
 
-@app.function(image=image, secrets=[session], gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800, volumes={"/vol": bench_vol})
+@app.function(image=image, secrets=[session], gpu=GPU, cpu=CPUS, memory=MEM_GB * 1024, timeout=1800,
+              volumes={"/vol": bench_vol, "/data": data_vol})
 def script_remote(code: str, args: str = "") -> str:
     """Run a local Python script on the GPU box (wheel installed, data under /vol/data)."""
     install_wheel()

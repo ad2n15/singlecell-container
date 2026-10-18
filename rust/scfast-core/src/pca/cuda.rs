@@ -9,7 +9,8 @@
 //!   zeroes the genes x l accumulator, runs `ztu` (atomic scatter) and `ztu_finish` (mean
 //!   and 1/sd correction), downloads the genes x l result.
 //!
-//! - `gram`: Z^T Z in one pass (`xtx` kernel), for the Gram path in `pca.rs`.
+//! - `gram_top_eigen`: Z^T Z in one pass (`xtx`, `gram_finish`) and its eigendecomposition
+//!   (cuSOLVER `syevd`), for the Gram path in `pca.rs`; `gram` downloads Z^T Z instead.
 //! - `CsrDev::cap`: Seurat's clip, as a per-gene cap on the stored values (`cap` kernel).
 //!
 //! All device buffers (but the Gram matrix) are allocated at construction for the fixed `l`, so the working set
@@ -271,30 +272,95 @@ fn upload_chunked<T: DeviceRepr>(gpu: &Gpu, len: usize, chunk: impl Fn(&std::ops
 }
 
 impl CudaScaledOp {
-    /// Z^T Z (genes x genes, f64) in one pass over X: X^T X on the device, then the mean and
-    /// 1/sd correction on the host, `diag(inv_sd) (X^T X - mu s^T - s mu^T + n mu mu^T) diag(inv_sd)`
-    /// with `s` the column sums of X (`s = n mu` unless the values were capped).
-    pub fn gram(&self) -> Result<Mat<f64>> {
+    /// Z^T Z (genes x genes, f64) in one pass over X: X^T X on the device (`xtx`), then the
+    /// mean and 1/sd correction there too (`gram_finish`),
+    /// `diag(inv_sd) (X^T X - mu s^T - s mu^T + n mu mu^T) diag(inv_sd)` with `s` the column
+    /// sums of X (`s = n mu` unless the values were capped). Only the column-major lower
+    /// triangle is written.
+    fn gram_device(&self) -> Result<CudaSlice<f64>> {
         let (n, p) = (self.n, self.p);
+        let gpu = &self.gpu;
+        let mut g = gpu.alloc_zeros::<f64>(p * p, "alloc Gram matrix")?;
+        let pi = p as i32;
+        let cfg = cudarc::driver::LaunchConfig { grid_dim: (n as u32, 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
+        // SAFETY: argument types and order match the `xtx` kernel; one block per row.
+        unsafe { gpu.stream.launch_builder(&gpu.xtx).arg(&self.indptr).arg(&self.indices).arg(&self.vals).arg(&mut g).arg(&pi).launch(cfg) }
+            .map_err(|e| drv_err("launch xtx", e))?;
+        let mean = gpu.upload(&self.mean, "upload gene means")?;
+        let colsum = gpu.upload(&self.x_colsum, "upload column sums")?;
+        let inv_sd = gpu.upload(&self.inv_sd, "upload gene 1/sd")?;
+        let nf = n as f64;
+        // SAFETY: argument types and order match the `gram_finish` kernel; every vector has p entries.
+        unsafe {
+            gpu.stream.launch_builder(&gpu.gram_finish).arg(&mut g).arg(&mean).arg(&colsum).arg(&inv_sd).arg(&nf).arg(&pi).launch(Gpu::cfg_1d(p * p))
+        }
+        .map_err(|e| drv_err("launch gram_finish", e))?;
+        gpu.sync("Gram matrix")?;
+        Ok(g)
+    }
+
+    /// Z^T Z on the host, for the Krylov path above `EIG_MAX_GENES`.
+    pub fn gram(&self) -> Result<Mat<f64>> {
+        let p = self.p;
         self.gpu.ensure_fits(8 * p * p, &format!("Gram matrix of {p} genes"))?;
         let mut host = vec![0f64; p * p];
-        guard("CUDA PCA X^T X", || {
-            let mut g = self.gpu.alloc_zeros::<f64>(p * p, "alloc Gram matrix")?;
-            let pi = p as i32;
-            let cfg = cudarc::driver::LaunchConfig { grid_dim: (n as u32, 1, 1), block_dim: (128, 1, 1), shared_mem_bytes: 0 };
-            // SAFETY: argument types and order match the `xtx` kernel; one block per row.
-            unsafe {
-                self.gpu.stream.launch_builder(&self.gpu.xtx).arg(&self.indptr).arg(&self.indices).arg(&self.vals).arg(&mut g).arg(&pi).launch(cfg)
-            }
-            .map_err(|e| drv_err("launch xtx", e))?;
-            self.gpu.download_into(&g, &mut host, "download X^T X")
+        guard("CUDA PCA Z^T Z", || {
+            let g = self.gram_device()?;
+            self.gpu.download_into(&g, &mut host, "download Z^T Z")
         })?;
-        let nf = n as f64;
-        Ok(Mat::from_fn(p, p, |a, b| {
-            let (lo, hi) = (a.min(b), a.max(b));
-            let (ma, mb) = (self.mean[a], self.mean[b]);
-            (host[lo * p + hi] - ma * self.x_colsum[b] - self.x_colsum[a] * mb + nf * ma * mb) * self.inv_sd[a] * self.inv_sd[b]
-        }))
+        Ok(Mat::from_fn(p, p, |a, b| host[a.min(b) * p + a.max(b)]))
+    }
+
+    /// The top `b` eigenpairs of Z^T Z (eigenvalues descending), with the Gram matrix formed
+    /// and decomposed (cuSOLVER `syevd`) on the device; only the `b` eigenvectors come back.
+    pub fn gram_top_eigen(&self, b: usize) -> Result<(Mat<f64>, Vec<f64>)> {
+        use cudarc::cusolver::{safe::DnHandle, sys};
+        let p = self.p;
+        assert!(b <= p);
+        self.gpu.ensure_fits(16 * p * p, &format!("Gram eigendecomposition of {p} genes"))?;
+        let mut vecs = vec![0f64; p * b];
+        let mut vals = vec![0f64; p];
+        guard("CUDA PCA Gram eigendecomposition", || {
+            let gpu = &self.gpu;
+            let solver_err = |step: &str, e: cudarc::cusolver::result::CusolverError| Error::gpu(format!("{step}: cuSOLVER {:?}", e.0));
+            let mut g = self.gram_device()?;
+            let pi = p as i32;
+            let dn = DnHandle::new(gpu.stream.clone()).map_err(|e| solver_err("cusolverDnCreate", e))?;
+            let mut w = gpu.alloc_zeros::<f64>(p, "alloc eigenvalues")?;
+            let mut info = gpu.alloc_zeros::<i32>(1, "alloc info")?;
+            let (mode, fill) = (sys::cusolverEigMode_t::CUSOLVER_EIG_MODE_VECTOR, sys::cublasFillMode_t::CUBLAS_FILL_MODE_LOWER);
+            let mut lwork = 0i32;
+            {
+                let (gp, _a) = g.device_ptr_mut(&gpu.stream);
+                let (wp, _b) = w.device_ptr_mut(&gpu.stream);
+                // SAFETY: g is p x p and w has p entries on this handle's stream.
+                unsafe { sys::cusolverDnDsyevd_bufferSize(dn.cu(), mode, fill, pi, gp as *const f64, pi, wp as *const f64, &mut lwork) }
+                    .result()
+                    .map_err(|e| solver_err("syevd buffer size", e))?;
+            }
+            let mut work = gpu.alloc_zeros::<f64>(lwork.max(1) as usize, "alloc syevd workspace")?;
+            {
+                let (gp, _a) = g.device_ptr_mut(&gpu.stream);
+                let (wp, _b) = w.device_ptr_mut(&gpu.stream);
+                let (kp, _c) = work.device_ptr_mut(&gpu.stream);
+                let (ip, _d) = info.device_ptr_mut(&gpu.stream);
+                // SAFETY: buffers as above, the workspace has lwork entries, info one.
+                unsafe { sys::cusolverDnDsyevd(dn.cu(), mode, fill, pi, gp as *mut f64, pi, wp as *mut f64, kp as *mut f64, lwork, ip as *mut i32) }
+                    .result()
+                    .map_err(|e| solver_err("syevd", e))?;
+            }
+            let mut status = [0i32];
+            gpu.download_into(&info, &mut status, "download syevd info")?;
+            if status[0] != 0 {
+                return Err(Error::gpu(format!("syevd did not converge (info {})", status[0])));
+            }
+            gpu.download_into(&w, &mut vals, "download eigenvalues")?;
+            gpu.stream.memcpy_dtoh(&g.slice((p - b) * p..), &mut vecs).map_err(|e| drv_err("download eigenvectors", e))?;
+            gpu.sync("download eigenvectors")
+        })?;
+        // syevd sorts ascending; column c of the result is eigenvector p - 1 - c.
+        let v = Mat::from_fn(p, b, |j, c| vecs[(b - 1 - c) * p + j]);
+        Ok((v, (0..b).map(|c| vals[p - 1 - c]).collect()))
     }
 }
 
