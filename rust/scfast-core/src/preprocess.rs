@@ -209,49 +209,10 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
     let mut library_size = vec![0.0f64; n];
     let acc = pass1(&x, params.scale_factor, blocks, 0, blocks.count, &mut data, &mut library_size)?;
 
-    // ---- per-gene vst statistics
+    let VstSums { mean, variance, variance_expected, mut variance_standardized, needs_clip, sd } =
+        vst_from_sums(&acc.sum, &acc.sumsq, &acc.max, &acc.nnz, n, params.span, clip)?;
     let nf = n as f64;
-    let mut mean = vec![0.0; p];
-    let mut variance = vec![0.0; p];
-    for j in 0..p {
-        let m = acc.sum[j] / nf;
-        mean[j] = m;
-        if n > 1 {
-            // Seurat: sum((x - mu)^2) / (n - 1), zeros included.
-            variance[j] = ((acc.sumsq[j] - acc.sum[j] * m) / (nf - 1.0)).max(0.0);
-            // A gene stored in every cell with a single value is constant too.
-            if acc.nnz[j] as usize == n && acc.max[j] * acc.max[j] * nf == acc.sumsq[j] && acc.max[j] * nf == acc.sum[j] {
-                variance[j] = 0.0;
-            }
-        }
-    }
-    let not_const: Vec<usize> = (0..p).filter(|&j| variance[j] > 0.0).collect();
-    let mut variance_expected = vec![0.0; p];
-    if !not_const.is_empty() {
-        let lx: Vec<f64> = not_const.iter().map(|&j| mean[j].log10()).collect();
-        let ly: Vec<f64> = not_const.iter().map(|&j| variance[j].log10()).collect();
-        let fit = loess_interpolate(&lx, &ly, params.span)?;
-        for (k, &j) in not_const.iter().enumerate() {
-            variance_expected[j] = 10f64.powf(fit[k]);
-        }
-    }
-
-    // ---- standardised variance: exact from the sums unless the gene has clipped values
-    let mut variance_standardized = vec![0.0; p];
-    let mut needs_clip = vec![false; p];
-    let mut any_clip = false;
-    let sd: Vec<f64> = variance_expected.iter().map(|v| v.sqrt()).collect();
-    for j in 0..p {
-        if sd[j] == 0.0 {
-            continue;
-        }
-        if acc.max[j] > mean[j] + clip * sd[j] {
-            needs_clip[j] = true;
-            any_clip = true;
-        } else {
-            variance_standardized[j] = variance[j] / variance_expected[j];
-        }
-    }
+    let any_clip = needs_clip.iter().any(|&c| c);
     if any_clip {
         let clipped = pass2(&x, &mean, &sd, &needs_clip, clip, blocks)?;
         for j in 0..p {
@@ -296,6 +257,67 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         hvg_mean,
         hvg_sd,
     })
+}
+
+/// The per-gene vst statistics of [`preprocess`] from the pass-1 sums of the raw counts
+/// (`sum`, `sumsq`, `max`, stored-entry count `nnz` per gene, over `n` cells), shared with
+/// the device front end. `variance_standardized` is final except for the genes flagged in
+/// `needs_clip`, whose clipped sum `sum_i min(clip, (x_ij - mean_j) / sd_j)^2` over the stored
+/// entries must still be added: `(clipped + (n - nnz_j) (mean_j / sd_j)^2) / (n - 1)`.
+pub fn vst_from_sums(sum: &[f64], sumsq: &[f64], max: &[f64], nnz: &[u64], n: usize, span: f64, clip: f64) -> Result<VstSums> {
+    let p = sum.len();
+    let nf = n as f64;
+    let mut mean = vec![0.0; p];
+    let mut variance = vec![0.0; p];
+    for j in 0..p {
+        let m = sum[j] / nf;
+        mean[j] = m;
+        if n > 1 {
+            // Seurat: sum((x - mu)^2) / (n - 1), zeros included.
+            variance[j] = ((sumsq[j] - sum[j] * m) / (nf - 1.0)).max(0.0);
+            // A gene stored in every cell with a single value is constant too.
+            if nnz[j] as usize == n && max[j] * max[j] * nf == sumsq[j] && max[j] * nf == sum[j] {
+                variance[j] = 0.0;
+            }
+        }
+    }
+    let not_const: Vec<usize> = (0..p).filter(|&j| variance[j] > 0.0).collect();
+    let mut variance_expected = vec![0.0; p];
+    if !not_const.is_empty() {
+        let lx: Vec<f64> = not_const.iter().map(|&j| mean[j].log10()).collect();
+        let ly: Vec<f64> = not_const.iter().map(|&j| variance[j].log10()).collect();
+        let fit = loess_interpolate(&lx, &ly, span)?;
+        for (k, &j) in not_const.iter().enumerate() {
+            variance_expected[j] = 10f64.powf(fit[k]);
+        }
+    }
+
+    // Standardised variance: exact from the sums unless the gene has clipped values.
+    let mut variance_standardized = vec![0.0; p];
+    let mut needs_clip = vec![false; p];
+    let sd: Vec<f64> = variance_expected.iter().map(|v| v.sqrt()).collect();
+    for j in 0..p {
+        if sd[j] == 0.0 {
+            continue;
+        }
+        if max[j] > mean[j] + clip * sd[j] {
+            needs_clip[j] = true;
+        } else {
+            variance_standardized[j] = variance[j] / variance_expected[j];
+        }
+    }
+    Ok(VstSums { mean, variance, variance_expected, variance_standardized, needs_clip, sd })
+}
+
+/// Output of [`vst_from_sums`]; `sd` is `sqrt(variance_expected)`.
+#[derive(Clone, Debug)]
+pub struct VstSums {
+    pub mean: Vec<f64>,
+    pub variance: Vec<f64>,
+    pub variance_expected: Vec<f64>,
+    pub variance_standardized: Vec<f64>,
+    pub needs_clip: Vec<bool>,
+    pub sd: Vec<f64>,
 }
 
 /// Pass 1 over the row blocks `lo..hi` (recursive binary split, `rayon::join` on the two

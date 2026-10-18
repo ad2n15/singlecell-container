@@ -297,7 +297,7 @@ fn pca_csr<'py>(
 /// pca_csr for a CSR matrix already on the GPU (device pointers: int32 or int64 indptr,
 /// int32 indices, float32 data; canonical). Nothing of the matrix crosses to the host.
 #[pyfunction]
-#[pyo3(name = "pca_csr_device")]
+#[pyo3(name = "pca_csr_device", signature = (n_rows, n_cols, nnz, indptr, indptr_i64, indices, data, n_comps, seed, scale, oversample, power_iters, device, clip = None))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn pca_csr_device<'py>(
     py: Python<'py>,
@@ -314,8 +314,9 @@ fn pca_csr_device<'py>(
     oversample: usize,
     power_iters: usize,
     device: &str,
+    clip: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
-    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, ..PcaParams::default() };
+    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, clip };
     let ordinal = match parse_device(device)? {
         Device::Cuda(i) => i,
         Device::Cpu => return Err(PyValueError::new_err("a matrix on the GPU needs device \"cuda\" (or \"auto\" on a GPU build)")),
@@ -680,6 +681,39 @@ fn preprocess_csr<'py>(
     Ok(d)
 }
 
+/// Low-level vst statistics from per-gene sums of the raw counts (sum, sumsq, max float64,
+/// nnz uint64, each (n_cols,), over n_rows cells), for the device front end. See
+/// scfast-core `preprocess::vst_from_sums`. Returns mean, variance, variance_expected,
+/// variance_standardized, sd (float64) and needs_clip (bool).
+#[pyfunction]
+#[pyo3(name = "vst_from_sums", signature = (sum, sumsq, max, nnz, n_rows, span, clip))]
+#[allow(clippy::too_many_arguments)]
+fn vst_from_sums<'py>(
+    py: Python<'py>,
+    sum: PyReadonlyArray1<'py, f64>,
+    sumsq: PyReadonlyArray1<'py, f64>,
+    max: PyReadonlyArray1<'py, f64>,
+    nnz: PyReadonlyArray1<'py, u64>,
+    n_rows: usize,
+    span: f64,
+    clip: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (sum, sumsq, max, nnz) = (sum.as_slice()?, sumsq.as_slice()?, max.as_slice()?, nnz.as_slice()?);
+    let p = sum.len();
+    if sumsq.len() != p || max.len() != p || nnz.len() != p {
+        return Err(PyValueError::new_err("sum, sumsq, max and nnz must have the same length"));
+    }
+    let v = run_kernel(py, "vst_from_sums", || core_preprocess::vst_from_sums(sum, sumsq, max, nnz, n_rows, span, clip))?;
+    let d = PyDict::new(py);
+    d.set_item("mean", PyArray1::from_vec(py, v.mean))?;
+    d.set_item("variance", PyArray1::from_vec(py, v.variance))?;
+    d.set_item("variance_expected", PyArray1::from_vec(py, v.variance_expected))?;
+    d.set_item("variance_standardized", PyArray1::from_vec(py, v.variance_standardized))?;
+    d.set_item("sd", PyArray1::from_vec(py, v.sd))?;
+    d.set_item("needs_clip", PyArray1::from_vec(py, v.needs_clip))?;
+    Ok(d)
+}
+
 /// The columns `cols` of a canonical CSR, renumbered `0..cols.len()` in that order, as a
 /// canonical CSR (indptr, indices, data).
 fn select_columns<I: Idx>(indptr: &[I], indices: &[I], data: &[f32], n_cols: usize, cols: &[u32]) -> (Vec<i64>, Vec<i32>, Vec<f32>) {
@@ -895,7 +929,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn};
+    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn, vst_from_sums};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -244,14 +244,14 @@ class ScfastEngine:
 
 
 class ScfastGpuEngine(ScfastEngine, RapidsEngine):
-    """ScfastEngine with its steps from PCA on the device.
+    """ScfastEngine on the device.
 
-    Read, normalisation and HVGs are scfast-cpu's Rust front end on the CPU (Seurat's vst
-    HVGs; int64 CSR above 2^31 - 1 non-zeros). 'scale' wraps the HVG CSR in an AnnData;
-    scfast's CUDA backend uploads it in 'pca' and keeps PCA's clip exact, runs kNN, builds
-    the SNN graph on the device and hands it to cuGraph Leiden there (the backend used is
-    recorded as `leiden_device` in the environment file). UMAP is rapids-singlecell's
-    (cuML) on the fuzzy simplicial set built on the GPU from the same kNN (fuzzy_graph_gpu).
+    scfast.read_10x_h5 reads on the CPU (int64 CSR above 2^31 - 1 non-zeros); 'to_gpu'
+    uploads the raw counts. scfast.preprocess then runs on the device (the HVGs are
+    Seurat's vst ones, as scfast-cpu), PCA (clip exact), kNN and the SNN graph run on
+    scfast's CUDA backend, Leiden on cuGraph there (the backend used is recorded as
+    `leiden_device` in the environment file), and UMAP is rapids-singlecell's (cuML) on the
+    fuzzy simplicial set built on the GPU from the same kNN (fuzzy_graph_gpu).
     """
 
     device = "gpu"
@@ -268,7 +268,9 @@ class ScfastGpuEngine(ScfastEngine, RapidsEngine):
         return versions
 
     def to_gpu(self, a):
-        pass  # the HVG CSR goes to the device in 'pca', after the CPU front end
+        cp, x = self.cp, a.X
+        a.X = (cp.asarray(x.data, dtype=cp.float32), cp.asarray(x.indices).astype(cp.int32, copy=False),
+               cp.asarray(x.indptr, dtype=cp.int64), x.shape)  # a tuple: cupyx CSR is limited to 2^31 - 1 non-zeros
 
     def scale(self, a, cfg):
         import anndata as ad

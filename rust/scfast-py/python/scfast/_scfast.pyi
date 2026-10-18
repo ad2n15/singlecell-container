@@ -59,6 +59,7 @@ def pca_csr_device(
     oversample: int,
     power_iters: int,
     device: str,
+    clip: float | None = None,
     /,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """pca_csr for a canonical CSR matrix already on the GPU (device pointers)."""
@@ -164,6 +165,19 @@ def inflate_chunks(
     /,
 ) -> npt.NDArray[np.float32] | npt.NDArray[np.int32]:
     """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32 or int32."""
+
+def vst_from_sums(
+    sum: npt.NDArray[np.float64],
+    sumsq: npt.NDArray[np.float64],
+    max: npt.NDArray[np.float64],
+    nnz: npt.NDArray[np.uint64],
+    n_rows: int,
+    span: float,
+    clip: float,
+    /,
+) -> dict[str, Any]:
+    """vst statistics from per-gene sums of the raw counts: {"mean", "variance",
+    "variance_expected", "variance_standardized", "sd": float64, "needs_clip": bool}."""
 
 def preprocess_csr(
     n_rows: int,
