@@ -573,11 +573,13 @@ def preprocess(
         if clip <= 0:
             raise ValueError(f"clip must be positive, got {clip}")
     out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
-    out["data"] = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
-    hvg_indptr = out.pop("hvg_indptr")
+    out["data"] = _csr_validated(out["data"], indices, indptr, (n_rows, n_cols))
+    hvg_indptr, hvg_indices = out.pop("hvg_indptr"), out.pop("hvg_indices")
     if int(hvg_indptr[-1]) <= _I32_MAX:
         hvg_indptr = hvg_indptr.astype(np.int32)
-    out["X_hvg"] = sp.csr_matrix((out.pop("hvg_data"), out.pop("hvg_indices"), hvg_indptr), shape=(n_rows, n_hvg))
+    else:
+        hvg_indices = hvg_indices.astype(np.int64)
+    out["X_hvg"] = _csr_validated(out.pop("hvg_data"), hvg_indices, hvg_indptr, (n_rows, n_hvg))
     return out
 
 
@@ -717,6 +719,20 @@ def _preprocess_gpu(X: Any, n_hvg: int, scale_factor: float, span: float, clip: 
     x_hvg = csp.csr_matrix((out_val, out_idx, out_ptr), shape=(n_rows, n_hvg))
     return {"library_size": lib, "mean": v["mean"], "variance": v["variance"], "variance_expected": v["variance_expected"],
             "variance_standardized": vs, "hvg": hvg, "clip": clip, "X_hvg": x_hvg}
+
+
+def _csr_validated(data: np.ndarray, indices: np.ndarray, indptr: np.ndarray, shape: tuple[int, int]) -> Any:
+    """A canonical scipy CSR around arrays the Rust side has already checked, without copies.
+
+    ``csr_matrix((data, indices, indptr))`` scans int64 index arrays to pick a dtype
+    (about 1 s for the 2.6e9 non-zeros of the 1.3M-cell brain data).
+    """
+    import scipy.sparse as sp
+
+    m = sp.csr_matrix(shape, dtype=data.dtype)
+    m.data, m.indices, m.indptr = data, indices, indptr
+    m.has_canonical_format = True
+    return m
 
 
 def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:

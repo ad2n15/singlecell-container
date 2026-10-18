@@ -260,6 +260,61 @@ Remaining ideas: cuGraph Leiden is the floor of `cluster` (3.0 s at 500k on L4, 
 
 - GPU round 2 (agent, branch t3/gpu-bench-modal-hillclimb, NOT merged yet): synthetic, compute s: L4 100k rapids 2.07 / scfast-gpu 1.74; L4 500k 13.36 / 8.20; H100 500k 5.49 / 3.05; H100 1M 12.21 / 7.00. CUDA bugs fixed: cuGraph dtype enum, Leiden max_level=2 (580 fragments), O(n^2) kNN top-k, stale cargo builds, serial symmetry check. Its device Gram-matrix PCA does not apply Seurat's clip -> merge aborted; GPU round 3 merges it with an exact device clip and runs the real-data H100 headline.
 
+## PCA and normalize at 500k-1.3M on x86 (branch t3/66475d21, from perf/hillclimb 9fa435b)
+
+Modal cpu=16 (AMD EPYC), real brain data, `bench/run_py.py --engine scfast-cpu`, median of 3
+after a warm-up, base (9fa435b) and new in the same container (`bench/modal_pca_probe.py::bench_main`;
+machines differ by up to 40% between runs, so compare within a row):
+
+| cells | normalize base -> new | pca base -> new |
+|---:|---|---|
+| 100k | 0.48 -> 0.26 | 1.11 -> 0.60 |
+| 500k | 2.13 -> 1.11 | 4.32 -> 1.86 |
+| 1.29M | 7.91 -> 3.10 | 10.33 -> 3.74 |
+
+PBMC 3k vs Seurat after every PCA change: PC similarity 0.99995, kNN overlap 0.9757, ARI 0.947
+(identical to before). Brain embeddings vs base: top-30 subspace similarity 0.999999998.
+
+What changed (each a commit; bitwise-identical output unless stated):
+- Clip correction (`Clipped`) was serial: 3x the sparse product itself. Now parallel, then
+  folded into the `Z v` row tasks.
+- Block Krylov: each new block is orthonormalised against the earlier ones as it is made
+  (BCGS2 with CholeskyQR, TSQR fallback; block Lanczos with full reorthogonalisation), so
+  the `Z^T K` of the final SVD is the products the iteration already made (14 sparse
+  products instead of 20) and the cells x 280 Householder QR is gone. The first projection
+  coefficient comes from the stored `Z^T K`. Passes fused (basis read twice per block).
+  Blocks computed in place in K; K lazily zeroed (faer's `Mat::zeros` fills serially).
+  Not bitwise equal to base; matches it to 1e-9.
+- preprocess: parallel column-index check in `CsrView::new` (was serial over 2.6e9
+  indices); `check_canonical` folded into pass 1; no scipy dtype scan of int64 indices
+  when wrapping outputs; log1p table for small integer counts; per-gene pass-1 sums in one
+  cache line; duplicate check only for rows that are not strictly increasing.
+
+Tried and dropped (evidence in commit messages / this list):
+- Rayleigh-Ritz through the Gram matrix `K^T K` (cheapest): drops directions below
+  sqrt(eps); PBMC 3k kNN overlap 0.9757 -> 0.9719, Ritz values lower.
+- Skipping the per-block orthonormalisation of `y`: same loss (it is the Gram route).
+- Tile-major product kernels (L2-sized gene tables for Zen3): +5% on x86, inside the
+  +-10% run-to-run noise; reverted.
+- `select_columns` in one pass with per-chunk buffers: slower on the Mac (0.22 -> 0.32 s)
+  and on x86 at 1.29M (0.75 -> 0.97 s).
+- `select_columns` with a per-row rank bitset instead of the per-row sort: 0.63 -> 0.61 s
+  at 1.29M on x86, not kept (the sort is not where the time goes).
+- Gram-matrix exact PCA: not tried; sum of nnz_row^2 is ~4e10 scattered updates at 1.29M,
+  more than the whole Krylov run.
+- MAP_POPULATE / huge pages for K: page faults for 2.9 GB cost 0.06 s on 16 threads on
+  Modal, not worth it.
+
+Where the time goes now (1.29M, x86, `modal_pca_probe.py::main`, second call): pca 2.6 s =
+Z^T u x7 0.84 + Z v x6 0.55 + Gram-Schmidt 0.72 + the rest 0.5; normalize 2.3-2.7 s =
+pass 1 1.4 + HVG select 0.75 + pass 2 0.1. The harness pca step (3.7 s) is slower than
+a second call in the probe (2.6-2.9 s): the first call at 1.29M is ~0.5 s slower, all in
+the first Z v products; page faults explain only ~0.06 s of it. Not resolved.
+Next candidates: select_columns on x86 (count pass is 0.02 s on the Mac, so the 0.75 s is
+not memory bandwidth; needs a profiler), f32 sparse products (parity risk).
+
+Spend: Modal billing for scfast-pca-probe + scfast-pf-probe apps: $0.69 (budget $3).
+
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - GPU path on Modal (Sonnet 5.5): bench/modal_app.py, CUDA tests on L4, scfast-gpu engine.

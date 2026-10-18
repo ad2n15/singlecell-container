@@ -359,7 +359,8 @@ fn generic_index_and_value_types() {
 
 #[test]
 fn deterministic_for_a_seed() {
-    let x = structured(700, 150, 4, 31);
+    // 300 genes: the Krylov basis (width 210) does not span every gene, so the seed matters.
+    let x = structured(700, 300, 4, 31);
     let a = implicit_scaled_pca(x.view(), &params(20)).unwrap();
     let b = implicit_scaled_pca(x.view(), &params(20)).unwrap();
     assert_identical(&a, &b, "same seed");
@@ -499,11 +500,14 @@ fn zero_variance_genes() {
     }
     assert!(subspace_similarity(&mat(&r.embeddings), &ex.emb, k) > 0.9999);
     // An all-constant matrix has no variance at all: every component is zero.
-    let flat = Csr::from_dense(&Mat::from_fn(30, 10, |_, j| j as f64));
-    let r = implicit_scaled_pca(flat.view(), &params(3)).unwrap();
-    assert!(r.stdev.iter().all(|&s| s == 0.0));
-    assert!(r.embeddings.data.iter().all(|&v| v == 0.0));
-    assert!(r.gene_sd.iter().all(|&s| s == 1.0));
+    // 200 x 50 also runs several Krylov blocks, whose `Z g` are exactly zero.
+    for (n, p) in [(30, 10), (200, 50)] {
+        let flat = Csr::from_dense(&Mat::from_fn(n, p, |_, j| j as f64));
+        let r = implicit_scaled_pca(flat.view(), &params(3)).unwrap();
+        assert!(r.stdev.iter().all(|&s| s == 0.0));
+        assert!(r.embeddings.data.iter().all(|&v| v == 0.0));
+        assert!(r.gene_sd.iter().all(|&s| s == 1.0));
+    }
 }
 
 // ---------------------------------------------------------------- Seurat parity

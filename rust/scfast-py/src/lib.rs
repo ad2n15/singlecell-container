@@ -179,11 +179,15 @@ fn check_canonical<I: Idx, T: Real>(x: &CsrView<'_, I, T>, what: &str) -> scfast
     });
     match bad {
         None => Ok(()),
-        Some(r) => Err(Error::InvalidInput(format!(
-            "{what} is not in canonical CSR format: row {r} has unsorted or duplicate column indices \
-             (call {what}.sum_duplicates() first; it also sorts the indices)"
-        ))),
+        Some(r) => Err(not_canonical(what, r)),
     }
+}
+
+fn not_canonical(what: &str, row: usize) -> Error {
+    Error::InvalidInput(format!(
+        "{what} is not in canonical CSR format: row {row} has unsorted or duplicate column indices \
+         (call {what}.sum_duplicates() first; it also sorts the indices)"
+    ))
 }
 
 fn type_tag<T: 'static>(_: &[T]) -> &'static str {
@@ -652,8 +656,10 @@ fn preprocess_csr<'py>(
     let val = ValueArray::extract(data)?;
     let res: (PreprocessResult<f32>, _) = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
         let x = CsrView::new(n_rows, n_cols, ip, ix, dx)?;
-        check_canonical(&x, "X")?;
         let r = core_preprocess::preprocess::<_, _, f32>(x, &params)?;
+        if let Some(row) = r.unsorted_row {
+            return Err(not_canonical("X", row));
+        }
         if r.data.len() != x.nnz() || r.library_size.len() != n_rows || r.mean.len() != n_cols || r.hvg.len() != r.hvg_mean.len() {
             return Err(backend("preprocess", format!(
                 "kernel returned {} values, {} library sizes, {} gene means for {} non-zeros, {n_rows} cells, {n_cols} genes",

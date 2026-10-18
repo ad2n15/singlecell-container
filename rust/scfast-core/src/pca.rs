@@ -15,21 +15,24 @@
 //!    (genes x b, b = n_comps + oversample) from ChaCha8 seeded with `seed`; `power_iters`
 //!    subspace iterations, re-orthonormalising after every product and keeping every
 //!    cells x b block, so the basis K spans the Krylov space (width b x (power_iters + 1));
-//!    then the thin SVD of the genes x width matrix `Z^T K`.
+//!    each block is orthonormalised against the earlier ones as it is made, so the
+//!    `Z^T K` of the final thin SVD is the products the iteration already computed.
 //! 3. Embeddings `K V_b diag(d)`, loadings `U_b`, all in f64, returned as f32.
 //!
 //! # Memory
 //!
 //! Besides the borrowed X: the cells x width f64 basis K (2.2 KB per cell at the defaults,
 //! b = 40 and width 280, against 16 KB per cell for `ScaleData`'s dense 2,000-HVG matrix),
-//! one cells x b block, a few genes x width matrices, per-task chunk buffers, and the
-//! `Z^T U` accumulators (see `operator.rs`). No transposed copy of X.
+//! a few genes x width matrices, per-task chunk buffers, and the `Z^T U` accumulators (see
+//! `operator.rs`). No transposed copy of X.
 //!
 //! # Determinism
 //!
 //! Every reduction uses a partition fixed by the input shape and a fixed summation tree,
 //! and every faer call runs with `Par::Seq` inside its task, so a given seed and input give
 //! bitwise-identical output for any number of rayon threads (on the same machine and build).
+
+use faer::reborrow::{Reborrow, ReborrowMut};
 
 use crate::device::Device;
 use crate::error::{Error, Result};
@@ -50,6 +53,13 @@ pub(crate) trait Operator {
     fn ncols(&self) -> usize;
     /// `out = Z v`, `v` genes x l, `out` cells x l.
     fn apply(&self, v: faer::MatRef<'_, f64>, out: faer::MatMut<'_, f64>) -> Result<()>;
+    /// `out = (Z - C) v` for the sparse clip correction `C` of [`Clipped`]. The default
+    /// subtracts `C v` after `apply`; the CPU operator does it inside its row tasks.
+    fn apply_clipped(&self, v: faer::MatRef<'_, f64>, mut out: faer::MatMut<'_, f64>, clip: &operator::ClipEntries) -> Result<()> {
+        self.apply(v, out.rb_mut())?;
+        clip.subtract_from(v, out);
+        Ok(())
+    }
     /// `Z^T u`, `u` cells x l; returns genes x l.
     fn apply_t(&self, u: faer::MatRef<'_, f64>) -> Result<faer::Mat<f64>>;
 }
@@ -216,8 +226,9 @@ fn scaling(stats: &operator::GeneStats, params: &PcaParams) -> (Vec<f64>, Vec<f6
     (gene_sd, inv_sd)
 }
 
-/// (Q, U_B, singular values, V_B) of [`block_krylov_svd`]: the operator is Q B with B^T = U_B S V_B^T.
-type Svd = (faer::Mat<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>);
+/// (Q column-major, U_B, singular values, V_B) of [`block_krylov_svd`]: the operator is Q B
+/// with B^T = U_B S V_B^T.
+type Svd = (Vec<f64>, faer::Mat<f64>, Vec<f64>, faer::Mat<f64>);
 
 /// Signs, loadings, embeddings and standard deviations from the SVD factors.
 fn assemble((q, ub, d, vb): Svd, stats: &operator::GeneStats, gene_sd: Vec<f64>, n: usize, p: usize, k: usize) -> PcaResult {
@@ -242,7 +253,8 @@ fn assemble((q, ub, d, vb): Svd, stats: &operator::GeneStats, gene_sd: Vec<f64>,
             loadings.data[j * k + c] = (ub[(j, c)] * signs[c]) as f32;
         }
     }
-    let embeddings = embed(q.as_ref(), vb.as_ref(), &d, &signs, k);
+    let q = faer::MatRef::from_column_major_slice(&q, n, vb.nrows());
+    let embeddings = embed(q, vb.as_ref(), &d, &signs, k);
     let denom = ((n - 1) as f64).sqrt();
     PcaResult {
         embeddings,
@@ -293,43 +305,50 @@ fn validate_params(n: usize, p: usize, params: &PcaParams) -> Result<()> {
 /// Block Krylov SVD (Musco & Musco 2015): subspace iteration that keeps every
 /// power-iteration block, so the basis spans `[Z Ω, (Z Z^T) Z Ω, ...]` and the
 /// top singular vectors converge much faster when singular values are close.
-/// Returns (K: n x width orthonormal, U_b: p x width, d, V_b) with `Z ≈ (K V_b) diag(d) U_b^T`.
+///
+/// Each new block is orthonormalised against the previous ones as it is made (block
+/// Lanczos with full reorthogonalisation), so K is orthonormal throughout and the
+/// `Z^T K_i` the next block needs is also the block of `B^T = Z^T K` for the final thin
+/// SVD: one sparse product per block in each direction, no orthonormalisation of the
+/// whole cells x width basis.
+/// Returns (K column-major: n x width orthonormal, U_b: p x width, d, V_b) with
+/// `Z ≈ (K V_b) diag(d) U_b^T`.
 fn block_krylov_svd<O: Operator>(op: &O, b: usize, iters: usize, seed: u64) -> Result<Svd> {
     let (n, p) = (op.nrows(), op.ncols());
     let blocks = (iters + 1).min(n.min(p) / b);
     let width = blocks * b;
-    let mut k = faer::Mat::<f64>::zeros(n, width);
+    // K, column-major. `vec!` of zeros is a lazily zeroed allocation, so its pages are first
+    // touched by the parallel products below rather than by a serial fill.
+    let mut kbuf = vec![0.0f64; n * width];
+    let mut k = faer::MatMut::from_column_major_slice_mut(&mut kbuf, n, width);
+    let mut bt = faer::Mat::<f64>::zeros(p, width);
     let omega = dense::gaussian(p, b, seed);
-    let mut y = faer::Mat::<f64>::zeros(n, b);
-    op.apply(omega.as_ref(), y.as_mut())?;
+    op.apply(omega.as_ref(), k.rb_mut().subcols_mut(0, b))?;
     drop(omega);
-    dense::orthonormalize(y.as_mut());
+    dense::orthonormalize(k.rb_mut().subcols_mut(0, b));
     // A basis capped by min(n, p) cannot hold every block: the surplus iterations refine
     // the start block instead.
     for _ in blocks..iters + 1 {
-        let mut g = op.apply_t(y.as_ref())?;
+        let mut g = op.apply_t(k.rb().subcols(0, b))?;
         dense::orthonormalize(g.as_mut());
-        op.apply(g.as_ref(), y.as_mut())?;
-        dense::orthonormalize(y.as_mut());
+        op.apply(g.as_ref(), k.rb_mut().subcols_mut(0, b))?;
+        dense::orthonormalize(k.rb_mut().subcols_mut(0, b));
     }
     for i in 0..blocks {
-        k.as_mut().submatrix_mut(0, i * b, n, b).copy_from(y.as_ref());
+        let mut g = op.apply_t(k.rb().subcols(i * b, b))?;
+        bt.as_mut().subcols_mut(i * b, b).copy_from(g.as_ref());
         if i + 1 < blocks {
-            let mut g = op.apply_t(y.as_ref())?;
             dense::orthonormalize(g.as_mut());
-            op.apply(g.as_ref(), y.as_mut())?;
-            dense::orthonormalize(y.as_mut());
+            let (done, rest) = k.rb_mut().split_at_col_mut((i + 1) * b);
+            let mut y = rest.subcols_mut(0, b);
+            op.apply(g.as_ref(), y.rb_mut())?;
+            // K^T y = K^T Z g = (Z^T K)^T g: the first projection needs no pass over K.
+            let kty = dense::mul_tn(bt.as_ref().subcols(0, (i + 1) * b), g.as_ref());
+            dense::orthonormalize_against(done.rb(), y, kty);
         }
     }
-    dense::orthonormalize(k.as_mut());
-    // B^T = Z^T K (p x width), one block of b columns per product.
-    let mut bt = faer::Mat::<f64>::zeros(p, width);
-    for i in 0..blocks {
-        let part = op.apply_t(k.as_ref().submatrix(0, i * b, n, b))?;
-        bt.as_mut().submatrix_mut(0, i * b, p, b).copy_from(part.as_ref());
-    }
     let (ub, d, vb) = dense::thin_svd(bt.as_ref())?;
-    Ok((k, ub, d, vb))
+    Ok((kbuf, ub, d, vb))
 }
 
 /// Largest gene count for which the CUDA path forms the Gram matrix (8 p^2 bytes on the
@@ -375,6 +394,7 @@ fn gram_svd(op: &cuda::CudaScaledOp, b: usize, iters: usize, seed: u64) -> Resul
         let inv = if sc > 0.0 { 1.0 / sc } else { 0.0 };
         u.col_mut(c).iter_mut().for_each(|y| *y *= inv);
     }
+    let u: Vec<f64> = (0..b).flat_map(|c| u.col(c).iter().copied().collect::<Vec<_>>()).collect();
     Ok((u, vr, s, faer::Mat::<f64>::identity(b, b)))
 }
 
