@@ -10,6 +10,13 @@
 //! recomputed against the current state (weights to the old and the chosen community,
 //! current strengths) and the move is dropped unless it still beats the floor, so every
 //! applied move improves the objective and the loop terminates, as the sequential one does.
+//!
+//! Only the recheck and the bookkeeping are serial. The recheck starts from the proposal's
+//! weights and corrects them for the neighbours that moved earlier in the batch (found in
+//! parallel), rescanning only when the decision is within rounding of the floor; the
+//! neighbours to re-queue are collected and de-duplicated in parallel afterwards. Both give
+//! the same decisions and queue as the plain serial loop, so the labels are those of the
+//! plain loop.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
