@@ -5,7 +5,7 @@ Same parameters for every engine (2,000 HVGs, 30 PCs, k = 20 on 10 PCs, Leiden r
 2 iterations, UMAP). "Compute" is normalise → UMAP; reading the file is listed separately.
 Every engine reads the same QC'd files (`bench/prep.py`).
 
-## CPU: real 10x data, identical machines (Modal, 16 cores, AMD EPYC)
+## CPU: real 10x data, same container size for every engine (Modal cpu=16)
 
 | Dataset | Cells | Seurat 5.6 | Scanpy 1.12 | **scfast-cpu** | vs Seurat | vs Scanpy |
 |---|---:|---:|---:|---:|---:|---:|
