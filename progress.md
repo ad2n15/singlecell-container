@@ -30,6 +30,7 @@ Constraints from the user (2026-10-17):
 | 10-18 00:30 | baselines agent total: `modal billing report` says $3.36 for app scfast-baselines up to 00:00 BST; estimate incl. last 30 min | | ~4.5 |
 | 10-17 22:40-23:50 UTC | GPU agent: image build, wheel builds, CUDA tests, L4 benches and profiling (app `scfast-bench`, Modal billing report) | ~1.3 L4-h + builds | 2.06 |
 | 10-18 00:00-02:10 UTC | GPU agent: L4 profiling, final L4 run (4 engines), H100 runs 500k / 1M (app `scfast-bench`, billing report) | ~2 L4-h, ~0.4 H100-h | ~4.1 |
+| 10-18 03:14-03:26 BST | 60k hashing GEM-X on L4: scfast-gpu, rapids, scfast-cpu, scanpy, 3 reps (app `scfast-bench`, 11 min) | ~0.2 L4-h | ~0.25 |
 
 ## Done
 - Baseline, Mac M-series 12 threads, 100k synthetic cells, compute s (excl. read): Seurat 87.3, Scanpy 50.3, scfast-cpu 33.9 (UMAP 29.5).
@@ -357,6 +358,28 @@ rows sorted by rate; one-floor due test; 64 lanes (all within noise).
 Remaining ideas: NEON kernel for arm (Mac); the scalar lane-filling loop (rng, ring, two loads and
 three stores per sample) is now about half the time; per-epoch barrier cost at PBMC size.
 Spend: about $1.9 of the $3 budget (`modal billing report`, app scfast-umap).
+||||||| Stash base
+
+## 60k hashing GEM-X PBMC (10x 9.0.0 raw matrix) - 2026-10-18
+
+Input: `60k_Human_TotalSeqB_hashing_3p_gem-x_Multiplex_count_raw_feature_bc_matrix.h5` (in ~/Downloads):
+2,397,363 barcodes, 38,606 genes + 8 hashtags (dropped). No filtered matrix at that URL.
+
+- `pipeline_steps.py` default `--min-genes 200` keeps 29,763 empty droplets (a cluster with median 211 genes,
+  243 UMIs, ambient LYZ). The count of barcodes falls from 83,937 (>200 genes) to 56,746 (>250), then flattens
+  (54,150 at >500). Results: `bench/results/hash60k_raw/` (default) and `hash60k_raw_min500/`.
+- Modal L4 bench, 54,150 cells (prep `--min-genes 500 --max-genes 1e9 --max-mt 20`, volume
+  `scfast-data:prep/hash60k`), medians of 3: scfast-gpu 2.03 s total (compute 1.12), rapids 14.4 (read 12.9),
+  scfast-cpu 5.10, scanpy 79.0. PC sim 0.99999 and kNN 0.96-0.9998 vs scanpy for all; ARI vs scanpy
+  0.74-0.77 for all, including rapids (scanpy on GPU), so the gap is Leiden on this data, not scfast.
+  `bench/results/gpu_l4_hash60k/`.
+- scpipe S0-S5 locally (CPU, Seurat path, live Claude Haiku 4.5 gates): run dir `~/scpipe/hash60k/run`, input
+  barcodes with >= 250 genes (56,934). 14m23s total; G1 escalated (4 clusters lose 75-99%, mostly scrublet
+  doublets 11,893 = 21%), approved by the user; G2-G4 auto-approved; 22 Claude calls, GBP 0.46. 42,732 cells,
+  21 clusters (T, NK, B, CD14/CD16 mono, cDC, pDC, HSPC). Key: `~/.config/scpipe/anthropic_api_key` (0600).
+- scpipe on Modal GPU: `bench/modal_scpipe.py` builds `containers/Dockerfile` (first build ever). Fixed two
+  Dockerfile bugs: `nice-utils` is not an Ubuntu package; the R 4.4.2 pin conflicts with CRAN's r-recommended
+  (needs R >= 4.5/4.6), so R is unpinned (same fix in `scpipe.def`).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
@@ -367,6 +390,7 @@ Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 - Round-1 Sonnet agents (GPU, front end) were interrupted at 22:51; relaunched as Opus 5.5 medium.
 
 ## Surprises (evidence)
+- `scpipe doctor` tool-use test uses `max_tokens=16`; Claude Haiku 4.5 needs more for a tool call (16: stop_reason max_tokens, 0 calls; 256: tool_use, 1 call), so doctor warns although the key and tool use work.
 - 3 Python tests fail on main too (not touched by this branch): test_runner::test_status_output, test_runner::test_failure_then_resume (log-tail line assertions), test_s3::test_consensus_recovers_planted_types (platelet cluster low_confidence). 498 others pass.
 - Tried and rejected for UMAP: polynomial fast_pow (scalar and 8-lane batched): no gain; the SGD is bound by random gathers.
 
