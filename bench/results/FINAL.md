@@ -77,8 +77,8 @@ UMAP; times are from process start, including the file read. Inputs for a demo a
 | Dataset | Cells | scfast, file → UMAP image |
 |---|---:|---:|
 | PBMC 68k | 68,260 | 1.3 s |
-| Mouse brain | 100,000 | 2.2 s |
-| Mouse brain | 500,000 | 11.3 s |
+| Mouse brain | 100,000 | 2.1 s |
+| Mouse brain | 500,000 | 10.0 s |
 
 Same laptop, mouse brain 100k, all three engines through the bench harness
 (`bench/results/laptop_brain100k`): compute Seurat 98.8 s, Scanpy 48.0 s, scfast 1.56 s
