@@ -148,7 +148,7 @@ const D = {
 };
 
 const css = n => getComputedStyle(document.querySelector(".viz-root")).getPropertyValue(n).trim();
-const fmt = s => s >= 600 ? (s / 60).toFixed(s >= 6000 ? 0 : 1) + " min" : s >= 10 ? s.toFixed(1) + " s" : s.toFixed(2) + " s";
+const fmt = s => s >= 3600 ? "~" + (s / 3600).toFixed(0) + " h" : s >= 600 ? (s / 60).toFixed(1) + " min" : s >= 10 ? s.toFixed(1) + " s" : s.toFixed(2) + " s";
 const tip = document.getElementById("tip");
 function hover(el, text) {
   el.addEventListener("mousemove", e => { tip.textContent = text; tip.style.opacity = 1; tip.style.left = e.clientX + 12 + "px"; tip.style.top = e.clientY + 12 + "px"; });
@@ -212,9 +212,9 @@ function panels(id, data, accent) {
 }
 
 function tables() {
-  const f = v => v == null ? "–" : v.toFixed(v >= 0.99 ? 4 : 3);
+  const f = (v, d) => v == null ? "–" : v.toFixed(d);
   document.getElementById("parity").innerHTML = "<tr><th>Data</th><th>Engine</th><th>PC similarity</th><th>Neighbour overlap</th><th>ARI vs Seurat</th></tr>" +
-    D.parity.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${f(r[2])}</td><td>${f(r[3])}</td><td>${f(r[4])}</td></tr>`).join("");
+    D.parity.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${f(r[2], 4)}</td><td>${f(r[3], 3)}</td><td>${f(r[4], 3)}</td></tr>`).join("");
   const rows = [
     ...D.headline.map(d => ["Brain 1.29M", d.name, d.s]),
     ...D.cpu.flatMap(p => p.rows.map(r => [p.title, r[0] + " (CPU, 16 cores)", r[1]])),
