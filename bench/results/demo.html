@@ -121,13 +121,13 @@ const D = {
     { name: "Seurat (published)", s: 10800, kind: "ref", note: "~3 h, published, 16 cores" },
     { name: "Scanpy, 16 cores", s: 1161.6, kind: "ref" },
     { name: "rapids-singlecell, H100", s: null, kind: "ref", note: "out of GPU memory (80 GB)" },
-    { name: "scfast CPU, 16 cores", s: 23.7, kind: "cpu" },
+    { name: "scfast CPU, 16 cores", s: 26.7, kind: "cpu" },
     { name: "scfast GPU, H100", s: 6.77, kind: "gpu" },
   ],
   cpu: [
-    { title: "PBMC 68k", rows: [["Seurat", 121.4, "ref"], ["Scanpy", 57.2, "ref"], ["scfast", 1.94, "cpu"]] },
-    { title: "Mouse brain 100k", rows: [["Seurat", 194.6, "ref"], ["Scanpy", 75.8, "ref"], ["scfast", 2.40, "cpu"]] },
-    { title: "Mouse brain 500k", rows: [["Seurat", 966.8, "ref"], ["Scanpy", 488.7, "ref"], ["scfast", 8.99, "cpu"]] },
+    { title: "PBMC 68k", rows: [["Seurat", 121.4, "ref"], ["Scanpy", 57.2, "ref"], ["scfast", 2.19, "cpu"]] },
+    { title: "Mouse brain 100k", rows: [["Seurat", 194.6, "ref"], ["Scanpy", 75.8, "ref"], ["scfast", 2.58, "cpu"]] },
+    { title: "Mouse brain 500k", rows: [["Seurat", 966.8, "ref"], ["Scanpy", 488.7, "ref"], ["scfast", 11.06, "cpu"]] },
   ],
   gpu: [
     { title: "PBMC 68k", rows: [["rapids", 2.84, "ref"], ["scfast", 0.68, "gpu"]] },
