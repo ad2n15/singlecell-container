@@ -15,9 +15,10 @@ use faer::linalg::householder::{
     apply_block_householder_sequence_on_the_left_in_place_with_conj,
 };
 use faer::linalg::qr::no_pivoting::factor::{qr_in_place, qr_in_place_scratch, recommended_block_size};
-use faer::linalg::evd::{self_adjoint_evd, self_adjoint_evd_scratch, ComputeEigenvectors};
+use faer::linalg::cholesky::llt::factor::{cholesky_in_place, cholesky_in_place_scratch};
 use faer::linalg::matmul::matmul;
 use faer::linalg::svd::{svd, svd_scratch, ComputeSvdVectors};
+use faer::linalg::triangular_inverse::invert_lower_triangular;
 use faer::reborrow::{Reborrow, ReborrowMut};
 use faer::{Accum, Conj, Mat, MatMut, MatRef, Par};
 use rand::{Rng, SeedableRng};
@@ -78,10 +79,13 @@ fn orthonormalize_seq(mut a: MatMut<'_, f64>) {
     a.copy_from(&q);
 }
 
-/// In-place thin Q of a tall matrix (m x l, m >= l) by TSQR with a fixed row partition, so
-/// the result is bitwise identical for any number of threads.
-pub(super) fn orthonormalize(a: MatMut<'_, f64>) {
-    orthonormalize_chunked(a, TSQR_ROWS);
+/// In-place thin Q of a tall matrix (m x l, m >= l): CholeskyQR2 (two `cholesky_qr`
+/// rounds, GEMMs over fixed row chunks), falling back to TSQR when the Gram matrix is too
+/// ill-conditioned for Cholesky. Bitwise identical for any number of threads.
+pub(super) fn orthonormalize(mut a: MatMut<'_, f64>) {
+    if !(cholesky_qr(a.rb_mut()) && cholesky_qr(a.rb_mut())) {
+        orthonormalize_chunked(a, TSQR_ROWS);
+    }
 }
 
 pub(super) fn orthonormalize_chunked(mut a: MatMut<'_, f64>, chunk_rows: usize) {
@@ -116,51 +120,72 @@ pub(super) fn orthonormalize_chunked(mut a: MatMut<'_, f64>, chunk_rows: usize) 
     });
 }
 
-/// `a b`, sequential.
-pub(super) fn mul(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
-    let mut c = Mat::<f64>::zeros(a.nrows(), b.ncols());
-    matmul(c.as_mut(), Accum::Replace, a, b, 1.0, Par::Seq);
+/// `a^T b` for tall `a`, `b` with the same rows: fixed row chunks in parallel, partial
+/// products added in chunk order.
+fn cross(a: MatRef<'_, f64>, b: MatRef<'_, f64>) -> Mat<f64> {
+    let parts: Vec<Mat<f64>> = a
+        .par_row_chunks(TSQR_ROWS)
+        .zip(b.par_row_chunks(TSQR_ROWS))
+        .map(|(ac, bc)| {
+            let mut c = Mat::<f64>::zeros(a.ncols(), b.ncols());
+            matmul(c.as_mut(), Accum::Replace, ac.transpose(), bc, 1.0, Par::Seq);
+            c
+        })
+        .collect();
+    let mut c = Mat::<f64>::zeros(a.ncols(), b.ncols());
+    for part in &parts {
+        c += part;
+    }
     c
 }
 
-/// `a^T a` for a tall `a`: fixed row chunks in parallel, partial sums added in chunk order.
-pub(super) fn gram(a: MatRef<'_, f64>) -> Mat<f64> {
-    let (m, l) = a.shape();
-    let parts: Vec<Mat<f64>> = a
-        .par_row_chunks(TSQR_ROWS)
-        .map(|c| {
-            let mut g = Mat::<f64>::zeros(l, l);
-            matmul(g.as_mut(), Accum::Replace, c.transpose(), c, 1.0, Par::Seq);
-            g
-        })
-        .collect();
-    let mut g = Mat::<f64>::zeros(l, l);
-    for part in &parts {
-        g += part;
+/// Replace `y` by an orthonormal basis of the part of range(`y`) orthogonal to range(`q`)
+/// (`q` with orthonormal columns): block classical Gram-Schmidt run twice (BCGS2), each
+/// pass projecting out `q` and orthonormalising the block (CholeskyQR, TSQR fallback). When `y` lies in range(`q`),
+/// the result is still orthonormal and orthogonal to `q`, spanning round-off directions.
+pub(super) fn orthonormalize_against(q: MatRef<'_, f64>, mut y: MatMut<'_, f64>) {
+    for _ in 0..2 {
+        if q.ncols() > 0 {
+            let c = cross(q, y.rb());
+            y.rb_mut().par_row_chunks_mut(TSQR_ROWS).zip(q.par_row_chunks(TSQR_ROWS)).for_each(|(yc, qc)| {
+                matmul(yc, Accum::Add, qc, c.as_ref(), -1.0, Par::Seq);
+            });
+        }
+        // One CholeskyQR round per pass: the second pass starts from a nearly orthonormal
+        // block and restores orthogonality to working precision.
+        if !cholesky_qr(y.rb_mut()) {
+            orthonormalize_chunked(y.rb_mut(), TSQR_ROWS);
+        }
     }
-    debug_assert!(m == 0 || !parts.is_empty());
-    g
 }
 
-/// Relative eigenvalue floor of `whitening`: directions with `λ < GRAM_RTOL λ_max` are
-/// numerically dependent and dropped (keeping them would amplify round-off by `λ^{-1/2}`).
-const GRAM_RTOL: f64 = 1e-10;
+/// Smallest accepted `min(diag L) / max(diag L)` in `cholesky_qr`: a condition number up to
+/// about 1e6, so the first round leaves an orthogonality error near `1e12 eps` that the
+/// second round removes.
+const CHOL_MIN_PIVOT_RATIO: f64 = 1e-6;
 
-/// For a symmetric positive semi-definite Gram matrix `g = K^T K`, `T = E_r Λ_r^{-1/2}`
-/// over the eigenpairs with `λ >= GRAM_RTOL λ_max` (largest first), so `K T` has
-/// orthonormal columns spanning range(K) up to the dropped directions.
-pub(super) fn whitening(g: MatRef<'_, f64>) -> Result<Mat<f64>> {
-    let l = g.nrows();
-    let mut u = Mat::<f64>::zeros(l, l);
-    let mut s = faer::diag::Diag::<f64>::zeros(l);
-    let mut mem = MemBuffer::new(self_adjoint_evd_scratch::<f64>(l, ComputeEigenvectors::Yes, Par::Seq, Default::default()));
-    self_adjoint_evd(g, s.as_mut(), Some(u.as_mut()), Par::Seq, MemStack::new(&mut mem), Default::default())
-        .map_err(|e| Error::Backend { context: "faer symmetric eigendecomposition", message: format!("{e:?}") })?;
-    let mut order: Vec<usize> = (0..l).collect();
-    order.sort_by(|&a, &b| s[b].total_cmp(&s[a]));
-    let floor = order.first().map_or(0.0, |&i| s[i]) * GRAM_RTOL;
-    let keep: Vec<usize> = order.into_iter().filter(|&i| s[i] > floor && s[i] > 0.0).collect();
-    Ok(Mat::from_fn(l, keep.len(), |r, c| u[(r, keep[c])] / s[keep[c]].sqrt()))
+/// One CholeskyQR round, `a <- a L^{-T}` with `a^T a = L L^T`; `false`, with `a`
+/// unchanged, when `a^T a` is not safely positive definite.
+fn cholesky_qr(mut a: MatMut<'_, f64>) -> bool {
+    let l = a.ncols();
+    let mut g = cross(a.rb(), a.rb());
+    let mut mem = MemBuffer::new(cholesky_in_place_scratch::<f64>(l, Par::Seq, Default::default()));
+    if cholesky_in_place(g.as_mut(), Default::default(), Par::Seq, MemStack::new(&mut mem), Default::default()).is_err() {
+        return false;
+    }
+    let (lo, hi) = (0..l).fold((f64::INFINITY, 0.0f64), |(lo, hi), i| (lo.min(g[(i, i)]), hi.max(g[(i, i)])));
+    if !(lo > CHOL_MIN_PIVOT_RATIO * hi) {
+        return false;
+    }
+    let lower = Mat::from_fn(l, l, |i, j| if i >= j { g[(i, j)] } else { 0.0 });
+    let mut inv = Mat::<f64>::zeros(l, l);
+    invert_lower_triangular(inv.as_mut(), lower.as_ref(), Par::Seq);
+    a.par_row_chunks_mut(TSQR_ROWS).for_each(|mut c| {
+        let mut t = Mat::<f64>::zeros(c.nrows(), l);
+        matmul(t.as_mut(), Accum::Replace, c.rb(), inv.transpose(), 1.0, Par::Seq);
+        c.copy_from(&t);
+    });
+    true
 }
 
 /// Thin SVD `a = U diag(s) V^T` (a: m x n), singular values in non-increasing order.
@@ -231,6 +256,45 @@ mod tests {
             orthonormalize_chunked(q.as_mut(), chunk);
             check_q(q.as_ref(), a.as_ref());
         }
+    }
+
+    #[test]
+    fn cholesky_qr2_and_fallback() {
+        for &(m, l) in &[(50_000, 40), (3000, 7), (40, 40)] {
+            let a = random(m, l, 5);
+            let mut q = a.clone();
+            orthonormalize(q.as_mut());
+            check_q(q.as_ref(), a.as_ref());
+        }
+        // Rank-deficient and badly scaled inputs take the TSQR fallback.
+        let base = random(20_000, 3, 1);
+        let a = Mat::from_fn(20_000, 9, |i, j| base[(i, j % 3)] * (1.0 + j as f64));
+        let mut q = a.clone();
+        orthonormalize(q.as_mut());
+        check_q(q.as_ref(), a.as_ref());
+        let b = Mat::from_fn(20_000, 6, |i, j| base[(i, j % 3)] * 10f64.powi(-3 * j as i32) + 1e-9 * a[(i, j)]);
+        let mut q = b.clone();
+        orthonormalize(q.as_mut());
+        check_q(q.as_ref(), b.as_ref());
+    }
+
+    #[test]
+    fn bcgs2_extends_an_orthonormal_basis() {
+        let mut q = random(30_000, 80, 2);
+        orthonormalize(q.as_mut());
+        // A block mostly inside range(q), with one column exactly inside it.
+        let r = random(30_000, 20, 3);
+        let mut y = Mat::from_fn(30_000, 20, |i, j| (0..80).map(|t| q[(i, t)] * ((t + j) % 7) as f64).sum::<f64>() + if j == 0 { 0.0 } else { 1e-7 * r[(i, j)] });
+        orthonormalize_against(q.as_ref(), y.as_mut());
+        let mut full = Mat::<f64>::zeros(30_000, 100);
+        full.as_mut().subcols_mut(0, 80).copy_from(&q);
+        full.as_mut().subcols_mut(80, 20).copy_from(&y);
+        let both = full.clone();
+        check_q(full.as_ref(), both.as_ref());
+        // range(y) holds the new directions of the perturbation.
+        let rest = r.as_ref().subcols(1, 19);
+        let resid = rest - &full * (full.transpose() * rest);
+        assert!(resid.norm_l2() < 1e-6 * rest.norm_l2());
     }
 
     #[test]
