@@ -4,7 +4,7 @@
   "python": "3.12.1",
   "cpu_model": "unknown",
   "logical_cpus": 32,
-  "mem_total_bytes": 1099511627776,
+  "mem_total_bytes": 912525000704,
   "loadavg": [
     0.0,
     0.0,
@@ -24,7 +24,7 @@
       "name": "NVIDIA H100 80GB HBM3",
       "mem_used_mib": 559,
       "mem_total_mib": 81559,
-      "util_pct": 0
+      "util_pct": 2
     }
   ],
   "commit": "unknown",
@@ -37,7 +37,7 @@
     "scfast_gpu": "NVIDIA H100 80GB HBM3",
     "leiden_device": "cuda:0"
   },
-  "time_utc": "2026-10-18T02:05:10Z",
+  "time_utc": "2026-10-18T02:19:20Z",
   "config": {
     "engine": "scfast-gpu",
     "data": "/data/prep/brain/n100000",

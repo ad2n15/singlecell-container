@@ -140,9 +140,14 @@ Merged `t3/gpu-bench-modal-hillclimb` into the perf/hillclimb base. CPU PCA = bl
   took 2.3 s of 2.4 s for the PCA at brain 100k on the H100 box; the device one 0.06 s, PCA 0.17 s warm (CPU 1.0 s).
   The exact eigenpairs also beat the Krylov Rayleigh-Ritz on parity (PBMC 3k kNN overlap 0.998 vs 0.968).
   Above 4096 genes: gene-side block Krylov on the host Gram matrix (same `power_iters` meaning as the CPU).
-- scfast-gpu engine (bench/run_py.py): front end = scfast-cpu's (scfast.read_10x_h5, fused Rust preprocess with Seurat's
-  vst HVGs, int64 CSR at 1.29M), then PCA / kNN / SNN / Leiden on the device, cuML UMAP. The HVG CSR is uploaded inside
-  `pca` (so its transfer counts as compute; rapids' `to_gpu` / `to_cpu` do not).
+- Device preprocess: `scfast.preprocess` takes a cupyx CSR or, above 2^31 - 1 non-zeros, a `(data, indices, indptr,
+  shape)` tuple of CuPy arrays. CuPy kernels (row_stats, clipped_sums, hvg_count, hvg_fill) do the passes; the per-gene
+  vst step is the CPU's Rust code (`preprocess::vst_from_sums`, split out of `preprocess()`). The counts are integers,
+  so library sizes and per-gene sums are exact: brain 100k gives the CPU's HVG list and a bitwise-identical HVG CSR in
+  0.08 s (CPU 0.40 s); PBMC 3k the same 2,000 HVGs with two near-ties (2e-14) swapped in order.
+- scfast-gpu engine (bench/run_py.py): scfast.read_10x_h5 on the CPU, `to_gpu` uploads the raw counts (as rapids),
+  then preprocess / PCA / kNN / SNN / Leiden on the device, cuML UMAP. `pca()` on a CuPy matrix now passes its clip
+  (it was always 10).
 - Tests (L4): `cargo test --release --features cuda,cugraph` all pass, incl. new `gpu_pca_clip_matches_cpu_clip`
   (18,581 clipped entries; clip vs no clip on the CPU 0.972; GPU clip vs CPU clip top-10 0.9999999984, loadings
   0.9999999993, both input paths). Python `tests/python/test_scfast_py.py`: 106 pass, 2 fail by design on a GPU box
@@ -157,18 +162,20 @@ vs Scanpy in parity_vs_scanpy.jsonl; outputs and per-run folders bench/results/h
 | engine | cells | read | to_gpu | normalize | hvg | scale | pca | neighbors | cluster | umap | to_cpu | compute | peak GPU GB |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | rapids | PBMC 68,260 | 2.00 | 0.04 | 0.00 | 0.03 | 0.02 | 0.06 | 0.09 | 0.26 | 0.16 | 0.18 | 0.62 | 3.6 |
-| scfast-gpu | PBMC 68,260 | 0.08 | - | 0.10 | 0.00 | 0.02 | 0.08 | 0.12 | 0.21 | 0.15 | - | 0.69 | 2.2 |
+| scfast-gpu | PBMC 68,260 | 0.09 | 0.06 | 0.01 | 0.00 | 0.02 | 0.05 | 0.09 | 0.20 | 0.15 | 0.01 | 0.52 | 2.3 |
 | rapids | brain 100,000 | 10.27 | 0.32 | 0.01 | 0.04 | 0.04 | 0.06 | 0.14 | 0.34 | 0.57 | 0.27 | 1.20 | 7.6 |
-| scfast-gpu | brain 100,000 | 0.28 | - | 0.40 | 0.00 | 0.03 | 0.14 | 0.15 | 0.34 | 0.52 | - | 1.58 | 2.7 |
+| scfast-gpu | brain 100,000 | 0.28 | 0.29 | 0.02 | 0.00 | 0.03 | 0.08 | 0.14 | 0.37 | 0.57 | 0.05 | 1.20 | 3.0 |
 | rapids | brain 500,000 | 57.74 | 1.44 | 0.03 | 0.11 | 0.23 | 0.22 | 1.32 | 1.31 | 1.06 | 1.37 | 4.28 | 33.6 |
-| scfast-gpu | brain 500,000 | 1.38 | - | 2.34 | 0.00 | 0.23 | 0.59 | 0.75 | 0.87 | 1.05 | - | 5.83 | 9.0 |
+| scfast-gpu | brain 500,000 | 1.18 | 1.07 | 0.06 | 0.00 | 0.15 | 0.28 | 0.68 | 0.85 | 1.04 | 0.19 | 3.06 | 10.2 |
 | rapids | brain 1,290,549 | 150 (warm-up) | ok | out of memory | | | | | | | | fails | 85 |
-| scfast-gpu | brain 1,290,549 | 13.26 | - | 11.62 | 0.00 | 0.51 | 1.42 | 2.91 | 2.22 | 0.39 | - | 19.07 | 20.7 |
+| scfast-gpu | brain 1,290,549 | 14.31 | 3.97 | 0.15 | 0.00 | 0.49 | 0.70 | 2.83 | 2.23 | 0.40 | 0.62 | 6.80 | 43.3 |
 
 rapids at 1.29M: `normalize` fails allocating 20.9 GB (the `counts` layer copy of 2.6B non-zeros) with 85 GB in use.
-Read + transfers + compute (file to result): 68k 0.77 vs 2.84; 100k 1.86 vs 12.06; 500k 7.21 vs 64.83; 1.29M 32.3 vs fails.
-Compute only, scfast-gpu trails rapids below 1.29M (0.69 vs 0.62, 1.58 vs 1.20, 5.83 vs 4.28) because its normalize +
-HVG is the Rust CPU pass (2.34 s at 500k, 11.6 s at 1.29M; scfast-cpu's own run on a 16-core CPU box: 2.27 / 5.90).
+File to result (read + transfers + compute), scfast-gpu vs rapids: 68k 0.68 vs 2.84 s; 100k 1.82 vs 12.06; 500k 5.50 vs
+64.83; 1.29M 25.7 vs fails. Compute only: 0.52 vs 0.62, 1.20 vs 1.20, 3.06 vs 4.28, 6.80 vs fails.
+Before the device preprocess (CPU Rust front end, HVG CSR uploaded in `pca`): compute 0.69 / 1.58 / 5.83 / 19.07 s
+(normalize 0.10 / 0.40 / 2.34 / 11.62 s); before the cuSOLVER eigendecomposition PCA was 0.80 / 1.00 / 1.58 / 2.14 s.
+Remaining scfast-gpu floor: cuGraph Leiden (2.2 s at 1.29M), kNN (2.8 s), the raw upload (4.0 s, pageable memory).
 
 Parity vs Seurat (top-10 PC similarity / kNN overlap / ARI): scfast-gpu 68k 0.99998 / 0.994 / 0.73, 100k 0.99997 / 0.996
 / 0.55, 500k 0.99967 / 0.994 / 0.48; rapids 68k 0.99998 / 0.974 / 0.53, 100k 0.99997 / 0.995 / 0.59, 500k 0.99967 /
