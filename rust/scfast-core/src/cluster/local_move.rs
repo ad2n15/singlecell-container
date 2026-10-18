@@ -72,6 +72,8 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
     // in that list, and the batch in which each community last gained or lost a node
     let mut applied: Vec<(u32, u32)> = Vec::new();
     let mut moved_at = vec![0u32; n];
+    let mut proposed_at = vec![0u32; n];
+    let mut conflict = Vec::with_capacity(batch_len);
     let mut changed_in = vec![0u32; slots];
     let mut batch_id = 0u32;
     while !queue.is_empty() && moves < budget {
@@ -114,8 +116,36 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             })
             .collect_into_vec(&mut proposals);
 
+        // whether a neighbour proposed earlier in the batch a move that may enter or leave
+        // the node's old or target community (a move to a fresh community may land anywhere)
+        for (i, (&v, p)) in batch.iter().zip(&proposals).enumerate() {
+            if p.is_some() {
+                proposed_at[v as usize] = i as u32 + 1;
+            }
+        }
+        (0..batch.len())
+            .into_par_iter()
+            .map(|i| {
+                let Some((target, _, _)) = proposals[i] else { return false };
+                let v = batch[i] as usize;
+                let old = membership[v];
+                graph.neighbors(v).any(|(u, _)| {
+                    let at = proposed_at[u] as usize;
+                    if at == 0 || at > i {
+                        return false;
+                    }
+                    let (u_target, _, _) = proposals[at - 1].expect("proposed_at marks proposals");
+                    let u_old = membership[u];
+                    u_target == EMPTY || u_old == old || u_old == target || u_target == old || u_target == target
+                })
+            })
+            .collect_into_vec(&mut conflict);
+        for &v in &batch {
+            proposed_at[v as usize] = 0;
+        }
+
         applied.clear();
-        for (&v, &p) in batch.iter().zip(&proposals) {
+        for (i, (&v, &p)) in batch.iter().zip(&proposals).enumerate() {
             let Some((mut target, mut w_old, mut w_target)) = p else { continue };
             let v = v as usize;
             let old = membership[v];
@@ -123,7 +153,8 @@ pub(super) fn local_move(graph: &CSRNetwork, start: &Partition, resolution: f64,
             // the weights from the proposal are stale only if a neighbour entered or left
             // `old` or `target` earlier in this batch; recomputed in the same order, they
             // are bit-identical to the proposal's when nothing changed
-            let stale = changed_in[old as usize] == batch_id || (target != EMPTY && changed_in[target as usize] == batch_id);
+            let stale = conflict[i]
+                && (changed_in[old as usize] == batch_id || (target != EMPTY && changed_in[target as usize] == batch_id));
             if stale {
                 (w_old, w_target) = (0.0, 0.0);
                 for (u, w) in graph.neighbors(v) {
