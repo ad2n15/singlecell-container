@@ -453,14 +453,15 @@ impl<I: Idx, T: Real> super::Operator for ScaledOp<'_, I, T> {
 /// positive clip (a zero maps to `-mean / sd <= 0`), so `C` is sparse and small.
 pub(super) struct Clipped<O> {
     inner: O,
-    rows: Vec<usize>,
-    cols: Vec<usize>,
+    rows: Vec<u32>,
+    cols: Vec<u32>,
     vals: Vec<f64>,
 }
 
 impl<O: super::Operator> Clipped<O> {
     pub fn new<I: Idx, T: Real>(inner: O, x: &CsrView<'_, I, T>, mean: &[f64], inv_sd: &[f64], clip: f64) -> Self {
-        let per_row: Vec<Vec<(usize, usize, f64)>> = (0..x.n_rows)
+        assert!(x.n_rows <= u32::MAX as usize && x.n_cols <= u32::MAX as usize, "clip entries are stored as u32");
+        let per_row: Vec<Vec<(u32, u32, f64)>> = (0..x.n_rows)
             .into_par_iter()
             .with_min_len(ZV_ROWS)
             .map(|i| {
@@ -470,7 +471,7 @@ impl<O: super::Operator> Clipped<O> {
                     .filter_map(|(j, v)| {
                         let j = j.to_usize();
                         let z = (v.to_f64() - mean[j]) * inv_sd[j];
-                        (z > clip).then_some((i, j, z - clip))
+                        (z > clip).then_some((i as u32, j as u32, z - clip))
                     })
                     .collect()
             })
@@ -485,6 +486,11 @@ impl<O: super::Operator> Clipped<O> {
     }
 }
 
+/// Column `c` of a matrix whose columns are contiguous, as a slice.
+fn col<'a>(m: MatRef<'a, f64>, c: usize) -> &'a [f64] {
+    m.col(c).try_as_col_major().expect("column-major").as_slice()
+}
+
 impl<O: super::Operator> super::Operator for Clipped<O> {
     fn nrows(&self) -> usize {
         self.inner.nrows()
@@ -492,22 +498,30 @@ impl<O: super::Operator> super::Operator for Clipped<O> {
     fn ncols(&self) -> usize {
         self.inner.ncols()
     }
+    // Both corrections run one task per output column; each element still receives its
+    // terms in entry order, so the result does not depend on the thread count.
     fn apply(&self, v: MatRef<'_, f64>, mut out: MatMut<'_, f64>) -> Result<()> {
         self.inner.apply(v, out.rb_mut())?;
-        for c in 0..v.ncols() {
-            for e in 0..self.vals.len() {
-                out[(self.rows[e], c)] -= self.vals[e] * v[(self.cols[e], c)];
+        let (rows, cols, vals) = (&self.rows, &self.cols, &self.vals);
+        out.par_col_chunks_mut(1).enumerate().for_each(|(c, mut oc)| {
+            let o = oc.rb_mut().col_mut(0).try_as_col_major_mut().expect("column-major").as_slice_mut();
+            let vc = col(v, c);
+            for ((&i, &j), &w) in rows.iter().zip(cols).zip(vals) {
+                o[i as usize] -= w * vc[j as usize];
             }
-        }
+        });
         Ok(())
     }
     fn apply_t(&self, u: MatRef<'_, f64>) -> Result<Mat<f64>> {
         let mut out = self.inner.apply_t(u)?;
-        for c in 0..u.ncols() {
-            for e in 0..self.vals.len() {
-                out[(self.cols[e], c)] -= self.vals[e] * u[(self.rows[e], c)];
+        let (rows, cols, vals) = (&self.rows, &self.cols, &self.vals);
+        out.as_mut().par_col_chunks_mut(1).enumerate().for_each(|(c, mut oc)| {
+            let o = oc.rb_mut().col_mut(0).try_as_col_major_mut().expect("column-major").as_slice_mut();
+            let uc = col(u, c);
+            for ((&i, &j), &w) in rows.iter().zip(cols).zip(vals) {
+                o[j as usize] -= w * uc[i as usize];
             }
-        }
+        });
         Ok(out)
     }
 }
