@@ -74,7 +74,9 @@ UMAP; times are from process start, including the file read. Inputs for a demo a
 | Mouse brain | 100,000 | 2.2 s |
 | Mouse brain | 500,000 | 11.3 s |
 
-For comparison, Seurat needs 121 s, 195 s and 967 s for these on 16 server cores (compute only).
+Same laptop, mouse brain 100k, all three engines through the bench harness
+(`bench/results/laptop_brain100k`): compute Seurat 98.8 s, Scanpy 48.0 s, scfast 1.56 s
+(**63×** and **31×**); reading the file: 10.5 s, 5.9 s, 0.24 s.
 
 ## What changed overnight
 
