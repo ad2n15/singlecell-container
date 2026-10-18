@@ -49,6 +49,8 @@ if ds == "pbmc68k":
     for seed in (1, 2):
         v = scfast.umap(i, dist, p, seed=seed); res["sil"].append(float(silhouette_score(v[s], lab[s])))
 np.save(out, u)
+r = np.linalg.norm(u - np.median(u, 0), axis=1)
+res["strays"] = int((r > 1.5 * np.percentile(r, 99.9)).sum())
 print(json.dumps(res))
 """
 
@@ -79,7 +81,7 @@ def build(rev: str, tar: bytes) -> str:
 
 
 @app.function(image=image, volumes={"/data": vol}, cpu=16, memory=16384, timeout=3600)
-def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None) -> dict:
+def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None, threads: list[int]) -> dict:
     import json
 
     sites = {rev: build(rev, tar) for rev, tar in srcs.items()}
@@ -88,12 +90,14 @@ def run(srcs: dict[str, bytes], datasets: list[str], reps: int, png: str | None)
     results["cpu"] = cpu.stdout
     for ds in datasets:
         for rev, site in sites.items():
+          for th in threads:
             out = f"/tmp/{rev}_{ds}.npy"
-            env = {**os.environ, "PYTHONPATH": site, "RAYON_NUM_THREADS": "16"}
+            env = {**os.environ, "PYTHONPATH": site, "RAYON_NUM_THREADS": str(th)}
             r = subprocess.run(["python", "-c", WORKER, ds, str(reps), out], env=env, capture_output=True, text=True)
-            results[f"{rev} {ds}"] = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
+            key = f"{rev} {ds}" + (f" t{th}" if th != 16 else "")
+            results[key] = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
             if r.stderr.strip():
-                results[f"{rev} {ds}"]["stderr"] = r.stderr[-1500:]
+                results[key]["stderr"] = r.stderr[-1500:]
             print(rev, ds, results[f"{rev} {ds}"], flush=True)
             if ds == png and r.returncode == 0:
                 pngs[rev] = render(out, f"{BASE}/{ds}/labels.npy", f"{rev} {ds}")
@@ -177,10 +181,10 @@ def setup(sizes: str = "100000,500000,1290549", pbmc_dir: str = "/tmp/sc/mu",
 
 
 @app.local_entrypoint()
-def main(revs: str = "HEAD,WORKTREE", sizes: str = "1290549", pbmc: bool = True, reps: int = 2):
+def main(revs: str = "HEAD,WORKTREE", sizes: str = "1290549", pbmc: bool = True, reps: int = 2, threads: str = "16"):
     srcs = {sha(r): rust_tar(r) for r in revs.split(",")}
     datasets = (["pbmc68k"] if pbmc else []) + [f"brain{s}" for s in sizes.split(",") if s]
-    out = run.remote(srcs, datasets, reps, datasets[-1] if sizes else None)
+    out = run.remote(srcs, datasets, reps, datasets[-1] if sizes else None, [int(t) for t in threads.split(",")])
     for k, v in out["results"].items():
         print(k, v)
     dest = ROOT / "bench/results/umap"
