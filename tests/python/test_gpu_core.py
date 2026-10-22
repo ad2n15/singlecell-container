@@ -273,7 +273,7 @@ def test_engine_rust_gpu_uses_cuda_when_device_info_says_so(slim, tmp_path, monk
     scfast = pytest.importorskip("scfast")
     seen = {}
 
-    def pca(X, n_comps, seed, device="auto"):
+    def pca(X, n_comps, seed, device="auto", **kwargs):
         seen["pca"] = device
         return scfast.pca(X, n_comps=n_comps, seed=seed)
 
@@ -299,3 +299,29 @@ def test_engine_rust_gpu_uses_cuda_when_device_info_says_so(slim, tmp_path, monk
     assert s["device"] == "cpu" and s["scfast_device"] == "cpu" and seen == {"pca": "cpu", "knn": "cpu"}
     with pytest.raises(gpu_core.DeviceError, match="no CUDA device is visible"):
         gpu_core.run(slim[0], tmp_path / "err.h5ad", device="gpu", engine="rust")
+
+
+def test_rapids_leiden_keeps_cugraph_level_default(slim, tmp_path, monkeypatch):
+    seen = {}
+
+    def leiden(adata, **kw):
+        seen.update(kw)
+        sc.tl.leiden(adata, resolution=kw["resolution"], random_state=0, flavor="igraph", n_iterations=2,
+                     directed=False, key_added=kw["key_added"])
+
+    rsc = types.SimpleNamespace(
+        get=types.SimpleNamespace(anndata_to_GPU=lambda a: None, anndata_to_CPU=lambda a, convert_all=True: None),
+        pp=types.SimpleNamespace(scale=lambda a, max_value: sc.pp.scale(a, max_value=max_value),
+                                 pca=lambda a, n_comps, random_state: sc.pp.pca(a, n_comps=n_comps, mask_var=None),
+                                 neighbors=lambda a, **kw: sc.pp.neighbors(a, n_neighbors=kw["n_neighbors"],
+                                                                           use_rep=kw["use_rep"])),
+        tl=types.SimpleNamespace(leiden=leiden, umap=lambda a, random_state: sc.tl.umap(a)),
+    )
+    pool = types.SimpleNamespace(total_bytes=lambda: 0)
+    monkeypatch.setitem(sys.modules, "rapids_singlecell", rsc)
+    monkeypatch.setitem(sys.modules, "cupy", types.SimpleNamespace(get_default_memory_pool=lambda: pool,
+                                                               ndarray=type("ndarray", (), {})))
+    monkeypatch.setattr(gpu_core, "gpu_available", lambda *a, **k: (True, "fake GPU"))
+    s = gpu_core.run(slim[0], tmp_path / "rsc.h5ad", device="gpu", engine="rapids", seed=0)
+    assert s["device"] == "gpu"
+    assert "n_iterations" not in seen

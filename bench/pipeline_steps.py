@@ -50,7 +50,8 @@ def parse(argv=None):
     p.add_argument("--resolution", type=float, default=0.5)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--umap-epochs", type=int, default=None, help="default: scanpy's choice (200 for large data)")
-    p.add_argument("--umap-init", default="spectral", choices=["spectral", "random", "pca"])
+    p.add_argument("--umap-init", default="spectral", choices=["spectral", "random", "pca"],
+                   help="scanpy engine only; scfast-cpu starts UMAP from the first two PCs")
     p.add_argument("--skip-umap", action="store_true")
     return p.parse_args(argv)
 
@@ -202,14 +203,10 @@ def main(argv=None) -> int:
     def neighbors(d):
         x = np.ascontiguousarray(hv.obsm["X_pca"][:, : a.dims])
         if a.engine == "scfast-cpu":
-            from scanpy.neighbors import _connectivity
-
             idx, dist = scfast.knn(x, k=a.k, method="exact")
             snn = scfast.snn(idx)
             hv.obsp["snn"] = snn
-            hv.obsp["connectivities"] = _connectivity.umap(idx, dist, n_obs=idx.shape[0], n_neighbors=a.k)
-            hv.uns["neighbors"] = {"connectivities_key": "connectivities",
-                                   "params": {"n_neighbors": a.k, "method": "umap", "metric": "euclidean"}}
+            hv.obsm["knn_indices"], hv.obsm["knn_distances"] = idx, dist
         else:
             sc.pp.neighbors(hv, n_neighbors=a.k, n_pcs=a.dims, random_state=a.seed)
             idx = None
@@ -253,10 +250,14 @@ def main(argv=None) -> int:
     # ------------------------------------------------------------------ 07 UMAP
     if not a.skip_umap:
         def umap(d):
-            kw = {"init_pos": a.umap_init}
-            if a.umap_epochs:
-                kw["maxiter"] = a.umap_epochs
-            sc.tl.umap(hv, random_state=a.seed, **kw)
+            if a.engine == "scfast-cpu":
+                hv.obsm["X_umap"] = scfast.umap(hv.obsm["knn_indices"], hv.obsm["knn_distances"], hv.obsm["X_pca"][:, :2],
+                                                n_epochs=a.umap_epochs, seed=a.seed)
+            else:
+                kw = {"init_pos": a.umap_init}
+                if a.umap_epochs:
+                    kw["maxiter"] = a.umap_epochs
+                sc.tl.umap(hv, random_state=a.seed, **kw)
             u = hv.obsm["X_umap"]
             pd.DataFrame(u, index=hv.obs_names, columns=["UMAP1", "UMAP2"]).rename_axis("barcode").to_csv(d / "umap_coordinates.csv")
             cl = hv.obs["cluster"].astype(int).values

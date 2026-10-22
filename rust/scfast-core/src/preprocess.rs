@@ -31,14 +31,14 @@
 //!
 //! # Loess
 //!
-//! `loess` is written here: local quadratic (degree 2), tricube weights, family gaussian
-//! (one iteration, no robustness weights), neighbourhood of `q = floor(n * span)` points
-//! with bandwidth the distance to the q-th nearest point (the point itself counted), the
-//! fit evaluated at every point. That is R's `loess(..., surface = "direct")`; it matches it
-//! to ~1e-15. Deviation: R's default `surface = "interpolate"` fits only at the vertices of
-//! a k-d tree and blends between them with cubic interpolation, which this does not
-//! reproduce. On the pbmc_like fixture and a 2k-cell simulation the two surfaces select
-//! HVG sets that overlap by 99.4% and 99.95%.
+//! `loess` is written here, as R's default `loess(..., span, degree = 2, family =
+//! "gaussian")` that Seurat calls: `surface = "interpolate"`, `cell = 0.2`. R builds a
+//! k-d tree over `x`, fits the local quadratic (tricube weights, neighbourhood of
+//! `floor(n * span)` points) only at the tree's vertices, keeping the fitted value and
+//! slope there, and evaluates every point by cubic Hermite interpolation between the two
+//! vertices of its cell ([`loess_interpolate`], a port of `lowesb` / `lowese` in R's
+//! `loessf.f`; matches R to ~1e-11). [`loess_direct`] (`surface = "direct"`, the local
+//! quadratic at every point) is kept for the R package.
 
 use rayon::prelude::*;
 
@@ -52,6 +52,9 @@ const MIN_BLOCK_ROWS: usize = 64;
 /// A leaf should do at least this many times more work than zeroing and merging its
 /// per-gene accumulators costs.
 const ACC_WORK_RATIO: usize = 16;
+
+/// Counts below this get their log-normalised value from a per-cell table.
+const SMALL_COUNTS: usize = 32;
 
 /// Value type of the log-normalised output (`f64` for an R `dgCMatrix`, `f32` for AnnData).
 pub trait OutValue: Copy + Send + Sync + 'static {
@@ -116,37 +119,42 @@ pub struct PreprocessResult<O: OutValue> {
     /// Sample standard deviation (n - 1) of the log-normalised values of each HVG; the
     /// numbers `ScaleData` centres and scales with.
     pub hvg_sd: Vec<f64>,
+    /// First cell whose column indices do not strictly increase (`None`: canonical CSR).
+    pub unsorted_row: Option<usize>,
+}
+
+/// Pass-1 sums of one gene, kept together so a stored entry updates one cache line.
+#[derive(Clone, Copy, Default)]
+#[repr(align(64))]
+struct GeneAcc {
+    sum: f64,
+    sumsq: f64,
+    ysum: f64,
+    ysumsq: f64,
+    max: f64,
+    nnz: u64,
 }
 
 /// Per-block accumulators of pass 1.
 struct Acc {
-    sum: Vec<f64>,
-    sumsq: Vec<f64>,
-    ysum: Vec<f64>,
-    ysumsq: Vec<f64>,
-    max: Vec<f64>,
-    nnz: Vec<u64>,
+    genes: Vec<GeneAcc>,
+    /// First row whose column indices do not strictly increase.
+    unsorted: Option<usize>,
 }
 
 impl Acc {
     fn new(p: usize) -> Self {
-        Self {
-            sum: vec![0.0; p],
-            sumsq: vec![0.0; p],
-            ysum: vec![0.0; p],
-            ysumsq: vec![0.0; p],
-            max: vec![0.0; p],
-            nnz: vec![0; p],
-        }
+        Self { genes: vec![GeneAcc::default(); p], unsorted: None }
     }
     fn merge(&mut self, b: Acc) {
-        for j in 0..self.sum.len() {
-            self.sum[j] += b.sum[j];
-            self.sumsq[j] += b.sumsq[j];
-            self.ysum[j] += b.ysum[j];
-            self.ysumsq[j] += b.ysumsq[j];
-            self.max[j] = self.max[j].max(b.max[j]);
-            self.nnz[j] += b.nnz[j];
+        self.unsorted = self.unsorted.or(b.unsorted);
+        for (a, b) in self.genes.iter_mut().zip(&b.genes) {
+            a.sum += b.sum;
+            a.sumsq += b.sumsq;
+            a.ysum += b.ysum;
+            a.ysumsq += b.ysumsq;
+            a.max = a.max.max(b.max);
+            a.nnz += b.nnz;
         }
     }
 }
@@ -209,54 +217,17 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
     let mut library_size = vec![0.0f64; n];
     let acc = pass1(&x, params.scale_factor, blocks, 0, blocks.count, &mut data, &mut library_size)?;
 
-    // ---- per-gene vst statistics
+    let column = |f: fn(&GeneAcc) -> f64| acc.genes.iter().map(f).collect::<Vec<f64>>();
+    let gene_nnz: Vec<u64> = acc.genes.iter().map(|g| g.nnz).collect();
+    let VstSums { mean, variance, variance_expected, mut variance_standardized, needs_clip, sd } =
+        vst_from_sums(&column(|g| g.sum), &column(|g| g.sumsq), &column(|g| g.max), &gene_nnz, n, params.span, clip)?;
     let nf = n as f64;
-    let mut mean = vec![0.0; p];
-    let mut variance = vec![0.0; p];
-    for j in 0..p {
-        let m = acc.sum[j] / nf;
-        mean[j] = m;
-        if n > 1 {
-            // Seurat: sum((x - mu)^2) / (n - 1), zeros included.
-            variance[j] = ((acc.sumsq[j] - acc.sum[j] * m) / (nf - 1.0)).max(0.0);
-            // A gene stored in every cell with a single value is constant too.
-            if acc.nnz[j] as usize == n && acc.max[j] * acc.max[j] * nf == acc.sumsq[j] && acc.max[j] * nf == acc.sum[j] {
-                variance[j] = 0.0;
-            }
-        }
-    }
-    let not_const: Vec<usize> = (0..p).filter(|&j| variance[j] > 0.0).collect();
-    let mut variance_expected = vec![0.0; p];
-    if !not_const.is_empty() {
-        let lx: Vec<f64> = not_const.iter().map(|&j| mean[j].log10()).collect();
-        let ly: Vec<f64> = not_const.iter().map(|&j| variance[j].log10()).collect();
-        let fit = loess_direct(&lx, &ly, params.span)?;
-        for (k, &j) in not_const.iter().enumerate() {
-            variance_expected[j] = 10f64.powf(fit[k]);
-        }
-    }
-
-    // ---- standardised variance: exact from the sums unless the gene has clipped values
-    let mut variance_standardized = vec![0.0; p];
-    let mut needs_clip = vec![false; p];
-    let mut any_clip = false;
-    let sd: Vec<f64> = variance_expected.iter().map(|v| v.sqrt()).collect();
-    for j in 0..p {
-        if sd[j] == 0.0 {
-            continue;
-        }
-        if acc.max[j] > mean[j] + clip * sd[j] {
-            needs_clip[j] = true;
-            any_clip = true;
-        } else {
-            variance_standardized[j] = variance[j] / variance_expected[j];
-        }
-    }
+    let any_clip = needs_clip.iter().any(|&c| c);
     if any_clip {
         let clipped = pass2(&x, &mean, &sd, &needs_clip, clip, blocks)?;
         for j in 0..p {
             if needs_clip[j] {
-                let zeros = (n as u64 - acc.nnz[j]) as f64;
+                let zeros = (n as u64 - acc.genes[j].nnz) as f64;
                 let z0 = mean[j] / sd[j];
                 variance_standardized[j] = (clipped[j] + zeros * z0 * z0) / (nf - 1.0);
             }
@@ -270,14 +241,14 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(&b))
     });
     order.truncate(params.n_hvg.min(p));
-    let hvg_mean: Vec<f64> = order.iter().map(|&j| acc.ysum[j as usize] / nf).collect();
+    let hvg_mean: Vec<f64> = order.iter().map(|&j| acc.genes[j as usize].ysum / nf).collect();
     let hvg_sd: Vec<f64> = order
         .iter()
         .zip(&hvg_mean)
         .map(|(&j, &m)| {
             let j = j as usize;
             if n > 1 {
-                ((acc.ysumsq[j] - acc.ysum[j] * m).max(0.0) / (nf - 1.0)).sqrt()
+                ((acc.genes[j].ysumsq - acc.genes[j].ysum * m).max(0.0) / (nf - 1.0)).sqrt()
             } else {
                 0.0
             }
@@ -295,7 +266,69 @@ pub fn preprocess<I: Idx, T: Real, O: OutValue>(x: CsrView<'_, I, T>, params: &P
         hvg: order,
         hvg_mean,
         hvg_sd,
+        unsorted_row: acc.unsorted,
     })
+}
+
+/// The per-gene vst statistics of [`preprocess`] from the pass-1 sums of the raw counts
+/// (`sum`, `sumsq`, `max`, stored-entry count `nnz` per gene, over `n` cells), shared with
+/// the device front end. `variance_standardized` is final except for the genes flagged in
+/// `needs_clip`, whose clipped sum `sum_i min(clip, (x_ij - mean_j) / sd_j)^2` over the stored
+/// entries must still be added: `(clipped + (n - nnz_j) (mean_j / sd_j)^2) / (n - 1)`.
+pub fn vst_from_sums(sum: &[f64], sumsq: &[f64], max: &[f64], nnz: &[u64], n: usize, span: f64, clip: f64) -> Result<VstSums> {
+    let p = sum.len();
+    let nf = n as f64;
+    let mut mean = vec![0.0; p];
+    let mut variance = vec![0.0; p];
+    for j in 0..p {
+        let m = sum[j] / nf;
+        mean[j] = m;
+        if n > 1 {
+            // Seurat: sum((x - mu)^2) / (n - 1), zeros included.
+            variance[j] = ((sumsq[j] - sum[j] * m) / (nf - 1.0)).max(0.0);
+            // A gene stored in every cell with a single value is constant too.
+            if nnz[j] as usize == n && max[j] * max[j] * nf == sumsq[j] && max[j] * nf == sum[j] {
+                variance[j] = 0.0;
+            }
+        }
+    }
+    let not_const: Vec<usize> = (0..p).filter(|&j| variance[j] > 0.0).collect();
+    let mut variance_expected = vec![0.0; p];
+    if !not_const.is_empty() {
+        let lx: Vec<f64> = not_const.iter().map(|&j| mean[j].log10()).collect();
+        let ly: Vec<f64> = not_const.iter().map(|&j| variance[j].log10()).collect();
+        let fit = loess_interpolate(&lx, &ly, span)?;
+        for (k, &j) in not_const.iter().enumerate() {
+            variance_expected[j] = 10f64.powf(fit[k]);
+        }
+    }
+
+    // Standardised variance: exact from the sums unless the gene has clipped values.
+    let mut variance_standardized = vec![0.0; p];
+    let mut needs_clip = vec![false; p];
+    let sd: Vec<f64> = variance_expected.iter().map(|v| v.sqrt()).collect();
+    for j in 0..p {
+        if sd[j] == 0.0 {
+            continue;
+        }
+        if max[j] > mean[j] + clip * sd[j] {
+            needs_clip[j] = true;
+        } else {
+            variance_standardized[j] = variance[j] / variance_expected[j];
+        }
+    }
+    Ok(VstSums { mean, variance, variance_expected, variance_standardized, needs_clip, sd })
+}
+
+/// Output of [`vst_from_sums`]; `sd` is `sqrt(variance_expected)`.
+#[derive(Clone, Debug)]
+pub struct VstSums {
+    pub mean: Vec<f64>,
+    pub variance: Vec<f64>,
+    pub variance_expected: Vec<f64>,
+    pub variance_standardized: Vec<f64>,
+    pub needs_clip: Vec<bool>,
+    pub sd: Vec<f64>,
 }
 
 /// Pass 1 over the row blocks `lo..hi` (recursive binary split, `rayon::join` on the two
@@ -333,8 +366,10 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
     let (r0, r1) = blocks.range(lo, n);
     let base = x.indptr[r0].to_usize();
     let mut acc = Acc::new(p);
-    // Row stamp per gene to detect duplicate column indices within a row.
-    let mut seen = vec![u32::MAX; p];
+    // Row stamp per gene to find duplicate column indices in rows that are not strictly
+    // increasing (a strictly increasing row has none).
+    let mut seen: Vec<u32> = Vec::new();
+    let mut small = [f64::NAN; SMALL_COUNTS];
     for i in r0..r1 {
         let (s, e) = (x.indptr[i].to_usize(), x.indptr[i + 1].to_usize());
         if s > e || e > nnz || s < base || e - base > data.len() {
@@ -344,37 +379,59 @@ fn pass1<I: Idx, T: Real, O: OutValue>(
         let idx = &x.indices[s..e];
         let val = &x.data[s..e];
         let mut lib = 0.0f64;
+        let mut prev = None;
+        let mut increasing = true;
         for (j, v) in idx.iter().zip(val) {
             let j = j.to_usize();
+            increasing &= prev.is_none_or(|q| j > q);
+            prev = Some(j);
             if j >= p {
                 return Err(Error::InvalidInput(format!("column index {j} out of range for {p} columns")));
             }
-            if seen[j] == stamp {
-                return Err(Error::InvalidInput(format!("duplicate column index {j} in row {i}; sum duplicates first")));
-            }
-            seen[j] = stamp;
             let v = v.to_f64();
             if !v.is_finite() || v < 0.0 {
                 return Err(Error::InvalidInput(format!("counts must be finite and non-negative; row {i}, column {j} is {v}")));
             }
             lib += v;
         }
+        if !increasing {
+            acc.unsorted.get_or_insert(i);
+            seen.resize(p, u32::MAX);
+            for j in idx {
+                let j = j.to_usize();
+                if seen[j] == stamp {
+                    return Err(Error::InvalidInput(format!("duplicate column index {j} in row {i}; sum duplicates first")));
+                }
+                seen[j] = stamp;
+            }
+        }
         library_size[i - r0] = lib;
         let factor = if lib > 0.0 { scale_factor / lib } else { 0.0 };
         let out = &mut data[s - base..e - base];
+        small.fill(f64::NAN);
         for ((j, v), o) in idx.iter().zip(val).zip(out.iter_mut()) {
             let j = j.to_usize();
             let v = v.to_f64();
-            let y = (v * factor).ln_1p();
+            // Most counts are small integers: their log1p is computed once per cell.
+            let y = match small.get_mut(v as usize) {
+                Some(t) if v == (v as usize) as f64 => {
+                    if t.is_nan() {
+                        *t = (v * factor).ln_1p();
+                    }
+                    *t
+                }
+                _ => (v * factor).ln_1p(),
+            };
             *o = O::from_f64(y);
-            acc.sum[j] += v;
-            acc.sumsq[j] += v * v;
-            acc.ysum[j] += y;
-            acc.ysumsq[j] += y * y;
-            if v > acc.max[j] {
-                acc.max[j] = v;
+            let g = &mut acc.genes[j];
+            g.sum += v;
+            g.sumsq += v * v;
+            g.ysum += y;
+            g.ysumsq += y * y;
+            if v > g.max {
+                g.max = v;
             }
-            acc.nnz[j] += 1;
+            g.nnz += 1;
         }
     }
     Ok(acc)
@@ -426,21 +483,8 @@ fn pass2<I: Idx, T: Real>(x: &CsrView<'_, I, T>, mean: &[f64], sd: &[f64], flag:
 /// every point is a neighbour and `h` is scaled by `sqrt(span)`, as R does.
 pub fn loess_direct(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
     let n = x.len();
-    if y.len() != n {
-        return Err(Error::InvalidInput(format!("loess: x has {n} values, y has {}", y.len())));
-    }
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    if x.iter().chain(y).any(|v| !v.is_finite()) {
-        return Err(Error::InvalidInput("loess: non-finite value".into()));
-    }
-    // Sort once so each neighbourhood is a window of the sorted order.
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| x[a].partial_cmp(&x[b]).unwrap().then(a.cmp(&b)));
-    let xs: Vec<f64> = order.iter().map(|&i| x[i]).collect();
-    let ys: Vec<f64> = order.iter().map(|&i| y[i]).collect();
-    let q = ((n as f64 * span + 1e-5).floor() as usize).clamp(1, n);
+    let Some((order, xs, ys)) = sorted_xy(x, y)? else { return Ok(Vec::new()) };
+    let q = neighbourhood_size(n, span);
     // R scales the bandwidth by sqrt(span) when span > 1 (checked against stats::loess).
     let bandwidth_scale = span.max(1.0).sqrt();
 
@@ -508,14 +552,17 @@ pub fn loess_direct(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
                 t1 += wy * u;
                 t2 += wy * u2;
             }
-            solve3([[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2]).unwrap_or_else(|| {
-                // Singular (fewer than 3 distinct x in the window): weighted mean.
-                if s0 > 0.0 {
-                    t0 / s0
-                } else {
-                    ys[k]
-                }
-            })
+            solve3([[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2]).map_or_else(
+                || {
+                    // Singular (fewer than 3 distinct x in the window): weighted mean.
+                    if s0 > 0.0 {
+                        t0 / s0
+                    } else {
+                        ys[k]
+                    }
+                },
+                |c| c[0],
+            )
         })
         .collect();
 
@@ -526,9 +573,182 @@ pub fn loess_direct(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
     Ok(fitted)
 }
 
-/// Intercept (first unknown) of the 3 x 3 system `a c = b` by Gaussian elimination with
-/// partial pivoting; `None` when (numerically) singular.
-fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<f64> {
+/// Validates `x` / `y` and returns the permutation sorting `x` (ties by index) with the
+/// sorted `x` and `y`; `None` for empty input.
+fn sorted_xy(x: &[f64], y: &[f64]) -> Result<Option<(Vec<usize>, Vec<f64>, Vec<f64>)>> {
+    let n = x.len();
+    if y.len() != n {
+        return Err(Error::InvalidInput(format!("loess: x has {n} values, y has {}", y.len())));
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    if x.iter().chain(y).any(|v| !v.is_finite()) {
+        return Err(Error::InvalidInput("loess: non-finite value".into()));
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| x[a].total_cmp(&x[b]).then(a.cmp(&b)));
+    let xs = order.iter().map(|&i| x[i]).collect();
+    let ys = order.iter().map(|&i| y[i]).collect();
+    Ok(Some((order, xs, ys)))
+}
+
+/// R's `nf = min(n, floor(n * span + 1e-5))` (`loess_workspace` in loessc.c), at least 1.
+fn neighbourhood_size(n: usize, span: f64) -> usize {
+    ((n as f64 * span + 1e-5).floor() as usize).clamp(1, n)
+}
+
+/// R's default `loess(y ~ x, span, degree = 2, family = "gaussian")`: `surface =
+/// "interpolate"`, `cell = 0.2`, the fit evaluated at every `x[i]`. A port of the 1-D path
+/// of `lowesb` / `lowese` in R's `src/library/stats/src/loessf.f`:
+///
+/// - `ehg126`: the bounding box of `x`, widened by 0.5% of its width on each side, gives
+///   the first two vertices;
+/// - `ehg124`: cells are split breadth-first at the median point (1-based position
+///   `floor((l + u) / 2)`), moved to the nearest position (searched in the order 0, +1, -1,
+///   +2, ...) whose value differs from the next, until a cell holds at most
+///   `floor(n * span * cell)` points or the split value lands on a cell bound;
+/// - `ehg127`: at each vertex `v`, the weighted least-squares quadratic in `x - v` over the
+///   `nf` nearest points, tricube weights on `|x - v| / h`, `h` the `nf`-th distance
+///   (scaled by `sqrt(span)` for `span > 1`), keeping the value and the slope;
+/// - `ehg128`: each point is the cubic Hermite interpolant of the values and slopes at the
+///   two vertices of the leaf cell holding it (`x <= split` descends left).
+///
+/// R solves the local fits by QR and an SVD pseudo-inverse; here they are the 3 x 3 normal
+/// equations in `(x - v) / h`. Singular fits (fewer than 3 distinct `x` near a vertex)
+/// fall back to the weighted mean with slope 0, as [`loess_direct`] does.
+pub fn loess_interpolate(x: &[f64], y: &[f64], span: f64) -> Result<Vec<f64>> {
+    let n = x.len();
+    let Some((_, xs, ys)) = sorted_xy(x, y)? else { return Ok(Vec::new()) };
+    let nf = neighbourhood_size(n, span);
+    // lowesb: fc = floor(n * (span * cell)); R passes the product span * cell.
+    let fc = (n as f64 * (span * 0.2)).floor() as usize;
+    // loess_workspace: nvmax = ncmax = max(200, n).
+    let nvmax = n.max(200);
+
+    let (lo, hi) = (xs[0], xs[n - 1]);
+    let margin = 0.005 * (hi - lo).max(1e-10 * lo.abs().max(hi.abs()) + 1e-30);
+    let mut vert = vec![lo - margin, hi + margin];
+    struct Cell {
+        a: usize, // points xs[a..b]
+        b: usize,
+        vlo: usize,
+        vhi: usize,
+        split: Option<(f64, usize, usize)>,
+    }
+    let mut cells = vec![Cell { a: 0, b: n, vlo: 0, vhi: 1, split: None }];
+    let mut p = 0;
+    while p < cells.len() {
+        let Cell { a, b, vlo, vhi, .. } = cells[p];
+        let mut leaf = b - a <= fc || vert[vhi] - vert[vlo] <= 0.0 || nvmax < cells.len() + 2 || nvmax < vert.len() + 1;
+        if !leaf {
+            // All ties go with the right son: move m to the nearest boundary between values.
+            let mut m = (a + 1 + b) / 2 - 1;
+            let mut off: isize = 0;
+            loop {
+                let mm = m as isize + off;
+                if mm >= b as isize - 1 || mm < a as isize {
+                    break;
+                }
+                let mm = mm as usize;
+                if xs[mm] != xs[mm + 1] {
+                    m = mm;
+                    break;
+                }
+                off = -off;
+                if off >= 0 {
+                    off += 1;
+                }
+            }
+            let xi = xs[m];
+            leaf = vert[vlo] == xi || vert[vhi] == xi;
+            if !leaf {
+                let v = vert.len();
+                vert.push(xi);
+                let (left, right) = (cells.len(), cells.len() + 1);
+                cells.push(Cell { a, b: m + 1, vlo, vhi: v, split: None });
+                cells.push(Cell { a: m + 1, b, vlo: v, vhi, split: None });
+                cells[p].split = Some((xi, left, right));
+            }
+        }
+        p += 1;
+    }
+
+    let fits: Vec<(f64, f64)> = vert.iter().map(|&v| vertex_fit(&xs, &ys, v, nf, span)).collect();
+
+    Ok(x.iter()
+        .map(|&z| {
+            let mut j = 0;
+            while let Some((xi, left, right)) = cells[j].split {
+                j = if z <= xi { left } else { right };
+            }
+            let (lo, hi) = (cells[j].vlo, cells[j].vhi);
+            let (v0, v1) = (vert[lo], vert[hi]);
+            let ((g0, s0), (g1, s1)) = (fits[lo], fits[hi]);
+            let h = (z - v0) / (v1 - v0);
+            let phi0 = (1.0 - h) * (1.0 - h) * (1.0 + 2.0 * h);
+            let phi1 = h * h * (3.0 - 2.0 * h);
+            let psi0 = h * (1.0 - h) * (1.0 - h);
+            let psi1 = h * h * (h - 1.0);
+            phi0 * g0 + phi1 * g1 + (psi0 * s0 + psi1 * s1) * (v1 - v0)
+        })
+        .collect())
+}
+
+/// Value and slope at `q` of the local quadratic over the `nf` points of sorted `xs`
+/// nearest to `q` (R's `ehg127` at one vertex).
+fn vertex_fit(xs: &[f64], ys: &[f64], q: f64, nf: usize, span: f64) -> (f64, f64) {
+    let n = xs.len();
+    let k = xs.partition_point(|&v| v < q);
+    let (mut lo, mut hi) = (k, k); // window xs[lo..hi]
+    while hi - lo < nf {
+        let dl = if lo > 0 { q - xs[lo - 1] } else { f64::INFINITY };
+        let dr = if hi < n { xs[hi] - q } else { f64::INFINITY };
+        if dl <= dr {
+            lo -= 1;
+        } else {
+            hi += 1;
+        }
+    }
+    // rho: squared distance to the nf-th nearest, times span when span > 1.
+    let rho = (q - xs[lo]).powi(2).max((xs[hi - 1] - q).powi(2)) * span.max(1.0);
+    if !(rho > 0.0) {
+        return (ys[lo..hi].iter().sum::<f64>() / (hi - lo) as f64, 0.0);
+    }
+    let scale = rho.sqrt();
+    let (mut s0, mut s1, mut s2, mut s3, mut s4) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut t0, mut t1, mut t2) = (0.0, 0.0, 0.0);
+    for i in lo..hi {
+        let u = xs[i] - q;
+        let r = (u * u / rho).sqrt();
+        if r >= 1.0 {
+            continue;
+        }
+        let w = {
+            let t = 1.0 - r * r * r;
+            t * t * t
+        };
+        let t = u / scale;
+        let (tt, wy) = (t * t, w * ys[i]);
+        s0 += w;
+        s1 += w * t;
+        s2 += w * tt;
+        s3 += w * tt * t;
+        s4 += w * tt * tt;
+        t0 += wy;
+        t1 += wy * t;
+        t2 += wy * tt;
+    }
+    match solve3([[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]], [t0, t1, t2]) {
+        Some(c) => (c[0], c[1] / scale),
+        None if s0 > 0.0 => (t0 / s0, 0.0),
+        None => (ys[lo], 0.0),
+    }
+}
+
+/// Solution of the 3 x 3 system `a c = b` by Gaussian elimination with partial pivoting;
+/// `None` when (numerically) singular.
+fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<[f64; 3]> {
     let scale = a.iter().flatten().fold(0.0f64, |m, v| m.max(v.abs()));
     if !(scale > 0.0) {
         return None;
@@ -551,11 +771,8 @@ fn solve3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Option<f64> {
     let c2 = b[2] / a[2][2];
     let c1 = (b[1] - a[1][2] * c2) / a[1][1];
     let c0 = (b[0] - a[0][1] * c1 - a[0][2] * c2) / a[0][0];
-    if c0.is_finite() {
-        Some(c0)
-    } else {
-        None
-    }
+    let c = [c0, c1, c2];
+    c.iter().all(|v| v.is_finite()).then_some(c)
 }
 
 // ------------------------------------------------------------------ tests
@@ -589,7 +806,7 @@ mod tests {
         let nc: Vec<usize> = (0..p).filter(|&j| var[j] > 0.0).collect();
         let lx: Vec<f64> = nc.iter().map(|&j| mean[j].log10()).collect();
         let ly: Vec<f64> = nc.iter().map(|&j| var[j].log10()).collect();
-        let fit = loess_direct(&lx, &ly, span).unwrap();
+        let fit = loess_interpolate(&lx, &ly, span).unwrap();
         let mut ve = vec![0.0; p];
         for (k, &j) in nc.iter().enumerate() {
             ve[j] = 10f64.powf(fit[k]);

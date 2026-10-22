@@ -15,13 +15,13 @@ thiserror.workspace = true
 hnsw_rs.workspace = true
 single-clustering.workspace = true
 libloading = { workspace = true, optional = true }
-# Feature `cuda` (docs/scfast-integration.md Phase 6). `dynamic-loading`: libcuda, libnvrtc and
-# libcublas are dlopen'ed at run time, so the crate builds and links on a machine without a
+# Feature `cuda` (docs/scfast-integration.md Phase 6). `dynamic-loading`: libcuda and libnvrtc are
+# dlopen'ed at run time, so the crate builds and links on a machine without a
 # GPU or a CUDA toolkit, and `Device::auto()` falls back to CPU when they are absent.
 # `cuda-12040` selects the API surface of the CUDA 12.4 container image
 # (containers/Dockerfile); any 12.4+ driver can load it. Set CUDARC_CUDA_VERSION=12080 (etc.)
 # at build time if the bindings must track another toolkit.
-cudarc = { version = "0.19.10", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "cublas", "dynamic-loading", "cuda-12040"] }
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "cusolver", "dynamic-loading", "cuda-12040"] }
 
 [features]
 default = []

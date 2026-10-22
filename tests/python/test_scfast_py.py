@@ -162,8 +162,9 @@ def test_version_matches_cargo_workspace():
 
 
 def test_public_api():
-    assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess"}
-    for name in ("pca", "knn", "snn", "leiden"):
+    assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess",
+                                 "read_10x_h5", "umap"}
+    for name in ("pca", "knn", "snn", "leiden", "read_10x_h5", "umap"):
         assert getattr(scfast, name).__doc__
 
 
@@ -582,7 +583,7 @@ def test_knn_hnsw_recall_and_auto_threshold():
     ref, _ = brute_knn(x, 20)
     with kernel():
         h_idx, h_dist = scfast.knn(x, k=20, method="hnsw", seed=0)
-        a_hnsw, _ = scfast.knn(x, k=20, method="auto", auto_threshold=1000)    # 1500 >= 1000: HNSW
+        a_hnsw, _ = scfast.knn(x, k=20, method="auto", auto_threshold=1000)    # 1500 >= 1000, 10 dims: k-d tree
         a_exact, _ = scfast.knn(x, k=20, method="auto", auto_threshold=10_000)  # exact
     np.testing.assert_array_equal(h_idx[:, 0], np.arange(1500))
     assert np.all(np.diff(h_dist, axis=1) >= 0)
@@ -719,6 +720,63 @@ def test_leiden_is_deterministic_and_accepts_other_graph_types():
     np.testing.assert_array_equal(a, c)
     np.testing.assert_array_equal(a, d)
     assert ari(e, truth) > 0.99  # a diagonal (as in Seurat's RNA_snn) is accepted
+
+
+# ---------------------------------------------------------------- preprocess
+
+@pytest.mark.parametrize("cols", [[3, 1], [1, 1]], ids=["unsorted", "duplicate"])
+def test_preprocess_rejects_non_canonical_csr(cols):
+    X = sp.csr_matrix((np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+                       np.array(cols + [0, 2]), np.array([0, 2, 3, 4])), shape=(3, 5))
+    with pytest.raises(ValueError, match="canonical|duplicate"):
+        scfast.preprocess(X, n_hvg=2)
+
+
+def test_preprocess_x_hvg_is_data_columns_in_hvg_order():
+    rng = np.random.default_rng(1)
+    counts = sp.random(300, 80, density=0.2, format="csr", random_state=rng, dtype=np.float32)
+    counts.data = np.ceil(counts.data * 10)
+    out = scfast.preprocess(counts, n_hvg=25)
+    expected = out["data"][:, out["hvg"]]
+    expected.sort_indices()
+    x = out["X_hvg"]
+    assert x.shape == (300, 25) and x.has_sorted_indices
+    np.testing.assert_array_equal(x.indptr, expected.indptr)
+    np.testing.assert_array_equal(x.indices, expected.indices)
+    np.testing.assert_array_equal(x.data, expected.data)
+
+
+# ---------------------------------------------------------------- 10x h5
+
+@pytest.mark.parametrize("shuffle, int_dtype", [(False, np.int64), (False, np.int32), (True, np.int64)])
+def test_read_10x_h5_matches_counts(tmp_path, monkeypatch, shuffle, int_dtype):
+    h5py = pytest.importorskip("h5py")
+    rng = np.random.default_rng(0)
+    counts = sp.random(50, 30, density=0.3, format="csr", random_state=rng, dtype=np.float64)
+    counts.data = np.ceil(counts.data * 20)
+    path = tmp_path / "m.h5"
+    with h5py.File(path, "w") as f:  # genes x cells CSC: the arrays of the cells x genes CSR
+        g = f.create_group("matrix")
+        kw = {"compression": "gzip", "shuffle": shuffle, "chunks": (7,)}
+        g.create_dataset("data", data=counts.data.astype(np.int32), **kw)
+        g.create_dataset("indices", data=counts.indices.astype(int_dtype), **kw)
+        g.create_dataset("indptr", data=counts.indptr.astype(np.int64))
+        g.create_dataset("shape", data=np.array([30, 50], dtype=np.int32))
+        g.create_dataset("barcodes", data=np.array([f"c{i}" for i in range(50)], dtype="S"))
+        g.create_dataset("features/name", data=np.array([f"g{j}" for j in range(30)], dtype="S"))
+        g.create_dataset("features/feature_type", data=np.array(["Gene Expression"] * 30, dtype="S"))
+    X, barcodes, names = scfast.read_10x_h5(path)
+    assert X.dtype == np.float32 and X.indices.dtype == np.int32 and X.shape == (50, 30)
+    assert (X != counts).nnz == 0
+    assert barcodes[3] == "c3" and names[4] == "g4"
+    # Above 2^31 - 1 non-zeros the arrays are int64 (forced here by lowering the limit).
+    monkeypatch.setattr(scfast, "_I32_MAX", 10)
+    W, _, _ = scfast.read_10x_h5(path)
+    assert W.indices.dtype == np.int64 and W.indptr.dtype == np.int64
+    assert (W != counts).nnz == 0
+    data, indices, indptr, shape = scfast.read_10x_h5(path, arrays=True)[0]
+    assert (data.dtype, indices.dtype, indptr.dtype, shape) == (np.float32, np.int32, np.int64, (50, 30))
+    assert (sp.csr_matrix((data, indices, indptr), shape=shape) != counts).nnz == 0
 
 
 # ---------------------------------------------------------------- end to end

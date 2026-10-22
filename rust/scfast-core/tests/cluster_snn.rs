@@ -446,6 +446,17 @@ fn leiden_same_seed_gives_identical_labels() {
 }
 
 #[test]
+fn leiden_is_identical_across_thread_counts() {
+    // large enough that local moving runs in multi-node parallel batches
+    let (g, truth) = blob_graph(&[6000, 5000, 4000, 3000, 2000], 6.0, 5);
+    let p = ClusterParams::default();
+    let many = leiden(&g, &p).unwrap();
+    let one = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap().install(|| leiden(&g, &p).unwrap());
+    assert_eq!(many, one);
+    assert!(ari(&many, &truth) > 0.99, "ARI {}", ari(&many, &truth));
+}
+
+#[test]
 fn leiden_on_seurat_snn_agrees_with_seurat_labels() {
     let fx = SeuratFixture::load();
     let g = snn_from_knn(&fx.knn, &SnnParams::default()).unwrap();
@@ -571,6 +582,53 @@ fn external_dataset_report() {
                 let text: String = l.iter().map(|x| format!("{x}\n")).collect();
                 std::fs::write(out.join(format!("rust_{name}_seed{seed}.txt")), text).unwrap();
             }
+        }
+    }
+}
+
+/// RB quality at `resolution` with igraph's loop convention on the graph as given (a stored
+/// diagonal entry is a full adjacency entry): `sum_c [in_c - resolution * K_c^2 / 2m]`.
+fn rb_quality(g: &SparseGraph, labels: &[u32], resolution: f64) -> f64 {
+    let n_c = labels.iter().copied().max().map_or(0, |m| m as usize + 1);
+    let (mut internal, mut kc, mut two_m) = (0f64, vec![0f64; n_c], 0f64);
+    for v in 0..g.n {
+        for p in g.indptr[v]..g.indptr[v + 1] {
+            let w = g.weights[p] as f64;
+            two_m += w;
+            kc[labels[v] as usize] += w;
+            if labels[g.indices[p] as usize] == labels[v] {
+                internal += w;
+            }
+        }
+    }
+    internal - resolution * kc.iter().map(|k| k * k).sum::<f64>() / two_m
+}
+
+/// Timings and RB quality on a raw CSR graph: `SCFAST_LEIDEN_GRAPH=/path/prefix` with
+/// `prefix.indptr` (i64), `prefix.indices` (i32), `prefix.data` (f32);
+/// `SCFAST_LEIDEN_SEEDS` (default 1); labels of seed 0 go to `prefix.labels` (u32) when
+/// `SCFAST_LEIDEN_SAVE` is set.
+#[test]
+#[ignore]
+fn external_graph_report() {
+    let Some(prefix) = std::env::var_os("SCFAST_LEIDEN_GRAPH") else { return };
+    let prefix = prefix.into_string().unwrap();
+    let read = |ext: &str| std::fs::read(format!("{prefix}.{ext}")).unwrap();
+    let indptr: Vec<usize> = read("indptr").chunks_exact(8).map(|b| i64::from_le_bytes(b.try_into().unwrap()) as usize).collect();
+    let indices: Vec<u32> = read("indices").chunks_exact(4).map(|b| i32::from_le_bytes(b.try_into().unwrap()) as u32).collect();
+    let weights: Vec<f32> = read("data").chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+    let g = SparseGraph { n: indptr.len() - 1, indptr, indices, weights };
+    let seeds: u64 = std::env::var("SCFAST_LEIDEN_SEEDS").ok().map_or(1, |s| s.parse().unwrap());
+    for seed in 0..seeds {
+        let p = ClusterParams { seed, ..Default::default() };
+        let t = Instant::now();
+        let labels = leiden(&g, &p).unwrap();
+        let secs = t.elapsed().as_secs_f64();
+        let k = labels.iter().max().unwrap() + 1;
+        println!("seed {seed}: {secs:.3} s, {k} clusters, quality {:.3}", rb_quality(&g, &labels, p.resolution));
+        if seed == 0 && std::env::var_os("SCFAST_LEIDEN_SAVE").is_some() {
+            let bytes: Vec<u8> = labels.iter().flat_map(|l| l.to_le_bytes()).collect();
+            std::fs::write(format!("{prefix}.labels"), bytes).unwrap();
         }
     }
 }

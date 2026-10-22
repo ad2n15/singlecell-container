@@ -68,8 +68,8 @@ for ds in "${DATASETS[@]}"; do
     elif [[ "$eng" == "rapids" || "$eng" == "scanpy-gpu" ]]; then
       cmd=("$RAPIDS_PYTHON" "$HERE/run_py.py" --engine "$eng")
     elif [[ "$eng" == "scfast-gpu" ]]; then
-      # Host venv (maturin scfast + CUDA toolkit); not the rapids Apptainer image.
-      cmd=("$PYTHON" "$HERE/run_py.py" --engine "$eng")
+      # RAPIDS image (CuPy, cuVS, cuGraph) with the scfast built from this checkout on PYTHONPATH.
+      cmd=(env PYTHONPATH="$HERE/../rust/scfast-py/python${PYTHONPATH:+:$PYTHONPATH}" "$RAPIDS_PYTHON" "$HERE/run_py.py" --engine "$eng")
     else
       cmd=("$PYTHON" "$HERE/run_py.py" --engine "$eng")
     fi

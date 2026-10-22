@@ -33,7 +33,7 @@ From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
 %post
     set -eu
-    export DEBIAN_FRONTEND=noninteractive R_VERSION=4.4.2 PYTHON_VERSION=3.12
+    export DEBIAN_FRONTEND=noninteractive PYTHON_VERSION=3.12
     apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget gnupg locales tmux git build-essential gfortran \
       libhdf5-dev libcurl4-openssl-dev libssl-dev libxml2-dev libglpk-dev libgsl-dev \
@@ -46,7 +46,7 @@ From: nvidia/cuda:12.4.1-runtime-ubuntu22.04
     curl -fsSL https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
       > /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc
     add-apt-repository -y "deb https://cloud.r-project.org/bin/linux/ubuntu jammy-cran40/"
-    apt-get update && apt-get install -y --no-install-recommends "r-base=${R_VERSION}*" "r-base-dev=${R_VERSION}*"
+    apt-get update && apt-get install -y --no-install-recommends r-base r-base-dev
     echo 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/jammy/latest"), Ncpus = 4)' \
       > /usr/lib/R/etc/Rprofile.site
     Rscript -e 'install.packages(c("Seurat", "SeuratObject", "Matrix", "hdf5r", "jsonlite", "digest", "yaml", "optparse", "data.table", "R.utils", "harmony", "leidenbase", "uwot", "qs2", "remotes", "BiocManager", "testthat", "RhpcBLASctl", "glmGamPoi"))'

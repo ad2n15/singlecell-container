@@ -131,3 +131,7 @@ Setup for the scripts on macOS: `brew install --cask r`, then in R
 `install.packages(c("Seurat","harmony","remotes","BiocManager","patchwork","dplyr"), type="binary")`,
 `BiocManager::install("glmGamPoi")`, `remotes::install_github("immunogenomics/presto")`; for Python
 `uv venv .venv-scanpy && source .venv-scanpy/bin/activate && uv pip install "scanpy[leiden]" harmonypy`.
+
+## License
+
+Apache License 2.0. See [`LICENSE`](LICENSE).

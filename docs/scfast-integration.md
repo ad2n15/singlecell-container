@@ -22,7 +22,7 @@ GPU plans keep rapids via exchange. `engine: scfast` with `device: gpu` is a con
 New path name `cpu_scfast`, in process, no exchange files:
 normalise -> HVG -> scale (Seurat) -> `RunPCAFast` -> (Harmony via R `harmony` if `integration: harmony`;
 if absent, fall back to the `exchange_cpu` path with a warning) -> `FindNeighborsFast` -> `FindClustersFast`
--> `uwot::umap` on the PCs. Same `S2/object.rds` layout, same reductions/graph names as the Seurat path.
+-> `RunUMAPFast` on the PCs. Same `S2/object.rds` layout, same reductions/graph names as the Seurat path.
 `S2/summary.json` gets `path: "cpu_scfast"` and `engine: "scfast"`, plus `scfast_version` from `scfast_info()`.
 
 ## S1b doublets and pre-clustering
@@ -90,7 +90,7 @@ Constraint: the development workspace has no GPU and no CUDA toolkit. Everything
   built with `cuda` **and** a device is visible; else `gpu_exchange` (rapids) as now. New config
   `engine_gpu: auto|scfast|rapids` (default `auto`) to force either. `S2/summary.json` records
   `path: gpu_scfast`, `device: gpu`, `gpu_core_device: cuda`, `scfast_device`.
-- S1a doublets: same device choice. UMAP stays on CPU (uwot) on the scfast GPU path.
+- S1a doublets: same device choice. UMAP runs on the CPU (`RunUMAPFast`) on the scfast GPU path.
 - `gpu_core --engine rust --device gpu` uses scfast CUDA when available.
 - `scpipe doctor`: `scfastR cuda built / device visible` lines.
 

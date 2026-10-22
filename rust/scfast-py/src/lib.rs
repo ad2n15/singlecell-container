@@ -32,6 +32,7 @@ use scfast_core::knn::{self as core_knn, KnnMethod, KnnParams};
 use scfast_core::pca::{self as core_pca, PcaParams, PcaResult};
 use scfast_core::preprocess::{self as core_preprocess, PreprocessParams, PreprocessResult};
 use scfast_core::snn::{self as core_snn, SnnParams};
+use scfast_core::umap::{self as core_umap, UmapParams};
 use scfast_core::{CsrView, Device, Error, Idx, Knn, Real, RowMajor, SparseGraph};
 
 // ------------------------------------------------------------------ errors and panics
@@ -178,11 +179,15 @@ fn check_canonical<I: Idx, T: Real>(x: &CsrView<'_, I, T>, what: &str) -> scfast
     });
     match bad {
         None => Ok(()),
-        Some(r) => Err(Error::InvalidInput(format!(
-            "{what} is not in canonical CSR format: row {r} has unsorted or duplicate column indices \
-             (call {what}.sum_duplicates() first; it also sorts the indices)"
-        ))),
+        Some(r) => Err(not_canonical(what, r)),
     }
+}
+
+fn not_canonical(what: &str, row: usize) -> Error {
+    Error::InvalidInput(format!(
+        "{what} is not in canonical CSR format: row {row} has unsorted or duplicate column indices \
+         (call {what}.sum_duplicates() first; it also sorts the indices)"
+    ))
 }
 
 fn type_tag<T: 'static>(_: &[T]) -> &'static str {
@@ -252,7 +257,7 @@ fn device_py(device: &str) -> PyResult<String> {
 
 /// Low-level PCA on borrowed CSR arrays (cells x genes). See scfast.pca.
 #[pyfunction]
-#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, device = "cpu"))]
+#[pyo3(name = "pca_csr", signature = (n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, device = "cpu", clip = None))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn pca_csr<'py>(
     py: Python<'py>,
@@ -267,8 +272,9 @@ fn pca_csr<'py>(
     oversample: usize,
     power_iters: usize,
     device: &str,
+    clip: Option<f64>,
 ) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
-    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, ..PcaParams::default() };
+    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, clip };
     let device = parse_device(device)?;
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;
@@ -290,6 +296,52 @@ fn pca_csr<'py>(
         rowmajor_to_py(py, res.loadings, "loadings")?,
         PyArray1::from_vec(py, res.stdev),
     ))
+}
+
+/// pca_csr for a CSR matrix already on the GPU (device pointers: int32 or int64 indptr,
+/// int32 indices, float32 data; canonical). Nothing of the matrix crosses to the host.
+#[pyfunction]
+#[pyo3(name = "pca_csr_device", signature = (n_rows, n_cols, nnz, indptr, indptr_i64, indices, data, n_comps, seed, scale, oversample, power_iters, device, clip = None))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn pca_csr_device<'py>(
+    py: Python<'py>,
+    n_rows: usize,
+    n_cols: usize,
+    nnz: usize,
+    indptr: u64,
+    indptr_i64: bool,
+    indices: u64,
+    data: u64,
+    n_comps: usize,
+    seed: u64,
+    scale: bool,
+    oversample: usize,
+    power_iters: usize,
+    device: &str,
+    clip: Option<f64>,
+) -> PyResult<(Bound<'py, PyArray2<f32>>, Bound<'py, PyArray2<f32>>, Bound<'py, PyArray1<f32>>)> {
+    let params = PcaParams { n_comps, oversample, power_iters, seed, scale, clip };
+    let ordinal = match parse_device(device)? {
+        Device::Cuda(i) => i,
+        Device::Cpu => return Err(PyValueError::new_err("a matrix on the GPU needs device \"cuda\" (or \"auto\" on a GPU build)")),
+    };
+    #[cfg(feature = "cuda")]
+    {
+        let x = core_pca::DeviceCsr { n: n_rows, p: n_cols, nnz, indptr, indptr_i64, indices, data };
+        // SAFETY: the Python wrapper passes CuPy device pointers of these sizes and dtypes,
+        // kept alive for the call, with the producing work synchronised.
+        let res = run_kernel(py, "pca", move || unsafe { core_pca::implicit_scaled_pca_device(&x, &params, ordinal) })?;
+        Ok((
+            rowmajor_to_py(py, res.embeddings, "embeddings")?,
+            rowmajor_to_py(py, res.loadings, "loadings")?,
+            PyArray1::from_vec(py, res.stdev),
+        ))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (py, n_rows, n_cols, nnz, indptr, indptr_i64, indices, data, params, ordinal);
+        Err(PyRuntimeError::new_err("scfast was built without the cuda feature"))
+    }
 }
 
 /// Diagnostics for tests: runs the same dtype dispatch and validation as pca_csr and reports
@@ -327,7 +379,7 @@ fn csr_view_info<'py>(
 
 /// Low-level kNN on a C-contiguous float32 (n, d) array. See scfast.knn.
 #[pyfunction]
-#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu"))]
+#[pyo3(name = "knn", signature = (x, k, method, seed, auto_threshold, m, ef_construction, ef_search, device = "cpu", eps = core_knn::AUTO_KD_EPS))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn knn_dense<'py>(
     py: Python<'py>,
@@ -340,19 +392,23 @@ fn knn_dense<'py>(
     ef_construction: usize,
     ef_search: usize,
     device: &str,
+    eps: f64,
 ) -> PyResult<(Bound<'py, PyArray2<i32>>, Bound<'py, PyArray2<f32>>)> {
     let (n, d) = (x.shape()[0], x.shape()[1]);
     check_n_fits_i32(n, "knn")?;
     let device = parse_device(device)?;
     let hnsw = KnnMethod::Hnsw { m, ef_construction, ef_search };
-    // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW
-    // parameters apply in auto mode too (the core's Auto uses fixed ones).
+    let kdtree = KnnMethod::KdTree { eps };
+    // "auto" is resolved here rather than with KnnMethod::Auto so that the caller's HNSW and
+    // k-d tree parameters apply in auto mode too (the core's Auto uses fixed ones).
     let method = match method {
         "exact" => KnnMethod::Exact,
         "hnsw" => hnsw,
+        "kdtree" => kdtree,
         "auto" if n < auto_threshold => KnnMethod::Exact,
+        "auto" if d <= core_knn::KDTREE_MAX_DIMS => kdtree,
         "auto" => hnsw,
-        other => return Err(PyValueError::new_err(format!("method must be 'auto', 'exact' or 'hnsw', got {other:?}"))),
+        other => return Err(PyValueError::new_err(format!("method must be 'auto', 'exact', 'kdtree' or 'hnsw', got {other:?}"))),
     };
     let xs = contiguous(&x, "X")?;
     let params = KnnParams { k, method, auto_threshold, seed };
@@ -533,12 +589,53 @@ fn leiden_csr<'py>(
     Ok(PyArray1::from_vec(py, to_i32(labels)))
 }
 
+/// Leiden on cuGraph for a graph already on the device: COO int32 sources and
+/// destinations and f32 weights (device pointers, `nnz` each), both directions of every
+/// edge. Returns int32 labels. Unchecked beyond sizes; see `CugraphLeiden::cluster_device_coo`.
+#[pyfunction]
+#[pyo3(name = "leiden_coo_device")]
+#[allow(clippy::too_many_arguments)]
+fn leiden_coo_device<'py>(
+    py: Python<'py>,
+    n: usize,
+    nnz: usize,
+    src: usize,
+    dst: usize,
+    weights: usize,
+    resolution: f64,
+    seed: u64,
+    device: &str,
+) -> PyResult<Bound<'py, PyArray1<i32>>> {
+    check_n_fits_i32(n, "leiden")?;
+    let ordinal = match parse_leiden_device(device)? {
+        LeidenDevice::Cuda(i) => i,
+        other => return Err(PyValueError::new_err(format!("a graph on the GPU needs a CUDA device, got {}", other.as_string()))),
+    };
+    let params = ClusterParams { resolution, seed, n_iterations: 1 };
+    #[cfg(feature = "cugraph")]
+    {
+        let labels = run_kernel(py, "leiden", move || {
+            let gpu = scfast_core::cugraph::CugraphLeiden::new(ordinal)?;
+            // SAFETY: the Python wrapper passes CuPy device pointers to `nnz` elements of the
+            // stated dtypes, kept alive for the call, with the producing work synchronised.
+            unsafe { gpu.cluster_device_coo(n, nnz, src as *mut _, dst as *mut _, weights as *mut _, &params) }.map(|(l, _)| l)
+        })?;
+        Ok(PyArray1::from_vec(py, to_i32(labels)))
+    }
+    #[cfg(not(feature = "cugraph"))]
+    {
+        let _ = (py, nnz, src, dst, weights, params, ordinal);
+        Err(PyRuntimeError::new_err("scfast was built without the cugraph feature"))
+    }
+}
+
 // ------------------------------------------------------------------ preprocessing (Phase 9)
 
 /// Low-level fused preprocessing on borrowed CSR counts (cells x genes). See scfast.preprocess.
 /// Returns (data float32 (nnz,), library_size float64 (n_rows,), mean, variance,
 /// variance_expected, variance_standardized (float64 (n_cols,) each), hvg int32 (n_hvg,),
-/// hvg_mean float64, hvg_sd float64, clip).
+/// hvg_mean float64, hvg_sd float64, clip) and the HVG columns as a canonical CSR in HVG
+/// order (hvg_indptr int64, hvg_indices int32, hvg_data float32).
 #[pyfunction]
 #[pyo3(name = "preprocess_csr", signature = (n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -557,19 +654,26 @@ fn preprocess_csr<'py>(
     let params = PreprocessParams { n_hvg, scale_factor, span, clip };
     let ind = IndexArrays::extract(indptr, indices)?;
     let val = ValueArray::extract(data)?;
-    let res: PreprocessResult<f32> = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
+    let res: (PreprocessResult<f32>, _) = dispatch_csr!(ind, val, |ip, ix, dx| run_kernel(py, "preprocess", || {
         let x = CsrView::new(n_rows, n_cols, ip, ix, dx)?;
-        check_canonical(&x, "X")?;
         let r = core_preprocess::preprocess::<_, _, f32>(x, &params)?;
+        if let Some(row) = r.unsorted_row {
+            return Err(not_canonical("X", row));
+        }
         if r.data.len() != x.nnz() || r.library_size.len() != n_rows || r.mean.len() != n_cols || r.hvg.len() != r.hvg_mean.len() {
             return Err(backend("preprocess", format!(
                 "kernel returned {} values, {} library sizes, {} gene means for {} non-zeros, {n_rows} cells, {n_cols} genes",
                 r.data.len(), r.library_size.len(), r.mean.len(), x.nnz()
             )));
         }
-        Ok(r)
+        let hvg = select_columns(ip, ix, &r.data, n_cols, &r.hvg);
+        Ok((r, hvg))
     }))?;
+    let (res, (hvg_indptr, hvg_indices, hvg_data)) = res;
     let d = PyDict::new(py);
+    d.set_item("hvg_indptr", PyArray1::from_vec(py, hvg_indptr))?;
+    d.set_item("hvg_indices", PyArray1::from_vec(py, hvg_indices))?;
+    d.set_item("hvg_data", PyArray1::from_vec(py, hvg_data))?;
     d.set_item("data", PyArray1::from_vec(py, res.data))?;
     d.set_item("library_size", PyArray1::from_vec(py, res.library_size))?;
     d.set_item("mean", PyArray1::from_vec(py, res.mean))?;
@@ -581,6 +685,80 @@ fn preprocess_csr<'py>(
     d.set_item("hvg_sd", PyArray1::from_vec(py, res.hvg_sd))?;
     d.set_item("clip", res.clip)?;
     Ok(d)
+}
+
+/// Low-level vst statistics from per-gene sums of the raw counts (sum, sumsq, max float64,
+/// nnz uint64, each (n_cols,), over n_rows cells), for the device front end. See
+/// scfast-core `preprocess::vst_from_sums`. Returns mean, variance, variance_expected,
+/// variance_standardized, sd (float64) and needs_clip (bool).
+#[pyfunction]
+#[pyo3(name = "vst_from_sums", signature = (sum, sumsq, max, nnz, n_rows, span, clip))]
+#[allow(clippy::too_many_arguments)]
+fn vst_from_sums<'py>(
+    py: Python<'py>,
+    sum: PyReadonlyArray1<'py, f64>,
+    sumsq: PyReadonlyArray1<'py, f64>,
+    max: PyReadonlyArray1<'py, f64>,
+    nnz: PyReadonlyArray1<'py, u64>,
+    n_rows: usize,
+    span: f64,
+    clip: f64,
+) -> PyResult<Bound<'py, PyDict>> {
+    let (sum, sumsq, max, nnz) = (sum.as_slice()?, sumsq.as_slice()?, max.as_slice()?, nnz.as_slice()?);
+    let p = sum.len();
+    if sumsq.len() != p || max.len() != p || nnz.len() != p {
+        return Err(PyValueError::new_err("sum, sumsq, max and nnz must have the same length"));
+    }
+    let v = run_kernel(py, "vst_from_sums", || core_preprocess::vst_from_sums(sum, sumsq, max, nnz, n_rows, span, clip))?;
+    let d = PyDict::new(py);
+    d.set_item("mean", PyArray1::from_vec(py, v.mean))?;
+    d.set_item("variance", PyArray1::from_vec(py, v.variance))?;
+    d.set_item("variance_expected", PyArray1::from_vec(py, v.variance_expected))?;
+    d.set_item("variance_standardized", PyArray1::from_vec(py, v.variance_standardized))?;
+    d.set_item("sd", PyArray1::from_vec(py, v.sd))?;
+    d.set_item("needs_clip", PyArray1::from_vec(py, v.needs_clip))?;
+    Ok(d)
+}
+
+/// The columns `cols` of a canonical CSR, renumbered `0..cols.len()` in that order, as a
+/// canonical CSR (indptr, indices, data).
+fn select_columns<I: Idx>(indptr: &[I], indices: &[I], data: &[f32], n_cols: usize, cols: &[u32]) -> (Vec<i64>, Vec<i32>, Vec<f32>) {
+    let mut rank = vec![u32::MAX; n_cols];
+    for (r, &c) in cols.iter().enumerate() {
+        rank[c as usize] = r as u32;
+    }
+    let n = indptr.len() - 1;
+    let range = |i: usize| indptr[i].to_usize()..indptr[i + 1].to_usize();
+    let counts: Vec<usize> = (0..n).into_par_iter().map(|i| indices[range(i)].iter().filter(|j| rank[j.to_usize()] != u32::MAX).count()).collect();
+    let mut out_indptr = Vec::with_capacity(n + 1);
+    out_indptr.push(0i64);
+    for c in &counts {
+        out_indptr.push(out_indptr.last().unwrap() + *c as i64);
+    }
+    let nnz = *out_indptr.last().unwrap() as usize;
+    let (mut out_indices, mut out_data) = (vec![0i32; nnz], vec![0f32; nnz]);
+    let mut rows = Vec::with_capacity(n);
+    let (mut ri, mut rd) = (&mut out_indices[..], &mut out_data[..]);
+    for &c in &counts {
+        let (a, b) = std::mem::take(&mut ri).split_at_mut(c);
+        let (x, y) = std::mem::take(&mut rd).split_at_mut(c);
+        rows.push((a, x));
+        (ri, rd) = (b, y);
+    }
+    rows.into_par_iter().enumerate().for_each_init(Vec::new, |pairs, (i, (oi, od))| {
+        pairs.clear();
+        for k in range(i) {
+            let r = rank[indices[k].to_usize()];
+            if r != u32::MAX {
+                pairs.push((r, data[k]));
+            }
+        }
+        pairs.sort_unstable_by_key(|p| p.0);
+        for ((o, v), &(r, d)) in oi.iter_mut().zip(od.iter_mut()).zip(pairs.iter()) {
+            (*o, *v) = (r as i32, d);
+        }
+    });
+    (out_indptr, out_indices, out_data)
 }
 
 // ------------------------------------------------------------------ test probes
@@ -638,6 +816,126 @@ fn probe_panic(py: Python<'_>, kind: &str) -> PyResult<()> {
     })
 }
 
+// ------------------------------------------------------------------ UMAP
+
+/// UMAP layout from (n, k) kNN indices / distances (self in column 0) and an (n, 2) init.
+#[pyfunction]
+#[pyo3(name = "umap", signature = (indices, distances, init, a, b, n_epochs, negative_sample_rate, learning_rate, seed))]
+#[allow(clippy::too_many_arguments)]
+fn umap_knn<'py>(
+    py: Python<'py>,
+    indices: PyReadonlyArray2<'py, i32>,
+    distances: PyReadonlyArray2<'py, f32>,
+    init: PyReadonlyArray2<'py, f32>,
+    a: f32,
+    b: f32,
+    n_epochs: usize,
+    negative_sample_rate: usize,
+    learning_rate: f32,
+    seed: u64,
+) -> PyResult<Bound<'py, PyArray2<f32>>> {
+    let (n, k) = (indices.shape()[0], indices.shape()[1]);
+    let idx = contiguous(&indices, "indices")?;
+    let dist = contiguous(&distances, "distances")?;
+    let init = contiguous(&init, "init")?;
+    let params = UmapParams { a, b, n_epochs, negative_sample_rate, learning_rate, seed };
+    let emb = run_kernel(py, "umap", || {
+        let idx = knn_indices_to_u32(idx, n, k)?;
+        core_umap::umap(&idx, dist, n, k, init, &params)
+    })?;
+    vec2_to_py(py, n, 2, emb)
+}
+
+// ------------------------------------------------------------------ 10x h5 chunks
+
+/// Inflates the zlib-compressed chunks of a 1-D HDF5 dataset (read at `offsets`, `sizes`
+/// bytes each, in element order, `chunk_len` elements per chunk) into `n` values. `src` is
+/// the stored little-endian type ("i4", "i8", "f4", "f8"); the result is float32 if
+/// `to_f32`, else int64 if `to_i64`, else int32 (values outside int32 raise ValueError).
+#[pyfunction]
+#[pyo3(signature = (path, offsets, sizes, chunk_len, n, src, to_f32, to_i64 = false))]
+#[allow(clippy::too_many_arguments)]
+fn inflate_chunks<'py>(
+    py: Python<'py>,
+    path: std::path::PathBuf,
+    offsets: PyReadonlyArray1<'py, u64>,
+    sizes: PyReadonlyArray1<'py, u64>,
+    chunk_len: usize,
+    n: usize,
+    src: &str,
+    to_f32: bool,
+    to_i64: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let offsets = contiguous(&offsets, "offsets")?;
+    let sizes = contiguous(&sizes, "sizes")?;
+    let width = match src {
+        "i4" | "f4" => 4,
+        "i8" | "f8" => 8,
+        _ => return Err(PyValueError::new_err(format!("unsupported stored type {src}"))),
+    };
+    if chunk_len == 0 || offsets.len() != sizes.len() || offsets.len() != n.div_ceil(chunk_len) {
+        return Err(PyValueError::new_err(format!("{} chunks of {chunk_len} do not cover {n} values", offsets.len())));
+    }
+    let file = std::fs::File::open(&path).map_err(|e| PyValueError::new_err(format!("{}: {e}", path.display())))?;
+    if to_f32 {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<f32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    } else if to_i64 {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<i64>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    } else {
+        let v = run_kernel(py, "read_10x_h5", || inflate_into::<i32>(&file, offsets, sizes, chunk_len, n, width, src))?;
+        Ok(PyArray1::from_vec(py, v).into_any())
+    }
+}
+
+trait FromStored: Copy + Default + Send + Sync {
+    fn from_f64(v: f64) -> Option<Self>;
+}
+impl FromStored for f32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        Some(v as f32)
+    }
+}
+impl FromStored for i64 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (v >= i64::MIN as f64 && v <= i64::MAX as f64).then_some(v as i64)
+    }
+}
+impl FromStored for i32 {
+    fn from_f64(v: f64) -> Option<Self> {
+        (v >= i32::MIN as f64 && v <= i32::MAX as f64).then_some(v as i32)
+    }
+}
+
+fn inflate_into<O: FromStored>(file: &std::fs::File, offsets: &[u64], sizes: &[u64], chunk_len: usize, n: usize, width: usize, src: &str) -> scfast_core::Result<Vec<O>> {
+    use std::os::unix::fs::FileExt;
+    let decode: fn(&[u8]) -> f64 = match src {
+        "i4" => |b| i32::from_le_bytes(b.try_into().unwrap()) as f64,
+        "i8" => |b| i64::from_le_bytes(b.try_into().unwrap()) as f64,
+        "f4" => |b| f32::from_le_bytes(b.try_into().unwrap()) as f64,
+        _ => |b| f64::from_le_bytes(b.try_into().unwrap()),
+    };
+    let mut out = vec![O::default(); n];
+    out.par_chunks_mut(chunk_len).zip(offsets.par_iter().zip(sizes)).try_for_each_init(
+        || (libdeflater::Decompressor::new(), Vec::new(), vec![0u8; chunk_len * width]),
+        |(dec, comp, raw), (out, (&off, &size))| {
+            comp.resize(size as usize, 0);
+            file.read_exact_at(comp, off).map_err(|e| backend("read_10x_h5", format!("read at byte {off}: {e}")))?;
+            let got = dec.zlib_decompress(comp, raw).map_err(|e| Error::InvalidInput(format!("chunk at byte {off}: {e}")))?;
+            if got != raw.len() {
+                return Err(Error::InvalidInput(format!("chunk at byte {off} inflated to {got} bytes, expected {}", raw.len())));
+            }
+            for (o, b) in out.iter_mut().zip(raw.chunks_exact(width)) {
+                let v = decode(b);
+                *o = O::from_f64(v).ok_or_else(|| Error::InvalidInput(format!("value {v} does not fit int32")))?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(out)
+}
+
 // ------------------------------------------------------------------ module
 
 /// Native core of scfast (Rust). Use the `scfast` package, not this module, directly.
@@ -646,7 +944,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, knn_dense, leiden_csr, leiden_device, pca_csr, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices};
+    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn, vst_from_sums};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

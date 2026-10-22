@@ -28,7 +28,7 @@ import numpy as np
 from . import _scfast
 from ._scfast import __version__
 
-__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "snn"]
+__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "read_10x_h5", "snn", "umap"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -108,8 +108,8 @@ def _with_cpu_fallback(requested: str, resolved: str, call: Any) -> Any:
 def device_info() -> dict[str, Any]:
     """CUDA state of this build (never raises).
 
-    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver,
-    NVRTC and cuBLAS load and a device is visible), ``device_count``, ``device_name``,
+    Keys: ``cuda_built`` (compiled with the ``cuda`` feature), ``cuda_available`` (driver and
+    NVRTC load and a device is visible), ``device_count``, ``device_name``,
     ``free_gb``, ``total_gb``, ``compute_capability`` (device 0; ``None`` when unavailable),
     ``cuda_error`` (why CUDA is unavailable, else ``None``) and ``auto_device`` (what
     ``device="auto"`` resolves to: ``"cpu"`` or ``"cuda:0"``).
@@ -172,14 +172,15 @@ def pca(
     seed: int = 0,
     scale: bool = True,
     oversample: int = 10,
-    power_iters: int = 4,
+    power_iters: int = 6,
     *,
     device: Literal["auto", "cpu", "cuda"] = "auto",
+    clip: float | None = 10.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Implicitly scaled PCA, replacing Seurat's ``ScaleData`` + ``RunPCA``.
 
     Centres (and with ``scale=True`` scales to unit variance) each gene implicitly and runs
-    a randomised SVD, so the dense cells x genes scaled matrix is never built.
+    a block Krylov SVD, so the dense cells x genes scaled matrix is never built.
 
     Parameters
     ----------
@@ -188,16 +189,19 @@ def pca(
         the log-normalised HVG matrix. float32/float64 data with int32/int64 indices is
         read in place (zero copy); other real dtypes are converted to float32 first (a copy).
         Must be canonical (sorted, unique column indices per row); call ``X.sum_duplicates()``
-        if not. Other sparse formats and dense arrays raise ``TypeError``.
+        if not. Other sparse formats and dense arrays raise ``TypeError``. A
+        ``cupyx.scipy.sparse`` CSR matrix stays on its GPU (copied device-to-device, gene
+        statistics computed there; needs a CUDA ``device`` and no CPU fallback).
     n_comps
         Number of components (Seurat ``npcs``).
     seed
-        RNG seed for the randomised SVD; the same seed gives the same result.
+        RNG seed for the SVD start block; the same seed gives the same result.
     scale
         Divide each gene by its standard deviation (n - 1 denominator), as ``ScaleData``.
-        Seurat's ``scale.max`` clipping is not applied.
     oversample, power_iters
-        Randomised-SVD accuracy settings (extra directions and subspace iterations).
+        Block Krylov SVD settings: extra directions per block (width ``n_comps +
+        oversample``) and iterations (``power_iters + 1`` blocks). The defaults reach
+        Seurat parity on PBMC 3k (kNN overlap on the top 10 PCs 0.977; exact SVD 0.9975).
     device
         ``"auto"`` (CUDA when this build has the ``cuda`` feature and a device is usable,
         else CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``. With ``"auto"`` a GPU
@@ -205,6 +209,9 @@ def pca(
         an explicit ``"cuda"`` that cannot be used raises ``RuntimeError``. On CUDA the
         sparse products run on the device in single precision, so results match the CPU to
         the parity thresholds rather than bitwise. See :func:`device_info`.
+    clip
+        Seurat's ``ScaleData(scale.max)``: scaled values above it are clipped, exactly, as a
+        sparse correction to the implicit operator. ``None`` leaves them unclipped.
 
     Returns
     -------
@@ -216,6 +223,9 @@ def pca(
         Component standard deviations d / sqrt(cells - 1) (Seurat ``Stdev``).
     """
     requested, resolved = _resolve_device(device)
+    if _on_gpu(X):
+        return _pca_gpu(X, _int("n_comps", n_comps, 1), _seed(seed), bool(scale), _int("oversample", oversample),
+                        _int("power_iters", power_iters), resolved, None if clip is None else _float("clip", clip))
     n_rows, n_cols, indptr, indices, data = _csr_parts(X, "X")
     n_comps = _int("n_comps", n_comps, 1)
     if n_rows == 0 or n_cols == 0:
@@ -226,13 +236,14 @@ def pca(
     oversample, power_iters = _int("oversample", oversample), _int("power_iters", power_iters)
     return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.pca_csr(
         n_rows, n_cols, indptr, indices, data, n_comps, seed, scale, oversample, power_iters, dev,
+        None if clip is None else _float("clip", clip),
     ))
 
 
 def knn(
     X: Any,
     k: int = 20,
-    method: Literal["auto", "exact", "hnsw"] = "auto",
+    method: Literal["auto", "exact", "kdtree", "hnsw"] = "auto",
     seed: int = 0,
     auto_threshold: int = 50_000,
     m: int = 16,
@@ -240,6 +251,7 @@ def knn(
     ef_search: int = 64,
     *,
     device: Literal["auto", "cpu", "cuda"] = "auto",
+    eps: float = 0.7,
 ) -> tuple[np.ndarray, np.ndarray]:
     """k nearest neighbours (Euclidean), replacing the kNN part of Seurat's ``FindNeighbors``.
 
@@ -252,16 +264,22 @@ def knn(
     k
         Neighbours per cell INCLUDING the cell itself (Seurat ``k.param``), at least 2.
     method
-        ``"exact"`` (blocked brute force, exact), ``"hnsw"`` (approximate, hnsw_rs) or
-        ``"auto"``: exact when there are fewer than ``auto_threshold`` cells, else HNSW
-        with ``m``, ``ef_construction`` and ``ef_search``.
+        ``"exact"`` (exact: a k-d tree up to 16 dims, blocked brute force above),
+        ``"kdtree"`` (approximate: the k-d tree search with the (1 + ``eps``) pruning
+        rule; deterministic), ``"hnsw"`` (approximate, hnsw_rs) or ``"auto"``: exact
+        when there are fewer than ``auto_threshold`` cells, else ``"kdtree"`` up to 16
+        dims and HNSW with ``m``, ``ef_construction`` and ``ef_search`` above.
     seed
         Seeds the HNSW insertion order. Exact results are deterministic; HNSW results are
         not bit-reproducible across runs (hnsw_rs inserts in parallel).
     device
         ``"auto"``, ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"``; see :func:`pca`. On CUDA
-        the search is exact brute force (cuBLAS GEMM + top-k) at every size, ``method`` is
+        the search is exact brute force (fused distance + top-k kernel) at every size, ``method`` is
         ignored and ``k`` must be at most 129.
+    eps
+        ``"kdtree"`` skips a tree node once it is farther than the current k-th distance
+        divided by ``1 + eps``; 0 is exact. 0.7 keeps about 0.95 of the exact neighbours
+        (100k-1.3M cells, 10 PCs).
 
     Returns
     -------
@@ -287,13 +305,16 @@ def knn(
     k = _int("k", k, 2)  # the cell itself plus at least one neighbour
     if k > n:
         raise ValueError(f"k ({k}) must not exceed the number of cells ({n}); k counts the cell itself")
-    if method not in ("auto", "exact", "hnsw"):
-        raise ValueError(f"method must be 'auto', 'exact' or 'hnsw', got {method!r}")
+    if method not in ("auto", "exact", "kdtree", "hnsw"):
+        raise ValueError(f"method must be 'auto', 'exact', 'kdtree' or 'hnsw', got {method!r}")
     a = np.ascontiguousarray(a, dtype=np.float32)  # no copy when already float32 C-order
     seed, auto_threshold = _seed(seed), _int("auto_threshold", auto_threshold)
     m, ef_construction, ef_search = _int("m", m, 2), _int("ef_construction", ef_construction, 1), _int("ef_search", ef_search, 1)
+    eps = float(eps)
+    if not (np.isfinite(eps) and eps >= 0):
+        raise ValueError(f"eps must be finite and >= 0, got {eps}")
     return _with_cpu_fallback(requested, resolved, lambda dev: _scfast.knn(
-        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev,
+        a, k, method, seed, auto_threshold, m, ef_construction, ef_search, dev, eps,
     ))
 
 
@@ -310,7 +331,9 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
     indices
         Integer array (cells, k) of neighbour indices with the cell itself included, as
         returned by :func:`knn` (Seurat's ``Indices()`` also works). Each row is used as the
-        neighbour set exactly as given; a cell listed twice in a row is an error.
+        neighbour set exactly as given; a cell listed twice in a row is an error. A CuPy
+        array builds the graph on its GPU (Seurat's A A^T, as a cuSPARSE product; duplicates
+        are not checked there) and returns a ``cupyx.scipy.sparse.csr_matrix``.
     prune
         Jaccard cut-off in [0, 1].
     keep_diagonal
@@ -325,7 +348,7 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
 
     if sp.issparse(indices):
         raise TypeError("indices must be a dense integer array (cells, k), got a scipy sparse matrix")
-    idx = np.asarray(indices)
+    idx = indices if _on_gpu(indices) else np.asarray(indices)
     if idx.ndim != 2:
         raise ValueError(f"indices must be 2-D (cells, k), got {idx.ndim}-D with shape {idx.shape}")
     if idx.dtype.kind not in "iu":
@@ -338,11 +361,58 @@ def snn(indices: Any, prune: float = 1 / 15, keep_diagonal: bool = True) -> Any:
     prune = _float("prune", prune)
     if not 0.0 <= prune <= 1.0:
         raise ValueError(f"prune must be in [0, 1], got {prune}")
+    if _on_gpu(idx):
+        return _snn_gpu(idx, prune, bool(keep_diagonal))
     if idx.dtype not in _KNN_INDEX_DTYPES:
         idx = idx.astype(np.int64)
     idx = np.ascontiguousarray(idx, dtype=idx.dtype.newbyteorder("="))
     indptr, col, weights = _scfast.snn(idx, prune, bool(keep_diagonal))
     return sp.csr_matrix((weights, col, indptr), shape=(n, n))
+
+
+def _on_gpu(a: Any) -> bool:
+    return type(a).__module__.split(".")[0] in ("cupy", "cupyx")
+
+
+def _pca_gpu(X: Any, n_comps: int, seed: int, scale: bool, oversample: int, power_iters: int, device: str,
+             clip: float | None) -> Any:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    if not csp.isspmatrix_csr(X):
+        raise TypeError(f"X on the GPU must be a cupyx.scipy.sparse CSR matrix, got {type(X).__name__}")
+    n_rows, n_cols = X.shape
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X is empty (shape {(n_rows, n_cols)})")
+    if n_comps > min(n_rows, n_cols):
+        raise ValueError(f"n_comps ({n_comps}) must not exceed min(cells, genes) = {min(n_rows, n_cols)}")
+    if not X.has_canonical_format:
+        X = X.copy()
+        X.sum_duplicates()
+    indptr = X.indptr if X.indptr.dtype in (cp.int32, cp.int64) else X.indptr.astype(cp.int64)
+    indices, data = X.indices.astype(cp.int32, copy=False), X.data.astype(cp.float32, copy=False)
+    cp.cuda.get_current_stream().synchronize()
+    return _scfast.pca_csr_device(n_rows, n_cols, int(data.size), indptr.data.ptr, indptr.dtype == cp.int64,
+                                  indices.data.ptr, data.data.ptr, n_comps, seed, scale, oversample, power_iters, device,
+                                  clip)
+
+
+def _snn_gpu(idx: Any, prune: float, keep_diagonal: bool) -> Any:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    n, k = idx.shape
+    a = csp.csr_matrix((cp.ones(n * k, dtype=cp.float32), cp.ascontiguousarray(idx, dtype=cp.int32).ravel(),
+                        cp.arange(0, n * k + 1, k, dtype=cp.int32)), shape=(n, n))
+    g = a @ a.T  # shared-neighbour counts
+    s = g.data.astype(cp.float64)
+    w = s / (k + (k - s))  # Seurat's expression, pruned in f64 as on the CPU
+    g.data = cp.where(w < prune, 0.0, w).astype(cp.float32)
+    if not keep_diagonal:
+        g.setdiag(0)
+    g.eliminate_zeros()
+    g.sort_indices()
+    return g
 
 
 def leiden_device(device: str = "auto") -> str:
@@ -375,12 +445,14 @@ def leiden(
         of :func:`snn`, Seurat's ``RNA_snn`` or Scanpy's ``obsp["connectivities"]``.
         Weights must be finite and non-negative; they are used as float32. A diagonal is
         allowed and treated as Seurat does. Must be canonical (``graph.sum_duplicates()``).
+        A ``cupyx.scipy.sparse`` matrix (e.g. :func:`snn` of CuPy indices) stays on its GPU
+        and goes to cuGraph as is, without the checks (``device`` must then be CUDA).
     resolution
         RB resolution (Seurat ``resolution``); larger gives more clusters.
     seed
         Random seed; the same seed and graph give identical labels.
     n_iterations
-        Leiden iterations (Seurat ``n.iter``), at least 1. On cuGraph this is ``max_level``.
+        Leiden iterations (Seurat ``n.iter``), at least 1. cuGraph has no such knob: it runs to ``max_level`` 100.
     device
         ``"auto"`` (cuGraph Leiden when this build has the ``cugraph`` feature and a CUDA
         device is usable, else the CPU), ``"cpu"``, ``"cuda"`` or ``"cuda:<index>"`` (an
@@ -395,6 +467,8 @@ def leiden(
     """
     if not isinstance(device, str):
         raise TypeError(f"device must be a string, got {type(device).__name__}")
+    if _on_gpu(graph):
+        return _leiden_gpu(graph, _float("resolution", resolution), _seed(seed), device)
     n_rows, n_cols, indptr, indices, data = _csr_parts(graph, "graph")
     if n_rows != n_cols:
         raise ValueError(f"graph must be square (cells x cells), got shape {(n_rows, n_cols)}")
@@ -406,6 +480,21 @@ def leiden(
     return _scfast.leiden_csr(
         n_rows, indptr, indices, data, resolution, _seed(seed), _int("n_iterations", n_iterations, 1), device
     )
+
+
+def _leiden_gpu(graph: Any, resolution: float, seed: int, device: str) -> np.ndarray:
+    import cupy as cp
+
+    n, n_cols = graph.shape
+    if n != n_cols:
+        raise ValueError(f"graph must be square (cells x cells), got shape {(n, n_cols)}")
+    if device == "auto":
+        device = "cuda"
+    coo = graph.tocoo()
+    row, col = coo.row.astype(cp.int32, copy=False), coo.col.astype(cp.int32, copy=False)
+    w = coo.data.astype(cp.float32, copy=False)
+    cp.cuda.get_current_stream().synchronize()
+    return _scfast.leiden_coo_device(n, int(w.size), row.data.ptr, col.data.ptr, w.data.ptr, resolution, seed, device)
 
 
 def preprocess(
@@ -451,14 +540,23 @@ def preprocess(
         with). ``"clip"``: the clip used. ``"X_hvg"``: ``data[:, hvg]`` as a canonical CSR
         matrix (columns in ``hvg`` order), ready for :func:`pca`.
 
+    On the GPU (``X_counts`` a ``cupyx.scipy.sparse`` CSR matrix, or for more than 2^31 - 1
+    non-zeros a tuple ``(data, indices, indptr, shape)`` of CuPy arrays: float32 counts,
+    int32 columns, int64 row offsets) the passes run on the device and the per-gene vst
+    step is the same Rust code, so the HVGs match the CPU result (the counts are integers,
+    so the per-gene sums are exact). The result then has ``"X_hvg"`` as a cupyx CSR matrix
+    and ``"library_size"`` as a CuPy array, and no ``"data"``, ``"hvg_mean"`` or ``"hvg_sd"``.
+
     Notes
     -----
-    The loess is R's ``loess(..., surface = "direct")`` (exact local quadratic fit at
-    every gene); Seurat uses R's interpolated surface, so the expected variances differ
-    slightly and the HVG sets overlap by > 99% rather than exactly.
+    The loess is R's default ``loess(..., span, degree = 2)`` (``surface =
+    "interpolate"``) that Seurat calls; expected variances match R to ~1e-11 (log10), so
+    the HVG set is Seurat's.
     """
     import scipy.sparse as sp
 
+    if isinstance(X_counts, tuple) or _on_gpu(X_counts):
+        return _preprocess_gpu(X_counts, n_hvg, scale_factor, span, clip)
     n_rows, n_cols, indptr, indices, data = _csr_parts(X_counts, "X_counts")
     n_hvg = _int("n_hvg", n_hvg, 1)
     if n_rows == 0 or n_cols == 0:
@@ -475,9 +573,268 @@ def preprocess(
         if clip <= 0:
             raise ValueError(f"clip must be positive, got {clip}")
     out = _scfast.preprocess_csr(n_rows, n_cols, indptr, indices, data, n_hvg, scale_factor, span, clip)
-    norm = sp.csr_matrix((out["data"], indices, indptr), shape=(n_rows, n_cols))
-    out["data"] = norm
-    x_hvg = norm[:, out["hvg"]]
-    x_hvg.sort_indices()  # column selection in HVG order leaves rows unsorted; pca() needs canonical CSR
-    out["X_hvg"] = x_hvg
+    out["data"] = _csr_validated(out["data"], indices, indptr, (n_rows, n_cols))
+    hvg_indptr, hvg_indices = out.pop("hvg_indptr"), out.pop("hvg_indices")
+    if int(hvg_indptr[-1]) <= _I32_MAX:
+        hvg_indptr = hvg_indptr.astype(np.int32)
+    else:
+        hvg_indices = hvg_indices.astype(np.int64)
+    out["X_hvg"] = _csr_validated(out.pop("hvg_data"), hvg_indices, hvg_indptr, (n_rows, n_hvg))
     return out
+
+
+_PREPROCESS_KERNELS = r"""
+// Warp per row: library size, and per-gene sum, sum of squares, count and max of the counts.
+extern "C" __global__ void row_stats(const long long* indptr, const int* indices, const float* x, int n,
+                                     double* lib, double* sum, double* sumsq,
+                                     unsigned long long* cnt, int* mx) {
+  const long long warp = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  const int lane = threadIdx.x & 31;
+  if (warp >= n) return;
+  double acc = 0.0;
+  for (long long t = indptr[warp] + lane; t < indptr[warp + 1]; t += 32) {
+    const float v = x[t];
+    const int j = indices[t];
+    acc += v;
+    atomicAdd(&sum[j], (double)v);
+    atomicAdd(&sumsq[j], (double)v * (double)v);
+    atomicAdd(&cnt[j], 1ull);
+    atomicMax(&mx[j], __float_as_int(v));  // counts are non-negative: int order = float order
+  }
+  for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
+  if (lane == 0) lib[warp] = acc;
+}
+
+// Sum over stored entries of flagged genes of min(clip, (x - mean) / sd)^2.
+extern "C" __global__ void clipped_sums(const int* indices, const float* x, unsigned long long nnz,
+                                        const double* mean, const double* sd, const unsigned char* flag,
+                                        double clip, double* out) {
+  for (unsigned long long t = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x; t < nnz;
+       t += (unsigned long long)gridDim.x * blockDim.x) {
+    const int j = indices[t];
+    if (!flag[j]) continue;
+    const double z = fmin(((double)x[t] - mean[j]) / sd[j], clip);
+    atomicAdd(&out[j], z * z);
+  }
+}
+
+// Warp per row: number of stored entries in HVG columns (rank >= 0).
+extern "C" __global__ void hvg_count(const long long* indptr, const int* indices, int n, const int* rank,
+                                     long long* cnt) {
+  const long long warp = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  const int lane = threadIdx.x & 31;
+  if (warp >= n) return;
+  int c = 0;
+  for (long long t = indptr[warp] + lane; t < indptr[warp + 1]; t += 32) c += rank[indices[t]] >= 0;
+  for (int o = 16; o > 0; o >>= 1) c += __shfl_down_sync(0xffffffffu, c, o);
+  if (lane == 0) cnt[warp] = c;
+}
+
+// Block per row: the HVG entries renumbered by rank and sorted by it (each kept entry's
+// position is the number of kept entries of the row with a smaller rank), values
+// log1p(x * scale_factor / lib) as NormalizeData. Shared memory: 8 bytes per HVG.
+extern "C" __global__ void hvg_fill(const long long* indptr, const int* indices, const float* x,
+                                    const double* lib, double scale_factor, const int* rank,
+                                    const long long* out_ptr, int* out_idx, float* out_val) {
+  extern __shared__ int sh[];
+  __shared__ int k;
+  const int i = blockIdx.x;
+  const long long base = out_ptr[i];
+  const int m = (int)(out_ptr[i + 1] - base);
+  int* r = sh;
+  float* v = (float*)(sh + m);
+  if (threadIdx.x == 0) k = 0;
+  __syncthreads();
+  const double factor = lib[i] > 0.0 ? scale_factor / lib[i] : 0.0;
+  for (long long t = indptr[i] + threadIdx.x; t < indptr[i + 1]; t += blockDim.x) {
+    const int q = rank[indices[t]];
+    if (q < 0) continue;
+    const int s = atomicAdd(&k, 1);
+    r[s] = q;
+    v[s] = (float)log1p((double)x[t] * factor);
+  }
+  __syncthreads();
+  for (int s = threadIdx.x; s < m; s += blockDim.x) {
+    int pos = 0;
+    for (int u = 0; u < m; ++u) pos += r[u] < r[s];
+    out_idx[base + pos] = r[s];
+    out_val[base + pos] = v[s];
+  }
+}
+"""
+
+
+def _preprocess_gpu(X: Any, n_hvg: int, scale_factor: float, span: float, clip: float | None) -> dict[str, Any]:
+    import cupy as cp
+    import cupyx.scipy.sparse as csp
+
+    if isinstance(X, tuple):
+        data, indices, indptr, (n_rows, n_cols) = X
+    else:
+        if not csp.isspmatrix_csr(X):
+            raise TypeError(f"X_counts on the GPU must be a cupyx.scipy.sparse CSR matrix, got {type(X).__name__}")
+        if not X.has_canonical_format:
+            X = X.copy()
+            X.sum_duplicates()
+        data, indices, indptr, (n_rows, n_cols) = X.data, X.indices, X.indptr, X.shape
+    data = data.astype(cp.float32, copy=False)
+    indices = indices.astype(cp.int32, copy=False)
+    indptr = indptr.astype(cp.int64, copy=False)
+    n_hvg = min(_int("n_hvg", n_hvg, 1), n_cols)
+    if n_rows == 0 or n_cols == 0:
+        raise ValueError(f"X_counts is empty (shape {(n_rows, n_cols)})")
+    clip = float(np.sqrt(n_rows)) if clip is None else _float("clip", clip)
+    mod = cp.RawModule(code=_PREPROCESS_KERNELS)
+    nnz = int(data.size)
+    warps = ((n_rows * 32 + 255) // 256,)
+    lib = cp.empty(n_rows, cp.float64)
+    s, s2 = cp.zeros(n_cols, cp.float64), cp.zeros(n_cols, cp.float64)
+    cnt, mx = cp.zeros(n_cols, cp.uint64), cp.zeros(n_cols, cp.int32)
+    mod.get_function("row_stats")(warps, (256,), (indptr, indices, data, np.int32(n_rows), lib, s, s2, cnt, mx))
+    v = _scfast.vst_from_sums(cp.asnumpy(s), cp.asnumpy(s2), cp.asnumpy(mx.view(cp.float32)).astype(np.float64),
+                              cp.asnumpy(cnt), n_rows, float(span), clip)
+    vs, flag = v["variance_standardized"], v["needs_clip"]
+    if flag.any():
+        out = cp.zeros(n_cols, cp.float64)
+        mod.get_function("clipped_sums")((4096,), (256,), (indices, data, np.uint64(nnz), cp.asarray(v["mean"]),
+                                                           cp.asarray(v["sd"]), cp.asarray(flag.astype(np.uint8)),
+                                                           np.float64(clip), out))
+        clipped, nz = cp.asnumpy(out), cp.asnumpy(cnt).astype(np.float64)
+        z0 = np.divide(v["mean"], v["sd"], out=np.zeros(n_cols), where=flag)
+        vs = vs.copy()
+        vs[flag] = (clipped[flag] + (n_rows - nz[flag]) * z0[flag] ** 2) / (n_rows - 1)
+    hvg = np.lexsort((np.arange(n_cols), -vs))[:n_hvg].astype(np.int32)  # ties by lower index, as the CPU
+    rank = np.full(n_cols, -1, np.int32)
+    rank[hvg] = np.arange(n_hvg, dtype=np.int32)
+    rank_d = cp.asarray(rank)
+    counts = cp.empty(n_rows, cp.int64)
+    mod.get_function("hvg_count")(warps, (256,), (indptr, indices, np.int32(n_rows), rank_d, counts))
+    out_ptr = cp.concatenate([cp.zeros(1, cp.int64), cp.cumsum(counts)])
+    kept = int(out_ptr[-1])
+    out_idx, out_val = cp.empty(kept, cp.int32), cp.empty(kept, cp.float32)
+    mod.get_function("hvg_fill")((n_rows,), (128,), (indptr, indices, data, lib, np.float64(scale_factor), rank_d,
+                                                     out_ptr, out_idx, out_val), shared_mem=8 * n_hvg)
+    if kept <= _I32_MAX:
+        out_ptr = out_ptr.astype(cp.int32)
+    x_hvg = csp.csr_matrix((out_val, out_idx, out_ptr), shape=(n_rows, n_hvg))
+    return {"library_size": lib, "mean": v["mean"], "variance": v["variance"], "variance_expected": v["variance_expected"],
+            "variance_standardized": vs, "hvg": hvg, "clip": clip, "X_hvg": x_hvg}
+
+
+def _csr_validated(data: np.ndarray, indices: np.ndarray, indptr: np.ndarray, shape: tuple[int, int]) -> Any:
+    """A canonical scipy CSR around arrays the Rust side has already checked, without copies.
+
+    ``csr_matrix((data, indices, indptr))`` scans int64 index arrays to pick a dtype
+    (about 1 s for the 2.6e9 non-zeros of the 1.3M-cell brain data).
+    """
+    import scipy.sparse as sp
+
+    m = sp.csr_matrix(shape, dtype=data.dtype)
+    m.data, m.indices, m.indptr = data, indices, indptr
+    m.has_canonical_format = True
+    return m
+
+
+def _read_values(path: str, ds: Any, dtype: Any) -> np.ndarray:
+    """A 1-D h5py dataset as ``dtype``; plain-gzip chunks are inflated in parallel in Rust."""
+    plain_gzip = (ds.chunks is not None and ds.ndim == 1 and ds.compression == "gzip" and not ds.shuffle
+                  and not ds.fletcher32 and ds.scaleoffset is None and ds.dtype.str[1:] in ("i4", "i8", "f4", "f8")
+                  and ds.dtype.byteorder in "<=|" and hasattr(ds.id, "chunk_iter"))
+    if plain_gzip:
+        chunks: list[tuple[int, int, int]] = []
+        ds.id.chunk_iter(lambda c: chunks.append((c.chunk_offset[0], c.byte_offset, c.size)))
+        chunks.sort()
+        info = np.array(chunks, dtype=np.uint64).reshape(-1, 3)
+        step = ds.chunks[0]
+        if np.array_equal(info[:, 0], np.arange(len(chunks), dtype=np.uint64) * step):
+            return _scfast.inflate_chunks(path, np.ascontiguousarray(info[:, 1]), np.ascontiguousarray(info[:, 2]),
+                                          step, ds.shape[0], ds.dtype.str[1:], dtype == np.float32, dtype == np.int64)
+    return ds[()].astype(dtype, copy=False)
+
+
+def read_10x_h5(path: str | Any, arrays: bool = False) -> tuple[Any, np.ndarray, np.ndarray]:
+    """Read a Cell Ranger ``.h5`` (v2 or v3) as CSR counts, cells x genes.
+
+    The file's genes x cells CSC arrays are a cells x genes CSR as they are, so nothing is
+    transposed. Plain-gzip chunks (h5py / Cell Ranger without shuffle) are read and inflated
+    in parallel in Rust; other layouts go through h5py.
+
+    Returns
+    -------
+    (X, barcodes, gene_names)
+        X: scipy.sparse.csr_matrix, float32 counts, int32 indices (int64 above 2^31 - 1
+        non-zeros); with ``arrays=True`` the tuple ``(data float32, indices int32, indptr
+        int64, shape)`` instead (no scipy matrix, int32 indices at any size: what a GPU upload
+        wants). Ready for
+        :func:`preprocess`. barcodes, gene_names: str arrays. Files with features other
+        than Gene Expression raise ``ValueError``.
+    """
+    import h5py
+    import scipy.sparse as sp
+
+    path = str(path)
+    with h5py.File(path, "r") as f:
+        g = f["matrix"] if "matrix" in f else f[next(iter(f))]
+        n_genes, n_cells = (int(s) for s in g["shape"][()])
+        if "features" in g:
+            names = g["features/name"][()].astype(str)
+            if "feature_type" in g["features"] and (g["features/feature_type"][()] != b"Gene Expression").any():
+                raise ValueError(f"{path}: has features other than Gene Expression")
+        else:
+            names = g["gene_names"][()].astype(str)
+        indptr = g["indptr"][()]
+        # scipy wants indices and indptr in one dtype: int64 once the non-zeros pass int32.
+        wide = int(indptr[-1]) > _I32_MAX
+        if arrays:
+            X = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], np.int32),
+                 indptr.astype(np.int64), (n_cells, n_genes))
+        else:
+            index_dtype = np.int64 if wide else np.int32
+            parts = (_read_values(path, g["data"], np.float32), _read_values(path, g["indices"], index_dtype),
+                     indptr.astype(index_dtype))
+            # Wide arrays skip scipy's index-dtype scan (about 1 s at 2.6e9 non-zeros); preprocess
+            # and pca check the structure in Rust.
+            X = _csr_validated(*parts, (n_cells, n_genes)) if wide else sp.csr_matrix(parts, shape=(n_cells, n_genes))
+        barcodes = g["barcodes"][()].astype(str)
+    return X, barcodes, names
+
+
+def _find_ab(spread: float, min_dist: float) -> tuple[float, float]:
+    from scipy.optimize import curve_fit
+
+    x = np.linspace(0, spread * 3, 300)
+    y = np.where(x < min_dist, 1.0, np.exp(-(x - min_dist) / spread))
+    (a, b), _ = curve_fit(lambda x, a, b: 1.0 / (1.0 + a * x ** (2 * b)), x, y)
+    return float(a), float(b)
+
+
+def umap(
+    indices: Any,
+    distances: Any,
+    init: Any,
+    min_dist: float = 0.5,
+    spread: float = 1.0,
+    n_epochs: int | None = None,
+    negative_sample_rate: int = 5,
+    learning_rate: float = 1.0,
+    seed: int = 0,
+) -> np.ndarray:
+    """UMAP layout from a kNN graph, replacing ``RunUMAP`` / ``sc.tl.umap``.
+
+    ``indices`` / ``distances`` are the (cells, k) output of :func:`knn` (the cell itself
+    in column 0). ``init`` is a (cells, 2) starting layout, e.g. the first two PCs; it is
+    rescaled to [0, 10] as umap-learn does. ``n_epochs`` defaults to umap-learn's choice
+    (500 below 10,000 cells, else 200). ``min_dist`` 0.5 is Scanpy's default. Returns a
+    float32 (cells, 2) array.
+    """
+    idx = np.ascontiguousarray(indices, dtype=np.int32)
+    dist = np.ascontiguousarray(distances, dtype=np.float32)
+    start = np.ascontiguousarray(np.asarray(init)[:, :2], dtype=np.float32)
+    if idx.ndim != 2 or idx.shape != dist.shape or start.shape != (idx.shape[0], 2):
+        raise ValueError(f"indices {idx.shape}, distances {dist.shape} and init {start.shape} do not match")
+    if n_epochs is None:
+        n_epochs = 500 if idx.shape[0] <= 10_000 else 200
+    a, b = _find_ab(_float("spread", spread), _float("min_dist", min_dist))
+    return _scfast.umap(idx, dist, start, a, b, _int("n_epochs", n_epochs, 1),
+                        _int("negative_sample_rate", negative_sample_rate, 0),
+                        _float("learning_rate", learning_rate), _seed(seed))

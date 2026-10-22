@@ -26,6 +26,7 @@ pub mod pca;
 pub mod preprocess;
 pub mod snn;
 pub mod types;
+pub mod umap;
 
 pub use device::{device_info, Device, DeviceInfo};
 pub use error::{Error, Result};

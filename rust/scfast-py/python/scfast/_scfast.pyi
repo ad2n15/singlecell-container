@@ -30,6 +30,7 @@ def pca_csr(
     oversample: int,
     power_iters: int,
     device: str = "cpu",
+    clip: float | None = None,
     /,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """Implicitly scaled PCA of a CSR matrix (cells x genes) given as raw arrays.
@@ -43,6 +44,25 @@ def pca_csr(
 
     Returns (embeddings (n_rows, k), loadings (n_cols, k), stdev (k,)), all float32.
     """
+
+def pca_csr_device(
+    n_rows: int,
+    n_cols: int,
+    nnz: int,
+    indptr: int,
+    indptr_i64: bool,
+    indices: int,
+    data: int,
+    n_comps: int,
+    seed: int,
+    scale: bool,
+    oversample: int,
+    power_iters: int,
+    device: str,
+    clip: float | None = None,
+    /,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+    """pca_csr for a canonical CSR matrix already on the GPU (device pointers)."""
 
 def csr_view_info(
     n_rows: int,
@@ -112,6 +132,20 @@ def leiden_csr(
     RuntimeError.
     """
 
+def leiden_coo_device(
+    n: int,
+    nnz: int,
+    src: int,
+    dst: int,
+    weights: int,
+    resolution: float,
+    seed: int,
+    device: str,
+    /,
+) -> npt.NDArray[np.int32]:
+    """Leiden on cuGraph for a COO graph already on the device (int32 / int32 / float32
+    device pointers, nnz each). Unchecked beyond sizes."""
+
 def leiden_device(device: str, /) -> dict[str, Any]:
     """Resolve a Leiden device string.
 
@@ -119,6 +153,32 @@ def leiden_device(device: str, /) -> dict[str, Any]:
     "auto" resolves to "cuda:0" only when the cugraph feature is built, libcugraph_c.so
     loads and a CUDA device is usable; an unusable explicit "cuda" raises RuntimeError.
     """
+
+def inflate_chunks(
+    path: str,
+    offsets: npt.NDArray[np.uint64],
+    sizes: npt.NDArray[np.uint64],
+    chunk_len: int,
+    n: int,
+    src: str,
+    to_f32: bool,
+    to_i64: bool = False,
+    /,
+) -> npt.NDArray[np.float32] | npt.NDArray[np.int32] | npt.NDArray[np.int64]:
+    """Inflate the zlib chunks of a 1-D HDF5 dataset, in element order, to float32, int64 or int32."""
+
+def vst_from_sums(
+    sum: npt.NDArray[np.float64],
+    sumsq: npt.NDArray[np.float64],
+    max: npt.NDArray[np.float64],
+    nnz: npt.NDArray[np.uint64],
+    n_rows: int,
+    span: float,
+    clip: float,
+    /,
+) -> dict[str, Any]:
+    """vst statistics from per-gene sums of the raw counts: {"mean", "variance",
+    "variance_expected", "variance_standardized", "sd": float64, "needs_clip": bool}."""
 
 def preprocess_csr(
     n_rows: int,
@@ -137,7 +197,8 @@ def preprocess_csr(
     The arrays are borrowed as in pca_csr. Returns {"data": float32 (nnz,) log-normalised
     values in input order, "library_size": float64 (n_rows,), "mean", "variance",
     "variance_expected", "variance_standardized": float64 (n_cols,), "hvg": int32 (n_hvg,)
-    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float}.
+    gene indices most variable first, "hvg_mean", "hvg_sd": float64 (n_hvg,), "clip": float, "hvg_indptr": int64,
+    "hvg_indices": int32, "hvg_data": float32: the HVG columns as a canonical CSR in HVG order}.
     """
 
 def device_info() -> dict[str, Any]:
@@ -161,3 +222,15 @@ def _probe_error(kind: str, message: str, /) -> None:
 def _probe_panic(kind: str, /) -> None:
     """Panic inside the kernel wrapper: "panic", "unimplemented" (like a stub kernel) or
     "rayon" (on a rayon worker thread). Test helper: must raise, never abort."""
+
+def umap(
+    indices: npt.NDArray[np.int32],
+    distances: npt.NDArray[np.float32],
+    init: npt.NDArray[np.float32],
+    a: float,
+    b: float,
+    n_epochs: int,
+    negative_sample_rate: int,
+    learning_rate: float,
+    seed: int,
+) -> npt.NDArray[np.float32]: ...

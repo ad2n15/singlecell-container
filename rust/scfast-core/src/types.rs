@@ -1,6 +1,8 @@
 //! Shared data types. Inputs are borrowed views so R (`dgCMatrix`) and Python (scipy CSR)
 //! data are read in place, without copying or transposing (docs/RUST_ENGINE.md section 3).
 
+use rayon::prelude::*;
+
 use crate::error::{Error, Result};
 
 /// Integer types used for sparse indices: R uses i32, scipy uses i32 or i64.
@@ -61,7 +63,9 @@ impl<'a, I: Idx, T: Real> CsrView<'a, I, T> {
                 return Err(Error::InvalidInput("indptr is not non-decreasing".into()));
             }
         }
-        if let Some(bad) = indices.iter().find(|&&j| j.to_usize() >= n_cols) {
+        let out_of_range = |c: &&[I]| c.iter().any(|j| j.to_usize() >= n_cols);
+        let bad_chunk = indices.par_chunks(1 << 16).find_first(out_of_range);
+        if let Some(bad) = bad_chunk.and_then(|c| c.iter().find(|&&j| j.to_usize() >= n_cols)) {
             return Err(Error::InvalidInput(format!("column index {} out of range for {} columns", bad.to_usize(), n_cols)));
         }
         Ok(Self { n_rows, n_cols, indptr, indices, data })

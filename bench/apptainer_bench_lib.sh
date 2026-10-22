@@ -255,7 +255,9 @@ apptainer_bench_scfast_import_ok() {
   local py="${BENCH_VENV}/bin/python3"
   "${py}" -c "import scfast" 2>/dev/null || return 1
   if [[ ",${engines}," == *",scfast-gpu,"* ]]; then
-    "${py}" -c 'import scfast; i=scfast.device_info(); raise SystemExit(0 if i.get("cuda_available") else 1)' 2>/dev/null || return 1
+    # The build must carry the CUDA features; the GPU itself is checked in the RAPIDS image
+    # (apptainer_bench_require_scfast_gpu), where scfast-gpu runs.
+    "${py}" -c 'import scfast; i=scfast.device_info(); raise SystemExit(0 if i.get("cuda_built") else 1)' 2>/dev/null || return 1
   fi
   return 0
 }
@@ -370,10 +372,22 @@ bench_maturin_develop() {
   )
 }
 
+# Hash of the tracked scfast sources (including uncommitted edits), stored in the build stamp.
+apptainer_bench_scfast_src_hash() {
+  (cd "${REPO}" && git ls-files -z rust | xargs -0 cat 2>/dev/null | sha1sum | cut -d' ' -f1)
+}
+
 # scfast Rust engine (bench/run_py.py --engine scfast-cpu); optional if rust/maturin missing.
 apptainer_bench_bootstrap_scfast() {
   local stamp="${BENCH_VENV}/.scfast_bench_ok"
   local engines="${ENGINES:-}"
+  local src_hash
+  src_hash="$(apptainer_bench_scfast_src_hash)"
+  if [[ -f "${stamp}" && "$(cat "${stamp}")" != "${src_hash}" ]]; then
+    log "scfast sources changed since the last build; rebuilding"
+    rm -f "${stamp}"
+    export BENCH_SCFAST_FORCE_REBUILD=1
+  fi
   if [[ "${BENCH_SCFAST_FORCE_REBUILD:-0}" != "1" ]] && [[ -f "${stamp}" ]] && apptainer_bench_scfast_import_ok "${engines}"; then
     log "scfast already built (${stamp})"
     return 0
@@ -383,7 +397,7 @@ apptainer_bench_bootstrap_scfast() {
     rm -f "${stamp}"
   fi
   if [[ "${BENCH_SCFAST_FORCE_REBUILD:-0}" != "1" ]] && apptainer_bench_scfast_import_ok "${engines}"; then
-    touch "${stamp}"
+    printf '%s' "${src_hash}" > "${stamp}"
     log "scfast already importable in ${BENCH_VENV}"
     return 0
   fi
@@ -408,6 +422,13 @@ apptainer_bench_bootstrap_scfast() {
     log "WARN: maturin install failed"
     return 0
   fi
+  # Compute nodes have no internet: fetch crates when online, else build from the cargo cache.
+  if (cd "${REPO}/rust" && cargo fetch --locked) >>"${BENCH_ROOT}/logs/bootstrap_scfast.log" 2>&1; then
+    log "cargo fetch ok"
+  else
+    log "cargo fetch failed (offline?); building with CARGO_NET_OFFLINE=true"
+    export CARGO_NET_OFFLINE=true
+  fi
   local feats=""
   feats="$(apptainer_bench_scfast_maturin_features "${engines}")"
   [[ -n "${feats}" ]] && log "scfast maturin --features ${feats}"
@@ -416,8 +437,9 @@ apptainer_bench_bootstrap_scfast() {
     return 0
   }
   "${BENCH_VENV}/bin/python3" -c "import scfast; print('scfast', scfast.__version__)"
-  touch "${stamp}"
+  printf '%s' "${src_hash}" > "${stamp}"
 }
+
 
 # rapids-singlecell for scanpy-gpu / rapids (host venv or GPU apptainer image + --nv).
 apptainer_bench_bootstrap_rapids() {
@@ -441,7 +463,7 @@ apptainer_bench_bootstrap_rapids() {
     # shellcheck disable=SC2046
     if "${APPT_BIN}" exec $(apptainer_bench_gpu_appt_flags "${sif}") \
         "${apptainer_bench_bind[@]}" "${sif}" \
-        bash -c 'export PYTHONNOUSERSITE=1 NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/scratch/${USER}/bench/numba-cache}"; mkdir -p "$NUMBA_CACHE_DIR"; source /opt/conda/etc/profile.d/conda.sh && conda activate base && exec python "$@"' _ \
+        bash -c 'export PYTHONNOUSERSITE=1 NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/scratch/${USER}/bench/numba-cache}"; CUPY_CACHE_DIR="${CUPY_CACHE_DIR:-/scratch/${USER}/bench/cupy-cache}"; mkdir -p "$NUMBA_CACHE_DIR" "$CUPY_CACHE_DIR"; export CUPY_CACHE_DIR; source /opt/conda/etc/profile.d/conda.sh && conda activate base && exec python "$@"' _ \
         -c "import rapids_singlecell, cupy" 2>/dev/null; then
       export SIF_GPU_BENCH="${sif}"
       log "GPU bench image: ${sif} ($(apptainer_bench_image_kind "${sif}"); rapids via apptainer --nv)"
@@ -488,18 +510,21 @@ apptainer_bench_require_gpu_python() {
 # Exit 1 if ENGINES lists scfast-gpu but the venv scfast lacks a usable CUDA backend.
 apptainer_bench_require_scfast_gpu() {
   local engines="${1:-}"
-  [[ "${engines}" == *"scfast-gpu"* ]] || return 0
-  if apptainer_bench_scfast_import_ok "${engines}"; then
+  [[ ",${engines}," == *",scfast-gpu,"* ]] || return 0
+  apptainer_bench_scfast_import_ok "${engines}" || {
+    log "ERROR: scfast in ${BENCH_VENV} is missing or built without --features cuda,cugraph; see ${BENCH_ROOT}/logs/bootstrap_scfast.log"
+    return 1
+  }
+  # scfast-gpu runs in the RAPIDS image (bench/run_bench.sh) with this checkout's scfast on PYTHONPATH.
+  local py="${BENCH_RAPIDS_PYTHON:-${WRAP}/python3-gpu}" out=""
+  out="$(PYTHONPATH="${REPO}/rust/scfast-py/python" "${py}" -c 'import scfast, cupy
+i = scfast.device_info()
+print("ok" if i.get("cuda_available") else "no CUDA: %s" % i.get("cuda_error"), scfast.leiden_device("auto"))' 2>&1 | tail -1)"
+  if [[ "${out}" == ok* ]]; then
+    log "scfast-gpu in ${py}: ${out}"
     return 0
   fi
-  local err=""
-  err="$("${BENCH_VENV}/bin/python3" -c 'import scfast, json; print(scfast.device_info().get("cuda_error") or "")' 2>/dev/null || true)"
-  log "ERROR: ENGINES include scfast-gpu but scfast CUDA is not usable (${err:-unknown})"
-  log "ERROR: nvidia-smi is not enough; try: module load cuda/12.4.0  (or export BENCH_CUDA_MODULE=cuda/12.4.0)"
-  log "ERROR: then: /scratch/\$USER/bench/venv/bin/python3 -c \"import scfast; print(scfast.device_info())\""
-  if [[ ",${engines}," == *",scfast-gpu,"* ]]; then
-    log "ERROR: GPU Leiden also needs libcugraph_c.so (export SCFAST_CUGRAPH_LIB or SIF_GPU_BENCH rapids sandbox)"
-  fi
+  log "ERROR: ENGINES include scfast-gpu but scfast CUDA is not usable in ${py}: ${out}"
   return 1
 }
 
@@ -551,7 +576,7 @@ apptainer_bench_write_wrappers() {
       printf '  --bind %s:%s --bind /iridisfs/ddnb:/iridisfs/ddnb --bind /scratch:/scratch \\\n' "${REPO}" "${REPO}"
       printf '  --bind /iridisfs/ixsoftware:/iridisfs/ixsoftware \\\n'
       printf '  %s \\\n' "${SIF_GPU_BENCH}"
-      printf '%s\n' '  bash -c '"'"'export PYTHONNOUSERSITE=1 NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/scratch/${USER}/bench/numba-cache}"; mkdir -p "$NUMBA_CACHE_DIR"; source /opt/conda/etc/profile.d/conda.sh && conda activate base && exec python "$@"'"'"' _ "$@"'
+      printf '%s\n' '  bash -c '"'"'export PYTHONNOUSERSITE=1 NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-/scratch/${USER}/bench/numba-cache}"; CUPY_CACHE_DIR="${CUPY_CACHE_DIR:-/scratch/${USER}/bench/cupy-cache}"; mkdir -p "$NUMBA_CACHE_DIR" "$CUPY_CACHE_DIR"; export CUPY_CACHE_DIR; source /opt/conda/etc/profile.d/conda.sh && conda activate base && exec python "$@"'"'"' _ "$@"'
     } > "${WRAP}/python3-gpu"
     chmod +x "${WRAP}/python3-gpu"
     export BENCH_RAPIDS_PYTHON="${WRAP}/python3-gpu"

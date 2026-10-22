@@ -29,3 +29,5 @@ tests/benchmark/results/
 # benchmark runs (commit a chosen baseline with git add -f)
 bench/results/
 rust/target/
+.venv-bench/
+*.egg-info/

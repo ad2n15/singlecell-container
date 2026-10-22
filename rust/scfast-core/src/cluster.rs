@@ -2,6 +2,11 @@
 //!
 //! CPU: single-clustering 0.7.0 (pinned), RB objective, which is what Seurat
 //! (`RBConfigurationVertexPartition`) and Scanpy optimise (docs/RUST_ENGINE.md section 4).
+//! Its Leiden loop is reproduced in [`leiden_rb`] with local moving and refinement replaced
+//! by parallel, thread-count-independent versions (`cluster/local_move.rs`,
+//! `cluster/refine.rs`) and its aggregation run in parallel (`cluster/aggregate.rs`). 500k synthetic cells (10 PCs,
+//! k = 20, 12-core M-series): 5.0 s -> 1.8 s, ARI 0.999 against leidenalg on the same graph
+//! at 100k.
 //! GPU (Phase 7): cuGraph Leiden ([`crate::cugraph::CugraphLeiden`], feature `cugraph`) behind
 //! the same `Clusterer` trait; [`leiden_on`] picks the backend from a [`LeidenDevice`].
 //!
@@ -30,9 +35,17 @@
 
 use std::cmp::Reverse;
 
-use single_clustering::community_search::leiden::{leiden as sc_leiden, LeidenConfig, ObjectiveKind};
+use rand::{RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
+use single_clustering::community_search::leiden::LeidenConfig;
 use single_clustering::network::CSRNetwork;
 use single_clustering::ClusteringError;
+
+mod aggregate;
+mod local_move;
+mod refine;
+
+use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::types::SparseGraph;
@@ -116,31 +129,186 @@ impl Clusterer for SingleClusteringLeiden {
             return Ok(Vec::new());
         }
 
-        // from_csr_parts takes owned buffers: this is the one copy of the graph per call
-        let mut weights = graph.weights.clone();
-        if DIAGONAL_SCALE != 1.0 {
-            for i in 0..graph.n {
-                let (s, e) = (graph.indptr[i], graph.indptr[i + 1]);
-                for (w, &j) in weights[s..e].iter_mut().zip(&graph.indices[s..e]) {
-                    if j as usize == i {
-                        *w *= DIAGONAL_SCALE;
-                    }
+        // from_csr_parts takes owned buffers: this renumbered copy is the one copy per call
+        let order = bfs_order(graph)?;
+        let (indptr, indices, weights) = renumber(graph, &order);
+        let network = CSRNetwork::from_csr_parts(indptr, indices, weights, None).map_err(map_err)?;
+
+        // Leiden synchronises after every small batch of moves, so past a few threads per
+        // ~60k nodes the wake-ups cost more than the work: 4 threads up to 250k nodes, 12 from
+        // 750k (measured on AMD EPYC and Apple M: 16 threads were 1.8x slower than 4 at 100k).
+        // Running inside the pool also keeps one-chunk parallel loops inline. Labels do not
+        // depend on the thread count.
+        let threads = (graph.n / LEIDEN_NODES_PER_THREAD).clamp(4, 12).min(rayon::current_num_threads());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|e| Error::Backend { context: "leiden thread pool", message: e.to_string() })?;
+        let clustering = pool.install(|| leiden_rb(&network, params));
+        let mut labels = vec![0usize; graph.n];
+        for (&old, &c) in order.iter().zip(&clustering) {
+            labels[old as usize] = c;
+        }
+        Ok(relabel_by_size(&labels))
+    }
+}
+
+const LEIDEN_NODES_PER_THREAD: usize = 62_500;
+
+/// single-clustering 0.7.0's `leiden` (RB, refinement on, its default tolerance, patience
+/// and level cap) with its sequential local move and refinement replaced by the parallel
+/// [`local_move::local_move`] and [`refine::refine`], and its aggregation by the parallel
+/// (bit-identical) [`aggregate::aggregate`].
+fn leiden_rb(graph: &CSRNetwork, params: &ClusterParams) -> Vec<usize> {
+    let config = LeidenConfig::default();
+    let mut rng = ChaCha8Rng::seed_from_u64(params.seed);
+    let n = graph.node_count();
+    let mut labels: Vec<usize> = (0..n).collect();
+    let mut stagnant = 0;
+    for _ in 0..params.n_iterations {
+        let mut level_rng = ChaCha8Rng::seed_from_u64(rng.next_u64());
+        let mut coarse_graph: Option<CSRNetwork> = None;
+        let mut membership = labels.clone();
+        let mut node_at_level: Vec<usize> = (0..n).collect();
+        let mut improvement = 0.0;
+        let mut moved;
+        let mut level = 0;
+        loop {
+            let level_graph = coarse_graph.as_ref().unwrap_or(graph);
+            moved = local_move::local_move(level_graph, &membership, params.resolution, &mut level_rng);
+            improvement += rb_quality(level_graph, &moved, params.resolution) - rb_quality(level_graph, &membership, params.resolution);
+            level += 1;
+            if level == config.max_levels {
+                break;
+            }
+            let moved_u32: Vec<u32> = moved.iter().map(|&c| c as u32).collect();
+            let refined = refine::refine(level_graph, &moved_u32, params.resolution, config.refine_randomness, &mut level_rng);
+            let (group, n_groups) = renumber_ascending(&refined);
+            let coarse = aggregate::aggregate(level_graph, &group, n_groups);
+            if coarse.node_count() >= level_graph.node_count() {
+                break;
+            }
+            membership = vec![0; coarse.node_count()];
+            for (v, &g) in group.iter().enumerate() {
+                membership[g as usize] = moved[v];
+            }
+            for slot in node_at_level.iter_mut() {
+                *slot = group[*slot] as usize;
+            }
+            coarse_graph = Some(coarse);
+        }
+        let (final_ids, _) = renumber_ascending(&moved);
+        labels = node_at_level.iter().map(|&v| final_ids[v] as usize).collect();
+        if improvement <= config.tolerance * graph.total_weight().abs().max(1.0) {
+            stagnant += 1;
+            if stagnant >= config.patience {
+                break;
+            }
+        } else {
+            stagnant = 0;
+        }
+    }
+    labels
+}
+
+/// single-clustering's RB quality `sum_c [internal_c - resolution * K_c^2 / 4m]` (internal
+/// weight counting each edge and loop once), with the edge scan in parallel.
+fn rb_quality(graph: &CSRNetwork, membership: &[usize], resolution: f64) -> f64 {
+    let four_m = 4.0 * graph.total_weight();
+    if four_m == 0.0 {
+        return 0.0;
+    }
+    let internal: f64 = (0..graph.node_count())
+        .into_par_iter()
+        .map(|v| graph.neighbors(v).filter(|&(u, _)| u >= v && membership[u] == membership[v]).map(|(_, w)| w).sum::<f64>())
+        .sum();
+    let mut strength = vec![0f64; membership.iter().copied().max().map_or(0, |m| m + 1)];
+    for (v, &c) in membership.iter().enumerate() {
+        strength[c] += graph.strength(v);
+    }
+    internal - resolution * strength.iter().map(|k| k * k).sum::<f64>() / four_m
+}
+
+/// Community ids renumbered 0.. in ascending order of the old id (as single-clustering's
+/// `Partition::renumber`), and the number of communities.
+fn renumber_ascending(ids: &[usize]) -> (Vec<u32>, usize) {
+    let mut new_id = vec![u32::MAX; ids.iter().copied().max().map_or(0, |m| m + 1)];
+    for &c in ids {
+        new_id[c] = 0;
+    }
+    let mut next = 0;
+    for id in new_id.iter_mut().filter(|id| **id == 0) {
+        *id = next;
+        next += 1;
+    }
+    (ids.iter().map(|&c| new_id[c]).collect(), next as usize)
+}
+
+/// Nodes in breadth-first order (`order[new] = old`), restarting at the lowest unvisited
+/// node. Graph neighbours end up close in memory, so the membership and community
+/// lookups of each local move hit a few cache lines instead of ~2k scattered ones (the
+/// input is in cell order, which is random with respect to the graph). 500k-cell SNN:
+/// Errors on an index out of range.
+fn bfs_order(g: &SparseGraph) -> Result<Vec<u32>> {
+    let n = g.n;
+    if let Some(&j) = g.indices.par_iter().find_first(|&&j| j as usize >= n) {
+        return Err(Error::InvalidInput(format!("graph index {j} out of range for {n} nodes")));
+    }
+    // a bitset stays in L2 at 1M+ nodes, where a Vec<bool> does not
+    let mut seen = vec![0u64; n.div_ceil(64)];
+    let mut order = Vec::with_capacity(n);
+    for root in 0..n {
+        if seen[root / 64] & (1 << (root % 64)) != 0 {
+            continue;
+        }
+        seen[root / 64] |= 1 << (root % 64);
+        let mut head = order.len();
+        order.push(root as u32);
+        while head < order.len() {
+            let v = order[head] as usize;
+            head += 1;
+            for &j in &g.indices[g.indptr[v]..g.indptr[v + 1]] {
+                let (word, bit) = (j as usize / 64, 1u64 << (j % 64));
+                if seen[word] & bit == 0 {
+                    seen[word] |= bit;
+                    order.push(j);
                 }
             }
         }
-        let network = CSRNetwork::from_csr_parts(graph.indptr.clone(), graph.indices.clone(), weights, None)
-            .map_err(map_err)?;
-
-        let config = LeidenConfig {
-            objective: ObjectiveKind::Rb { resolution: params.resolution },
-            seed: Some(params.seed),
-            n_iterations: params.n_iterations,
-            refine: true,
-            ..Default::default()
-        };
-        let clustering = sc_leiden(&network, &config).map_err(map_err)?;
-        Ok(relabel_by_size(clustering.labels()))
     }
+    Ok(order)
+}
+
+/// The graph with node `order[new]` renamed `new`: rows re-sorted by column, diagonal
+/// weights scaled by [`DIAGONAL_SCALE`].
+fn renumber(g: &SparseGraph, order: &[u32]) -> (Vec<usize>, Vec<u32>, Vec<f32>) {
+    let mut inv = vec![0u32; g.n];
+    for (new, &old) in order.iter().enumerate() {
+        inv[old as usize] = new as u32;
+    }
+    let mut indptr = vec![0usize; g.n + 1];
+    for (new, &old) in order.iter().enumerate() {
+        indptr[new + 1] = indptr[new] + g.indptr[old as usize + 1] - g.indptr[old as usize];
+    }
+    let nnz = indptr[g.n];
+    let mut rows: Vec<(u32, f32)> = vec![(0, 0.0); nnz];
+    let mut parts = Vec::with_capacity(g.n);
+    let mut rest = rows.as_mut_slice();
+    for new in 0..g.n {
+        let (head, tail) = rest.split_at_mut(indptr[new + 1] - indptr[new]);
+        parts.push(head);
+        rest = tail;
+    }
+    parts.into_par_iter().zip(order).enumerate().for_each(|(new, (row, &old))| {
+        let (s, e) = (g.indptr[old as usize], g.indptr[old as usize + 1]);
+        for (slot, (&j, &w)) in row.iter_mut().zip(g.indices[s..e].iter().zip(&g.weights[s..e])) {
+            let jn = inv[j as usize];
+            *slot = (jn, if jn as usize == new { w * DIAGONAL_SCALE } else { w });
+        }
+        row.sort_unstable_by_key(|&(j, _)| j);
+    });
+    let (indices, weights) = rows.into_iter().unzip();
+    (indptr, indices, weights)
 }
 
 /// Convenience: CPU Leiden with the default backend. Unchanged by the `cugraph` feature;
