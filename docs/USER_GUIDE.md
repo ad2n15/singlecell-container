@@ -74,12 +74,12 @@ gates:                           # who gets the last word at each gate (section 
   G3: auto                       # escalate: always a human
   G4: review
 
-llm:                             # omit the section for rules-only gates (every gate then needs a human)
+llm:                             # optional: without it the first key set is used (Claude, OpenAI, NVIDIA), else rules-only
   default:
-    provider: anthropic          # anthropic | openai_compatible (vLLM, Ollama, ...) | mock (tests)
-    model: claude-haiku-4-5
-    api_key_env: ANTHROPIC_API_KEY   # the NAME of the variable holding the key; the key itself is never written anywhere
-    # base_url: http://localhost:11434/v1     # openai_compatible only
+    provider: auto               # auto | anthropic | openai | nvidia | openai_compatible (vLLM, Ollama, local NIM) | mock (tests)
+    # model: claude-haiku-4-5    # default per provider: claude-haiku-4-5, gpt-4.1-mini, meta/llama-3.3-70b-instruct
+    # api_key_env: ANTHROPIC_API_KEY   # the NAME of the variable holding the key; the key itself is never written anywhere
+    # base_url: http://localhost:11434/v1     # openai_compatible only (anthropic/openai/nvidia know theirs)
   roles: {}                      # per-role overrides: qc_worker, context_worker, annotation_worker, interpretation_worker, reviewer
   budget:
     per_run_limit: 5             # GBP; a call that would cross a limit is not made
@@ -112,19 +112,22 @@ report:
   top_markers: 10                # markers per cluster shown in report.html
 ```
 
-**NVIDIA models for the gates.** NVIDIA NIM serves an OpenAI-compatible API, hosted or as a local
-container on the same GPU node, so it works through `openai_compatible` with no code change:
+**Claude, OpenAI or NVIDIA.** Export one key and the agents use it:
+`ANTHROPIC_API_KEY` (Claude Haiku 4.5), `OPENAI_API_KEY` (gpt-4.1-mini) or `NVIDIA_API_KEY`
+(NVIDIA NIM, `meta/llama-3.3-70b-instruct`). With several keys, Claude is preferred, then OpenAI,
+then NVIDIA. Pick one per run with `scpipe run ... --llm nvidia --llm-model <model>`, or in the config:
 
 ```yaml
 llm:
-  default:
-    provider: openai_compatible
-    base_url: https://integrate.api.nvidia.com/v1    # or http://localhost:8000/v1 for a local NIM
-    model: meta/llama-3.3-70b-instruct               # any NIM model that supports tool calls
-    api_key_env: NVIDIA_API_KEY
+  default: {provider: nvidia}                 # model, endpoint and key variable filled in
+  roles:
+    reviewer: {provider: anthropic}           # e.g. a different provider for the reviewer
 ```
 
-Check it with `scpipe doctor --config config.yaml`, which makes a tool-use test call.
+A local NIM or vLLM server: `{provider: openai_compatible, base_url: http://localhost:8000/v1, model: ...}`.
+The NVIDIA preset asks for JSON with `json_object` (not every NIM model supports `json_schema`); use
+a NIM model that supports tool calls. `scpipe doctor` shows which provider and model were chosen and
+makes a tool-use test call.
 
 ### Engine: Rust, Seurat or GPU
 

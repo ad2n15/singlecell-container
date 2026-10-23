@@ -149,6 +149,30 @@ write_table <- function(path, x, sep = ",", ids = FALSE) {
   path
 }
 
+# Cells x genes table: header = gene symbols, first column = cell names.
+write_table_t <- function(path, x, sep = ",") {
+  d <- as.data.frame(t(as.matrix(x$m)), check.names = FALSE)
+  colnames(d) <- x$feats$symbol
+  d <- cbind(data.frame(cell = x$bcs, check.names = FALSE), d)
+  write.table(d, path, sep = sep, quote = FALSE, row.names = FALSE)
+  path
+}
+
+# Synthetic raw (unfiltered) 10x matrix over the fixture's first 200 genes:
+# n_cells cells with 1000-5000 UMIs (first) plus n_empty barcodes with 0-5 UMIs.
+raw_10x <- function(n_cells = 300, n_empty = 150000, seed = 1) {
+  set.seed(seed)
+  g <- FX$feats[SUB_G, , drop = FALSE]; ng <- nrow(g)
+  p <- rexp(ng); p <- p / sum(p)
+  tc <- round(runif(n_cells, 1000, 5000))
+  cells <- vapply(tc, function(t) tabulate(sample.int(ng, t, TRUE, p), ng), integer(ng))
+  te <- sample(0:5, n_empty, TRUE)
+  j <- rep(seq_len(n_empty), te)
+  emp <- sparseMatrix(i = sample.int(ng, length(j), TRUE, p), j = j, x = 1, dims = c(ng, n_empty))
+  m <- cbind(as(Matrix(cells * 1, sparse = TRUE), "CsparseMatrix"), emp)
+  list(m = as(m, "dgCMatrix"), feats = g, bcs = sprintf("BC%07d-1", seq_len(ncol(m))), n_cells = n_cells)
+}
+
 write_seurat_rds <- function(path, x, v3 = FALSE, split = FALSE, with_meta = TRUE) {
   m <- x$m
   rownames(m) <- x$feats$symbol
@@ -428,6 +452,78 @@ test_that("organism check warns when the top genes do not look human", {
   stage(rd2, run_s0)
   expect_gte(s0_report(rd2)$human_check$fraction_top_genes, 0.5)
   expect_null(s0_report(rd2)$human_check$warning)
+})
+
+test_that("a cells x genes table gives the same counts as the genes x cells table", {
+  td <- file.path(tempdir(), sprintf("orient-%s", basename(tempfile(""))))
+  dir.create(td)
+  x <- fx_sub()
+  rd <- new_run(data.frame(sample_id = c("gc", "cg"),
+                           path = c(write_table(file.path(td, "gc.csv"), x), write_table_t(file.path(td, "cg.csv"), x)),
+                           format = ""), tag = "orient")
+  stage(rd, run_s0)
+  obj <- s0_obj(rd)
+  rep <- s0_report(rd)
+  expect_equal(dim(obj), c(200, 120))
+  expect_same_counts(obj, x, "gc")
+  expect_same_counts(obj, x, "cg")
+  ori <- vapply(rep$samples, function(s) s$orientation$orientation, "")
+  expect_identical(ori, c("genes_x_cells", "cells_x_genes"))
+  expect_true(any(grepl("cells x genes and transposed", unlist(rep$samples[[2]]$notes))))
+  expect_false(any(grepl("ambiguous", unlist(rep$warnings))))
+  # neither side looks like genes: kept as genes x cells, with a warning
+  x2 <- x; x2$feats$symbol <- sprintf("feat%03d", seq_along(x$feats$symbol))
+  rd2 <- new_run(data.frame(sample_id = "amb", path = write_table(file.path(td, "amb.csv"), x2), format = ""), tag = "amb")
+  stage(rd2, run_s0)
+  rep2 <- s0_report(rd2)
+  expect_equal(dim(s0_obj(rd2)), c(200, 60))
+  expect_true(isTRUE(rep2$samples[[1]]$orientation$ambiguous))
+  expect_true(any(grepl("amb: table orientation is ambiguous", unlist(rep2$warnings))))
+})
+
+test_that("raw 10x matrices: empty droplets removed at the barcode-rank knee (auto/on/off)", {
+  td <- file.path(tempdir(), sprintf("edrops-%s", basename(tempfile(""))))
+  dir.create(td)
+  x <- raw_10x()
+  h5 <- write_10x_h5(file.path(td, "raw_feature_bc_matrix.h5"), x)
+  rd <- new_run(data.frame(sample_id = "r", path = h5, format = ""), tag = "ed-auto")
+  stage(rd, run_s0)
+  obj <- s0_obj(rd)
+  ed <- s0_report(rd)$samples[[1]]$empty_drops
+  expect_true(ed$applied)
+  expect_match(ed$reason, "raw 10x")
+  expect_equal(ed$kept, 300)
+  expect_equal(ed$dropped, 150000)
+  expect_gte(ed$threshold_umi, 50)
+  expect_lte(ed$threshold_umi, 1000)
+  expect_identical(colnames(obj), paste0("r_", x$bcs[1:300]))
+  expect_true(any(grepl("empty droplets removed", unlist(s0_report(rd)$samples[[1]]$notes))))
+  # off keeps every barcode
+  rd2 <- new_run(data.frame(sample_id = "r", path = h5, format = ""), ingest = list(empty_drops = "off"), tag = "ed-off")
+  stage(rd2, run_s0)
+  expect_equal(ncol(s0_obj(rd2)), 150300)
+  expect_false(s0_report(rd2)$samples[[1]]$empty_drops$applied)
+  # without a raw_* name, auto still triggers on many barcodes with a low median
+  e <- s0_empty_drops(x$m, file.path(td, "sample.h5"), "10x_h5", "auto")
+  expect_true(e$info$applied)
+  expect_match(e$info$reason, "looks unfiltered")
+  # a small mtx: auto leaves it alone, on (YAML bare 'on' reads as TRUE) filters it
+  xs <- raw_10x(n_cells = 100, n_empty = 2000, seed = 2)
+  dir_s <- write_mtx_dir(file.path(td, "small"), xs)
+  rd3 <- new_run(data.frame(sample_id = "s", path = dir_s, format = ""), tag = "ed-small")
+  stage(rd3, run_s0)
+  expect_equal(ncol(s0_obj(rd3)), 2100)
+  expect_match(s0_report(rd3)$samples[[1]]$empty_drops$reason, "looks filtered")
+  rd4 <- new_run(data.frame(sample_id = "s", path = dir_s, format = ""), ingest = list(empty_drops = TRUE), tag = "ed-on")
+  stage(rd4, run_s0)
+  ed4 <- s0_report(rd4)$samples[[1]]$empty_drops
+  expect_true(ed4$applied)
+  expect_equal(ed4$kept, 100)
+  expect_equal(ncol(s0_obj(rd4)), 100)
+  # non-10x formats carry no empty_drops field; bad values stop
+  expect_null(s0_empty_drops(xs$m, "a.csv", "table", "on"))
+  expect_error(.s0_empty_drops_mode(list(ingest = list(empty_drops = "maybe"))), "auto, on, off")
+  expect_identical(.s0_empty_drops_mode(list()), "auto")
 })
 
 test_that("bundled human symbol list is present and plausible", {

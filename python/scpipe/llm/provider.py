@@ -48,8 +48,19 @@ __all__ = [
 ]
 
 JSON_TOOL = "respond_json"
-PROVIDERS = ("anthropic", "openai_compatible", "mock", "bedrock", "vertex")
+PROVIDERS = ("auto", "anthropic", "openai", "nvidia", "openai_compatible", "mock", "bedrock", "vertex")
 DEFAULT_MODEL = "claude-haiku-4-5"
+# Named providers: the adapter they use and the settings filled in when the config leaves them out.
+# `auto` picks the first of AUTO_ORDER whose key variable is set (docs/PIPELINE.md section 5).
+PRESETS: dict[str, dict[str, Any]] = {
+    "anthropic": {"adapter": "anthropic", "api_key_env": "ANTHROPIC_API_KEY", "model": DEFAULT_MODEL},
+    "openai": {"adapter": "openai_compatible", "api_key_env": "OPENAI_API_KEY", "model": "gpt-4.1-mini",
+               "base_url": "https://api.openai.com/v1"},
+    # NVIDIA NIM (build.nvidia.com): OpenAI-compatible; json_object, since json_schema is not on every NIM model.
+    "nvidia": {"adapter": "openai_compatible", "api_key_env": "NVIDIA_API_KEY", "model": "meta/llama-3.3-70b-instruct",
+               "base_url": "https://integrate.api.nvidia.com/v1", "json_mode": "object"},
+}
+AUTO_ORDER = ("anthropic", "openai", "nvidia")
 FLAT_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
              "temperature", "json_mode", "default_usage")
 
@@ -171,19 +182,45 @@ def parse_json_text(text: str) -> Any:
     return None
 
 
+def auto_provider(env: Mapping[str, str] | None = None) -> str | None:
+    """First named provider (Claude, then OpenAI, then NVIDIA) whose API key variable is set."""
+    env = os.environ if env is None else env
+    for name in AUTO_ORDER:
+        if env.get(PRESETS[name]["api_key_env"]):
+            return name
+    return None
+
+
+def apply_preset(settings: Mapping[str, Any], env: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """Settings with ``auto`` resolved and the named provider's defaults filled in where unset.
+
+    A role override that switches provider gets that provider's key variable, base URL and
+    model unless it names its own.
+    """
+    s = {k: v for k, v in settings.items() if v is not None}
+    prov = s.get("provider") or "auto"
+    if prov == "auto":
+        prov = auto_provider(env) or "anthropic"
+    s["provider"] = prov
+    for k, v in PRESETS.get(prov, {}).items():
+        if k != "adapter":
+            s.setdefault(k, v)
+    s.setdefault("model", DEFAULT_MODEL)
+    return s
+
+
 def role_settings(cfg_llm: Mapping[str, Any], role: str) -> dict[str, Any]:
-    """``llm.default`` with ``llm.roles.<role>`` layered on top."""
+    """``llm.default`` with ``llm.roles.<role>`` layered on top, provider defaults filled in."""
     base = dict(cfg_llm.get("default") or {})
     for k in FLAT_KEYS:  # llm: {provider: ..., model: ...} is a shorthand for llm.default
         if k in cfg_llm and k not in base:
             base[k] = cfg_llm[k]
-    base.setdefault("provider", "anthropic")
-    base.setdefault("model", DEFAULT_MODEL)
-    if base["provider"] == "anthropic":
-        base.setdefault("api_key_env", "ANTHROPIC_API_KEY")
-    over = (cfg_llm.get("roles") or {}).get(role) or {}
-    base.update({k: v for k, v in over.items() if v is not None})
-    return base
+    over = {k: v for k, v in ((cfg_llm.get("roles") or {}).get(role) or {}).items() if v is not None}
+    if over.get("provider") and over["provider"] != base.get("provider"):
+        # a different provider: the default's endpoint, key and model belong to the other one
+        base = {k: v for k, v in base.items() if k not in ("api_key_env", "base_url", "model", "json_mode")}
+    base.update(over)
+    return apply_preset(base)
 
 
 def get_provider(cfg_llm: Mapping[str, Any], role: str = "default") -> Provider:
@@ -194,7 +231,7 @@ def get_provider(cfg_llm: Mapping[str, Any], role: str = "default") -> Provider:
         from .anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(s)
-    if kind == "openai_compatible":
+    if kind in ("openai_compatible", "openai", "nvidia"):
         from .openai_provider import OpenAICompatibleProvider
 
         return OpenAICompatibleProvider(s)

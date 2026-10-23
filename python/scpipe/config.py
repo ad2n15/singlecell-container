@@ -82,6 +82,8 @@ DEFAULTS: dict[str, Any] = {
     "resources": {"threads": 8, "max_memory_gb": 64, "gpu_mem_cap_gb": 20, "nice": 10},
     "doublets": {"method": "scrublet"},
     "qc": {"review_action": "keep"},
+    # S0: empty-droplet filtering of raw 10x matrices (auto: when the matrix looks raw).
+    "ingest": {"empty_drops": "auto"},
     "normalization": "lognorm",
     "n_hvg": 2000,
     "engine": "auto",
@@ -141,13 +143,15 @@ DEFAULTS: dict[str, Any] = {
 # model. When present it is validated by `_check_llm` and these defaults are
 # applied by `llm_settings()` (used by the gates), not merged into the file.
 LLM_DEFAULTS: dict[str, Any] = {
-    "default": {"provider": "anthropic", "model": "claude-haiku-4-5", "api_key_env": "ANTHROPIC_API_KEY"},
+    # provider auto: Claude, then OpenAI, then NVIDIA, by which key is set; the named provider fills in
+    # its model, key variable and endpoint (scpipe.llm.provider.PRESETS).
+    "default": {"provider": "auto"},
     "roles": {},
     "budget": {"currency": "GBP", "total_limit": 30, "per_run_limit": 5, "warn_at_pct": 80, "usd_to_gbp": 0.78,
                "ledger_path": "~/.scpipe/ledger.json"},
     "replay": False,
 }
-LLM_PROVIDERS = ("anthropic", "openai_compatible", "mock", "bedrock", "vertex")
+from .llm.provider import PRESETS as LLM_PRESETS, PROVIDERS as LLM_PROVIDERS, auto_provider  # noqa: E402
 # Per-role settings (llm.default, llm.roles.<role>); also accepted flat under llm: as a shorthand for llm.default.
 LLM_ROLE_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
                  "temperature", "json_mode", "default_usage")
@@ -163,6 +167,7 @@ ALLOWED = {
     "doublets.method": ("scrublet", "scdblfinder", "none"),
     "qc.review_action": ("keep", "exclude"),
     "normalization": ("lognorm", "sct"),
+    "ingest.empty_drops": ("auto", "on", "off"),
     "device": ("auto", "cpu", "gpu"),
     "engine": ("auto", "scfast", "seurat"),
     "engine_gpu": ("auto", "scfast", "rapids"),
@@ -189,6 +194,7 @@ _DERIVED_KEYS = (
     "policy_hash",
     "scpipe_version",
     "site_source",
+    "llm_choice",
 )
 _HASH_EXCLUDE = ("run_id", "config_hash", "run_dir", "repo_root", "config_file", "config_dir", "samples_source",
                  "qc_policy_source", "samples", "qc_policy", "scpipe_version",
@@ -276,30 +282,12 @@ def _is_num(x: Any) -> bool:
 def detect_format(path: Path) -> str | None:
     """Best-effort format detection (spec 3.1). ``None`` if unrecognised.
 
-    S0 (R) is authoritative; this only lets the runner validate the sheet early.
+    S0 (R) is authoritative; this only lets the runner validate the sheet early. The rules live
+    in :func:`scpipe.inputs.detect_format`, shared with command-line inputs.
     """
-    name = path.name.lower()
-    if path.is_dir():
-        if any((path / f).exists() for f in ("matrix.mtx", "matrix.mtx.gz")):
-            return "10x_mtx"
-        return None
-    if name.endswith(".h5ad"):
-        return "h5ad"
-    if name.endswith(".h5"):
-        try:
-            import h5py
+    from .inputs import detect_format as _detect
 
-            with h5py.File(path, "r") as f:
-                return "10x_h5" if "matrix" in f else None
-        except Exception:
-            return None
-    if name.endswith((".rds", ".qs2")):
-        return "seurat"
-    if name.endswith(".loom"):
-        return "loom"
-    if re.search(r"\.(csv|tsv|txt)(\.gz)?$", name):
-        return "table"
-    return None
+    return _detect(path)
 
 
 # --------------------------------------------------------------------------
@@ -345,6 +333,9 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
 
     need(isinstance(cfg["project"], str) and bool(cfg["project"].strip()), f"project must be a non-empty string, got {cfg['project']!r}")
     need(_is_int(cfg["seed"]) and cfg["seed"] >= 0, f"seed must be a non-negative integer, got {cfg['seed']!r}")
+    ing = cfg.get("ingest")
+    if isinstance(ing, dict) and isinstance(ing.get("empty_drops"), bool):  # YAML reads a bare on/off as true/false
+        ing["empty_drops"] = "on" if ing["empty_drops"] else "off"
     for key, allowed in ALLOWED.items():
         v = get_key(cfg, key)
         need(isinstance(v, str) and v in allowed, f"{key} must be one of {list(allowed)}, got {v!r}")
@@ -454,11 +445,6 @@ def llm_settings(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
     if not raw:
         return None
     out = copy.deepcopy(LLM_DEFAULTS)
-    # The default api_key_env is Anthropic's; it must not leak into other providers.
-    user_default = {k: v for k, v in raw.items() if k in LLM_ROLE_KEYS}
-    user_default.update(raw.get("default") or {})
-    if user_default.get("provider") not in (None, "anthropic") and "api_key_env" not in user_default:
-        out["default"]["api_key_env"] = None
     for k, v in raw.items():
         if k in LLM_ROLE_KEYS:  # flat shorthand: llm: {provider: ..., model: ...} means llm.default
             out["default"][k] = v
@@ -722,7 +708,47 @@ def _check_samples(header, records, base: Path, problems: list[str], warnings: l
     return out
 
 
-def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> dict[str, Any]:
+def _resolve_llm(cfg: dict[str, Any], override: Mapping[str, Any] | None, warnings: list[str]) -> None:
+    """Fix the run's LLM provider now, so it is recorded and part of the gates' fingerprints.
+
+    No ``llm:`` section and no ``--llm``: use the first key found (Claude, OpenAI, NVIDIA), or
+    rules-only gates when none is set. ``provider: auto`` behaves the same; ``--llm none`` turns
+    the agents off. ``cfg["llm_choice"]`` says what was picked and why.
+    """
+    ov = {k: v for k, v in (override or {}).items() if v}
+    if ov.get("provider") == "none":
+        cfg["llm"], cfg["llm_choice"] = None, "none (--llm none): gates run rules-only"
+        return
+    raw = cfg.get("llm")
+    keys = ", ".join("$" + LLM_PRESETS[p]["api_key_env"] for p in LLM_PRESETS)
+    if raw is None and not ov:
+        if auto_provider() is None:
+            cfg["llm_choice"] = f"none: no API key set ({keys}); gates run rules-only"
+            return
+        raw = {}
+    raw = copy.deepcopy(dict(raw or {}))
+    d = dict(raw.get("default") or {})
+    for k in LLM_ROLE_KEYS:  # fold the flat shorthand into default
+        if k in raw and k not in d:
+            d[k] = raw.pop(k)
+    d.update(ov)
+    prov = d.get("provider") or "auto"
+    why = "set in the config" + (" / --llm" if ov else "")
+    if prov == "auto":
+        prov = auto_provider()
+        if prov is None:
+            cfg["llm"], cfg["llm_choice"] = None, f"none: provider auto but no API key set ({keys}); gates run rules-only"
+            warnings.append(f"llm: provider auto found no API key ({keys}); the gates run rules-only")
+            return
+        why = f"auto: ${LLM_PRESETS[prov]['api_key_env']} is set"
+    d["provider"] = prov
+    raw["default"] = d
+    cfg["llm"] = raw
+    cfg["llm_choice"] = f"{prov} ({why})"
+
+
+def load_config(config_path: str | Path, run_dir: str | Path | None = None,
+                llm_override: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Load and validate a run configuration; returns the resolved config dict.
 
     Raises :class:`ConfigError` listing every problem. Non-fatal remarks are
@@ -832,6 +858,7 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None) -> d
     cfg["policy_hash"] = policy.hash
     cfg["repo_root"] = str(REPO_ROOT)
     cfg["scpipe_version"] = __version__
+    _resolve_llm(cfg, llm_override, warnings)
     cfg["_warnings"] = warnings
     cfg["_policy"] = policy
     return cfg

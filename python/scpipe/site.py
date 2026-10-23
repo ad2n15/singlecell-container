@@ -69,10 +69,13 @@ SCHEDULERS: dict[str, dict[str, Any]] = {
 
 LLM_ENDPOINTS = {
     "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
     "openai_compatible": None,  # base_url from config
 }
 OPENTARGETS_URL = "https://api.platform.opentargets.org/api/v4/graphql"
-DEFAULT_KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai_compatible": "OPENAI_API_KEY"}
+DEFAULT_KEY_ENV = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY", "nvidia": "NVIDIA_API_KEY",
+                   "openai_compatible": "OPENAI_API_KEY"}
 
 
 def _utc() -> str:
@@ -527,28 +530,17 @@ def submit_split(cfg: Mapping[str, Any], run_dir: Path, stage_ids: list[str], *,
 
 
 def _llm_section(cfg: Mapping[str, Any]) -> dict[str, Any] | None:
-    """``llm:`` normalised to the DESIGN 4.8 shape (``default``, ``roles``, ``budget``, ``replay``), or None when unset.
+    """``llm:`` as the gates see it (``config.llm_settings``), or None when the gates run rules-only.
 
-    The older flat shape (``llm.provider`` / ``llm.model`` / ``llm.api_key_env`` /
-    ``llm.base_url``) is folded into ``default``. Budget defaults come from
-    ``config.LLM_DEFAULTS`` when that exists. ``api_key_env`` is left unset
-    unless the user set it, so the doctor can pick the provider's own default.
+    ``default`` has the provider resolved and its preset (model, key variable, endpoint) filled in.
     """
     raw = cfg.get("llm")
     if not raw or not isinstance(raw, Mapping):
         return None
-    defaults = getattr(cfgmod, "LLM_DEFAULTS", {}) or {}
-    out: dict[str, Any] = {"default": dict(raw.get("default") or {}), "roles": dict(raw.get("roles") or {}),
-                           "budget": dict(defaults.get("budget") or {}), "replay": raw.get("replay", False)}
-    out["budget"].update(raw.get("budget") or {})
-    for k in ("provider", "model", "api_key_env", "base_url"):
-        if k in raw and k not in out["default"]:
-            out["default"][k] = raw[k]
-    out["default"].setdefault("provider", (defaults.get("default") or {}).get("provider") or "anthropic")
-    out["default"].setdefault("model", (defaults.get("default") or {}).get("model") or "claude-haiku-4-5")
-    for k in ("ledger_path", "script"):
-        if k in raw:
-            out[k] = raw[k]
+    out = cfgmod.llm_settings(cfg) or {}
+    from .llm.provider import role_settings
+
+    out["default"] = role_settings(out, "default")
     return out
 
 
@@ -702,7 +694,9 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
     # LLM (config shape of DESIGN 4.8: llm.default.{provider,model,api_key_env,base_url}, llm.roles, llm.budget)
     llm_cfg = _llm_section(cfg)
     if llm_cfg is None:
-        add("llm", "provider", True, "llm: not configured (gates run rules-only with a human review)", required=False)
+        why = (cfg or {}).get("llm_choice") or "llm: not configured"
+        add("llm", "provider", True, f"{why} (gates run rules-only with a human review)" if "rules-only" not in why else why,
+            required=False)
         llm_cfg = {}
         provider = None
     else:
@@ -715,6 +709,8 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         add("llm", "provider", False, f"{provider}: not implemented yet (use anthropic or openai_compatible)", required=False)
     else:
         dflt = llm_cfg.get("default") or {}
+        add("llm", "provider", True, f"{provider}, model {dflt.get('model')}"
+            + (f" ({cfg['llm_choice']})" if (cfg or {}).get("llm_choice") else ""), required=False)
         key_env = dflt.get("api_key_env") or DEFAULT_KEY_ENV.get(provider, "ANTHROPIC_API_KEY")
         have_key = bool(os.environ.get(key_env))
         add("llm", "api key", have_key, f"${key_env} is {'set' if have_key else 'not set'} (provider {provider})", required=False)
@@ -733,7 +729,7 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
                     prov = mod.get_provider(llm_cfg, "doctor")
                     resp = prov.complete(system="Reply by calling the tool.", messages=[{"role": "user", "content": "ping"}],
                                          tools=[{"name": "ping", "description": "reply", "input_schema": {"type": "object", "properties": {}}}],
-                                         max_tokens=16)
+                                         max_tokens=256)
                     used = getattr(resp, "tool_calls", None)
                     add("llm", "tool-use test", bool(used) or bool(getattr(resp, "text", "")),
                         f"ok: stop_reason={getattr(resp, 'stop_reason', '?')}, tool_calls={len(used or [])}", required=False)

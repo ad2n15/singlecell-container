@@ -87,6 +87,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+import yaml
+
 from . import config as cfgmod
 from . import site as sitemod
 from .config import ConfigError, canonical_json, get_key
@@ -116,7 +118,7 @@ SAMPLE_BYTES = 1024**2
 # --------------------------------------------------------------------------
 
 STAGE_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
-    "S0": ("object_format", "samples_resolved", "sample_columns"),
+    "S0": ("object_format", "samples_resolved", "sample_columns", "ingest"),
     "S1a": ("object_format", "doublets.method", "engine", "engine_gpu", "policy.protected_populations"),
     "S1b": ("doublets.method", "engine", "engine_gpu", "seed", "device", "resources.gpu_mem_cap_gb"),
     "S1c": ("policy",),
@@ -1141,8 +1143,23 @@ def _launch_detached(argv: list[str], run_dir: Path, run_id: str, out) -> int:
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="scpipe", description="scpipe pipeline runner (S0-S2)")
     sub = p.add_subparsers(dest="cmd", required=True)
-    r = sub.add_parser("run", help="validate the config and run the stages")
-    r.add_argument("--config", required=True)
+    r = sub.add_parser("run", help="validate the config and run the stages",
+                       description="Run the pipeline on data files (scpipe run a.h5 b.rds c.h5ad), a folder, a "
+                                   "samples sheet, or a config file (scpipe run --config config.yaml).")
+    r.add_argument("inputs", nargs="*", metavar="INPUT",
+                   help="data files or folders (10x h5/mtx, h5ad, Seurat/SCE rds/qs2, loom, csv/tsv counts), "
+                        "or one samples.csv; the format is detected")
+    r.add_argument("--config", default=None, help="config.yaml (optional with INPUTs: its settings still apply)")
+    r.add_argument("--samples", default=None, metavar="CSV", help="samples sheet (same as giving it as the only INPUT)")
+    r.add_argument("--out", default=None, metavar="DIR",
+                   help="output folder for a run from INPUTs (default ./scpipe_<name>_<date>)")
+    r.add_argument("--name", default=None, help="run name: project name and default output folder label")
+    r.add_argument("--meta", action="append", default=None, metavar="NAME=VALUE",
+                   help="sample metadata column added to every input sample (repeatable), e.g. condition=control")
+    r.add_argument("--llm", default=None, choices=("auto", "anthropic", "openai", "nvidia", "none"),
+                   help="LLM for the review agents (default: the config, else the first key set of "
+                        "ANTHROPIC_API_KEY, OPENAI_API_KEY, NVIDIA_API_KEY; none = rules-only gates)")
+    r.add_argument("--llm-model", default=None, metavar="MODEL", help="model name for --llm (default: the provider's)")
     r.add_argument("--run-dir", default=None, help="overrides run_dir in the config")
     r.add_argument("--until", default=None, metavar="STAGE", help="stop after this stage")
     r.add_argument("--detach", action="store_true", help="run inside tmux (or nohup) and return")
@@ -1195,6 +1212,47 @@ def _submit_mode(mode: str, resolved: dict[str, Any], rd: Path, stages: Sequence
     return 0
 
 
+def _run_config_path(a: argparse.Namespace) -> tuple[str, str | None]:
+    """(config path, run_dir override) for ``scpipe run``: the given config, or one written from INPUTs."""
+    from . import inputs as inmod
+
+    paths = list(a.inputs) + ([a.samples] if a.samples else [])
+    if not paths:
+        if a.config is None:
+            raise ConfigError("give data files (scpipe run a.h5 b.rds ...), a samples sheet, or --config config.yaml")
+        if a.out or a.meta:
+            raise ConfigError("--out and --meta apply to runs from data files; with --config use --run-dir")
+        return a.config, a.run_dir
+    if a.run_dir and a.out:
+        raise ConfigError("give either --out or --run-dir, not both")
+    rows, sheet = inmod.collect_inputs(paths)
+    meta = inmod.parse_meta(a.meta)
+    config_path = Path(a.config).expanduser() if a.config else None
+    out = a.out or a.run_dir
+    if out is None and config_path is not None:
+        try:
+            raw = yaml.safe_load(config_path.read_text()) or {}
+        except (OSError, yaml.YAMLError) as e:
+            raise ConfigError(f"cannot read --config {config_path}: {e}") from e
+        if isinstance(raw, dict) and isinstance(raw.get("run_dir"), str):
+            out = str((config_path.resolve().parent / Path(raw["run_dir"]).expanduser()).resolve())
+    if out is None:
+        if sheet is not None:
+            import csv as _csv
+            with open(sheet, encoding="utf-8-sig", newline="") as fh:
+                rows_for_name = [r for r in _csv.DictReader(fh)]
+        else:
+            rows_for_name = rows
+        out_dir = inmod.default_out_dir(rows_for_name, a.name)
+    else:
+        out_dir = Path(out).expanduser().resolve()
+    inmod.check_out_dir(out_dir)
+    overrides = {"project": a.name} if a.name else {}
+    path = inmod.synthesize_config(out_dir, rows=rows, sheet=sheet, config_path=config_path, meta=meta,
+                                   overrides=overrides)
+    return str(path), None
+
+
 def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None, out=None) -> int:
     out = out or sys.stdout
     a = _parser().parse_args(argv)
@@ -1202,7 +1260,8 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
         _load_env_file(a.env_file)
     try:
         if a.cmd == "run":
-            cfg = cfgmod.load_config(a.config, a.run_dir)
+            llm_override = {"provider": a.llm, "model": a.llm_model} if (a.llm or a.llm_model) else None
+            cfg = cfgmod.load_config(*_run_config_path(a), llm_override=llm_override)
             for w in cfg.get("_warnings", []):
                 print(f"scpipe: warning: {w}", file=out)
             _stage_index(_registry(stages), a.until)
@@ -1215,6 +1274,10 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                 return _submit_mode(mode, resolved, rd, _registry(stages), a.until, out)
             if a.detach:
                 args = ["run", "--config", str(cfg["config_file"]), "--run-dir", str(rd), "--execution", "direct"]
+                if a.llm:
+                    args += ["--llm", a.llm]
+                if a.llm_model:
+                    args += ["--llm-model", a.llm_model]
                 if a.until:
                     args += ["--until", a.until]
                 if a.no_gates:

@@ -8,7 +8,10 @@
 # Per-sample readers return a common structure:
 #   list(counts = dgCMatrix genes x cells (colnames = raw barcodes),
 #        symbol = character (one per row), gene_id = character ("" unknown),
-#        meta = data.frame (rows = cells) or NULL, notes = character())
+#        meta = data.frame (rows = cells) or NULL, notes = character(),
+#        optional: warnings = character(), orientation = list (tables))
+# Raw 10x matrices are filtered for empty droplets per sample before
+# prefixing (config ingest.empty_drops: auto | on | off).
 
 .S0_FORMATS <- c("10x_h5", "10x_mtx", "h5ad", "seurat", "loom", "table")
 .S0_RESERVED_META <- c("orig.ident", "nCount_RNA", "nFeature_RNA", "sample_id", "ident",
@@ -321,9 +324,33 @@ s0_read_loom <- function(path) {
   list(counts = m, symbol = sym, gene_id = gid, meta = NULL, notes = character())
 }
 
-# Dense genes x cells table: header row of cell names; first column gene
-# names (or first two columns gene ID + symbol when both are non-numeric).
-s0_read_table <- function(path) {
+# Fraction of names that look like genes: known human symbols (case-insensitive,
+# so mouse-style Cd3e counts) or Ensembl gene IDs of any species. Samples at
+# most n names to stay fast on wide tables.
+.s0_gene_like_fraction <- function(x, repo, n = 2000L) {
+  x <- as.character(x)
+  x <- x[!is.na(x) & nzchar(x)]
+  if (!length(x)) return(0)
+  if (length(x) > n) x <- x[unique(round(seq(1, length(x), length.out = n)))]
+  hs <- toupper(.s0_human_symbols(repo))
+  mean(toupper(x) %in% hs | grepl("^ENS[A-Z]*G[0-9]", x, ignore.case = TRUE))
+}
+
+# Table orientation from the header names vs the first-column values: the side
+# that looks like genes (>= 5% gene-like and >= 5x the other side) holds genes.
+.s0_table_orientation <- function(header, first_col, repo) {
+  fh <- .s0_gene_like_fraction(header, repo)
+  fc <- .s0_gene_like_fraction(first_col, repo)
+  o <- if (fh >= 0.05 && fc < fh / 5) "cells_x_genes"
+       else if (fc >= 0.05 && fh < fc / 5) "genes_x_cells" else "ambiguous"
+  list(orientation = o, header_gene_fraction = round(fh, 4), first_column_gene_fraction = round(fc, 4))
+}
+
+# Dense table: genes x cells (header row of cell names; first column gene
+# names, or first two columns gene ID + symbol when both are non-numeric) or
+# cells x genes (header row of gene names; first column cell names), detected
+# by .s0_table_orientation; ambiguous tables are read as genes x cells.
+s0_read_table <- function(path, repo = ".") {
   sep <- if (grepl("\\.csv(\\.gz)?$", tolower(path))) "," else "\t"
   if (scp_has_pkg("data.table") && (!grepl("\\.gz$", path) || scp_has_pkg("R.utils"))) {
     df <- data.table::fread(path, sep = sep, header = TRUE, data.table = FALSE, check.names = FALSE)
@@ -339,6 +366,29 @@ s0_read_table <- function(path) {
   vals <- df[-seq_len(n_lead)]
   nonnum <- !vapply(vals, is.numeric, TRUE)
   if (any(nonnum)) scp_stop("table ", path, ": non-numeric cell columns, e.g. ", paste(head(names(vals)[nonnum], 3), collapse = ", "))
+  notes <- character(); warns <- character()
+  if (n_lead == 2L) {
+    ori <- list(orientation = "genes_x_cells", reason = "two leading gene columns (ID + symbol)")
+  } else {
+    ori <- .s0_table_orientation(colnames(vals), lead[[1]], repo)
+    ori$reason <- sprintf("gene-like names: %.0f%% of the header, %.0f%% of the first column",
+                          100 * ori$header_gene_fraction, 100 * ori$first_column_gene_fraction)
+  }
+  if (identical(ori$orientation, "cells_x_genes")) {
+    m <- Matrix::Matrix(t(as.matrix(vals)), sparse = TRUE)
+    m <- as(as(as(m, "CsparseMatrix"), "generalMatrix"), "dMatrix")
+    sym <- colnames(vals)
+    gid <- ifelse(grepl(.S0_ENSG_RE, sym), sym, "")
+    dimnames(m) <- list(NULL, lead[[1]])
+    notes <- c(notes, paste0("table read as cells x genes and transposed (", ori$reason, ")"))
+    return(list(counts = m, symbol = sym, gene_id = gid, meta = NULL, notes = notes, warnings = warns,
+                orientation = ori))
+  }
+  if (identical(ori$orientation, "ambiguous")) {
+    warns <- c(warns, paste0("table orientation is ambiguous (", ori$reason, "); read as genes x cells"))
+    ori$orientation <- "genes_x_cells"; ori$ambiguous <- TRUE
+  }
+  notes <- c(notes, paste0("table read as genes x cells (", ori$reason, ")"))
   m <- Matrix::Matrix(as.matrix(vals), sparse = TRUE)
   m <- as(as(as(m, "CsparseMatrix"), "generalMatrix"), "dMatrix")
   if (n_lead == 2L) {
@@ -349,17 +399,17 @@ s0_read_table <- function(path) {
     gid <- ifelse(grepl(.S0_ENSG_RE, sym), sym, "")
   }
   dimnames(m) <- list(NULL, colnames(vals))
-  list(counts = m, symbol = sym, gene_id = gid, meta = NULL, notes = character())
+  list(counts = m, symbol = sym, gene_id = gid, meta = NULL, notes = notes, warnings = warns, orientation = ori)
 }
 
-s0_read_sample <- function(path, format) {
+s0_read_sample <- function(path, format, repo = ".") {
   switch(format,
          "10x_h5" = s0_read_10x_h5(path),
          "10x_mtx" = s0_read_10x_mtx(path),
          "h5ad" = s0_read_h5ad(path),
          "seurat" = s0_read_seurat(path),
          "loom" = s0_read_loom(path),
-         "table" = s0_read_table(path),
+         "table" = s0_read_table(path, repo),
          scp_stop("unknown format '", format, "' (allowed: ", paste(.S0_FORMATS, collapse = ", "), ")"))
 }
 
@@ -463,6 +513,94 @@ s0_human_fraction <- function(totals, symbol, gene_id, repo, n_top = 1000L) {
 }
 
 # --------------------------------------------------------------------------
+# Empty droplets (raw 10x matrices)
+# --------------------------------------------------------------------------
+
+# ingest.empty_drops: auto | on | off (missing -> auto). YAML 1.1 reads bare
+# on/off as booleans, so TRUE/FALSE map to on/off.
+.s0_empty_drops_mode <- function(cfg) {
+  v <- cfg$ingest$empty_drops %||% "auto"
+  if (is.logical(v) && length(v) == 1 && !is.na(v)) v <- if (v) "on" else "off"
+  v <- tolower(as.character(v))
+  if (length(v) != 1 || !(v %in% c("auto", "on", "off")))
+    scp_stop("config ingest.empty_drops must be one of auto, on, off (got '", paste(v, collapse = ","), "')")
+  v
+}
+
+# Barcode-rank knee on the column totals. The curve is log10(UMI) vs
+# log10(rank) for barcodes with UMI >= floor_umi (plus the first barcode below
+# the floor, clamped to it, so a clean gap still ends in a cliff), resampled on
+# a log-spaced rank grid and smoothed with a 5-point moving average.
+#   knee:      kneedle point, max distance above the chord from the first
+#              point to the floor point (end of the cell plateau);
+#   threshold: midpoint of the steepest segment at or past the knee (the
+#              cells -> empties cliff, cf. DropletUtils' inflection), capped
+#              at the knee UMI and never below min_umi.
+# Returns NULL when there are too few barcodes above the floor for a curve.
+s0_barcode_knee <- function(tot, floor_umi = 10, min_umi = 50, n_grid = 1000L) {
+  s <- sort(as.numeric(tot), decreasing = TRUE)
+  n <- sum(s >= floor_umi)
+  if (n < 20) return(NULL)
+  n_pts <- min(length(s), n + 1L)
+  ranks <- unique(round(10^seq(0, log10(n_pts), length.out = n_grid)))
+  if (ranks[length(ranks)] != n_pts) ranks <- c(ranks, n_pts)
+  x <- log10(ranks)
+  y <- log10(pmax(s[ranks], floor_umi))
+  ys <- y
+  if (length(y) >= 5) {
+    f <- stats::filter(y, rep(1 / 5, 5), sides = 2)
+    ys[!is.na(f)] <- f[!is.na(f)]
+  }
+  k <- length(x)
+  # distance above the chord (first point -> last point), up to a constant factor
+  d <- (ys - ys[1]) * (x[k] - x[1]) - (x - x[1]) * (ys[k] - ys[1])
+  ik <- which.max(d)
+  knee_umi <- s[ranks[ik]]
+  if (ik >= k) return(list(knee_umi = knee_umi, threshold = max(min_umi, knee_umi), knee_rank = ranks[ik]))
+  seg <- ik:(k - 1L)
+  slope <- (ys[seg + 1L] - ys[seg]) / pmax(x[seg + 1L] - x[seg], 1e-12)
+  j <- seg[which.min(slope)]
+  thr <- 10^((ys[j] + ys[j + 1L]) / 2)
+  thr <- max(min_umi, min(thr, knee_umi))
+  list(knee_umi = knee_umi, threshold = ceiling(thr), knee_rank = ranks[ik], steepest_slope = round(min(slope), 3))
+}
+
+# Decide and apply empty-droplet filtering for one 10x sample (before barcode
+# prefixing). Works on column sums, then subsets columns.
+s0_empty_drops <- function(m, path, format, mode) {
+  info <- list(applied = FALSE, mode = mode, reason = NULL, threshold_umi = NULL,
+               kept = ncol(m), dropped = 0L)
+  if (!(format %in% c("10x_h5", "10x_mtx"))) return(NULL)
+  if (mode == "off") { info$reason <- "ingest.empty_drops is off"; return(list(counts = m, info = info)) }
+  tot <- Matrix::colSums(m)
+  raw_name <- grepl("raw_feature_bc_matrix|raw_gene_bc_matrices", path, ignore.case = TRUE)
+  med <- if (length(tot)) stats::median(tot) else 0
+  if (mode == "auto") {
+    if (raw_name) info$reason <- "auto: path names a raw 10x matrix"
+    else if (length(tot) > 1e5 && med < 10)
+      info$reason <- sprintf("auto: %d barcodes with median %g UMIs looks unfiltered", length(tot), med)
+    else { info$reason <- "auto: matrix looks filtered (no raw_* path, <= 100,000 barcodes or median UMI >= 10)"
+           return(list(counts = m, info = info)) }
+  } else info$reason <- "ingest.empty_drops is on"
+  kn <- s0_barcode_knee(tot)
+  if (is.null(kn)) {
+    info$reason <- paste0(info$reason, "; fewer than 20 barcodes with >= 10 UMIs, nothing filtered")
+    return(list(counts = m, info = info))
+  }
+  keep <- tot >= kn$threshold
+  if (sum(keep) < 10) {
+    info$reason <- paste0(info$reason, sprintf("; only %d barcodes above the knee (%g UMIs), nothing filtered",
+                                               sum(keep), kn$threshold))
+    return(list(counts = m, info = info))
+  }
+  info$applied <- TRUE
+  info$threshold_umi <- kn$threshold
+  info$knee_umi <- kn$knee_umi
+  info$kept <- sum(keep); info$dropped <- sum(!keep)
+  list(counts = m[, keep, drop = FALSE], info = info)
+}
+
+# --------------------------------------------------------------------------
 # Stage
 # --------------------------------------------------------------------------
 
@@ -473,6 +611,7 @@ run_s0 <- function(cfg, repo) {
   sheet <- s0_read_samples(samples_file, base_dir)
   scp_log("S0: ", nrow(sheet), " sample(s) from ", samples_file)
   extra_cols <- setdiff(colnames(sheet), c("sample_id", "path", "format"))
+  ed_mode <- .s0_empty_drops_mode(cfg)
   timings <- list()
 
   samples <- list()
@@ -484,7 +623,7 @@ run_s0 <- function(cfg, repo) {
     if (detected) fmt <- tryCatch(s0_detect_format(sheet$path[i]),
                                   error = function(e) scp_stop("sample ", sid, ": ", conditionMessage(e)))
     t0 <- proc.time()[["elapsed"]]
-    s <- tryCatch(s0_read_sample(sheet$path[i], fmt),
+    s <- tryCatch(s0_read_sample(sheet$path[i], fmt, repo),
                   error = function(e) scp_stop("sample ", sid, " (", fmt, ", ", sheet$path[i], "): ", conditionMessage(e)))
     timings[[sid]] <- round(proc.time()[["elapsed"]] - t0, 3)
     m <- s$counts
@@ -497,6 +636,18 @@ run_s0 <- function(cfg, repo) {
                "); S0 needs raw UMI counts, not normalised data. Hint: ", .s0_raw_hint(fmt))
     }
     m <- Matrix::drop0(m)
+    notes <- s$notes
+    ed <- s0_empty_drops(m, sheet$path[i], fmt, ed_mode)
+    if (!is.null(ed)) {
+      m <- ed$counts
+      e <- ed$info
+      notes <- c(notes, if (e$applied)
+        sprintf("empty droplets removed (%s): kept %d of %d barcodes with >= %g UMIs (knee %g UMIs)",
+                e$reason, e$kept, e$kept + e$dropped, e$threshold_umi, e$knee_umi)
+        else paste0("no empty-droplet filtering (", e$reason, ")"))
+      if (e$applied) scp_log(sprintf("sample %s: empty droplets: kept %d, dropped %d barcodes (threshold %g UMIs)",
+                                     sid, e$kept, e$dropped, e$threshold_umi))
+    }
     bcs <- colnames(m)
     if (anyDuplicated(bcs)) {
       warn <- c(warn, sprintf("%d duplicated barcodes made unique", sum(duplicated(bcs))))
@@ -509,6 +660,7 @@ run_s0 <- function(cfg, repo) {
     dup_sym <- unique(sym[duplicated(sym)])
     has_ids <- length(gid) > 0 && all(nzchar(gid)) && !anyDuplicated(gid)
     if (length(s$notes)) warn <- c(warn, s$notes[grepl("dropped|could not|several", s$notes)])
+    warn <- c(warn, as.character(s$warnings))
     tot <- Matrix::rowSums(m)
     hf <- s0_human_fraction(tot, sym, gid, repo)
     if (!is.na(hf$fraction) && hf$fraction < 0.5)
@@ -523,8 +675,10 @@ run_s0 <- function(cfg, repo) {
                            has_gene_ids = has_ids,
                            duplicate_symbols = list(n = length(dup_sym), examples = head(dup_sym, 10)),
                            human_fraction_top_genes = hf$fraction,
-                           notes = as.list(s$notes), warnings = as.list(warn),
+                           notes = as.list(notes), warnings = as.list(warn),
                            read_seconds = timings[[sid]])
+    if (!is.null(s$orientation)) reports[[sid]]$orientation <- s$orientation
+    if (!is.null(ed)) reports[[sid]]$empty_drops <- ed$info
   }
 
   # ---- gene harmonisation

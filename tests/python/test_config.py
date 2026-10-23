@@ -197,7 +197,7 @@ def test_unknown_keys_are_warnings(tmp_path):
     cfg = C.load_config(proj / "config.yaml")
     w = "\n".join(cfg["_warnings"])
     assert "'llm'" in w and "resources.gpus" in w and "'run_id'" in w
-    assert cfg["llm"] == {"provider": "anthropic"}
+    assert cfg["llm"] == {"default": {"provider": "anthropic"}}  # the flat shorthand is folded into default
     assert "run_id" not in cfg
 
 

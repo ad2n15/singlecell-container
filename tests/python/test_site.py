@@ -372,7 +372,7 @@ def test_doctor_checks_llm_mock_and_tool_use(tmp_path, monkeypatch):
     no_scheduler(tmp_path, monkeypatch)
     ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "mock"}}}))
     assert ch[("llm", "provider")]["ok"] and "mock" in ch[("llm", "provider")]["detail"]
-    # with a key, the 1-token tool-use test runs through scpipe.llm.get_provider when it exists;
+    # with a key, the tool-use test runs through scpipe.llm.get_provider when it exists;
     # a provider that fails must give a failed, non-required check rather than an exception
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(S, "_llm_provider_module", lambda: None)
@@ -394,7 +394,7 @@ def test_doctor_checks_llm_mock_and_tool_use(tmp_path, monkeypatch):
         def get_provider(cfg_llm, role):
             class P:
                 def complete(self, **kw):
-                    assert kw["tools"] and kw["max_tokens"] <= 16
+                    assert kw["tools"] and kw["max_tokens"] <= 256
                     return type("R", (), {"tool_calls": [{"name": "ping"}], "text": "", "stop_reason": "tool_use"})()
 
             return P()

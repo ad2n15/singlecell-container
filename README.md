@@ -49,7 +49,14 @@ pip install "scpipe[all]" --extra-index-url https://mukeshkbj.github.io/singlece
 The R stages then run in the image when the site file names it (`container.image`; `scpipe init-site`
 prints the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
 
-Copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
+**Run it** on your data files directly (formats are detected; one sample per file or folder):
+
+```bash
+export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY or NVIDIA_API_KEY; omit for rules-only gates
+scpipe run donorA.h5 donorB.rds donorC.h5ad --meta condition=control
+```
+
+Or copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
 `samples.csv` and `qc_policy.yaml`, then:
 
 ```bash

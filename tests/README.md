@@ -25,6 +25,13 @@ No GPU is needed: `gpu_core` runs with `--device cpu` in the round-trip, and the
 GPU run uses `gpu_core`'s CPU fallback (see below). The optional R packages harmony, presto,
 scDblFinder, BPCells and qs2 are not needed by any test.
 
+Inside the scpipe image, clear the image's own settings first, since they change paths the tests
+check (`SCPIPE_REPO_ROOT` is read when `scpipe` is imported):
+
+```bash
+env -u SCPIPE_REPO_ROOT -u SCPIPE_IN_CONTAINER -u SCPIPE_CELLTYPIST_MODELS PYTHONPATH=$PWD/python python -m pytest tests/python
+```
+
 ## Fixture
 
 `tests/fixtures/pbmc_like/` holds a seeded synthetic dataset of 500 cells and 800 genes
