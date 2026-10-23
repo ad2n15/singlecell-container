@@ -32,20 +32,22 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 
 ## Quick start
 
-**R** 4.3+ with Seurat 5, and **Python** 3.12+:
-
-```r
-install.packages(c("Seurat", "SeuratObject", "hdf5r", "Matrix", "jsonlite", "digest", "yaml",
-                   "leidenbase", "uwot", "DESeq2", "limma"))
-install.packages(c("harmony", "qs2", "presto"))   # optional
-```
+**One image with everything** (R + Seurat 5, the Rust engine built for CUDA, RAPIDS, CellTypist;
+nothing to compile, GPU optional):
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e "python[harmony,llm,report,test]"
-pip install -e "python[gpu]"                      # NVIDIA GPU, CUDA 12
-# optional Rust engine (needs cargo >= 1.80): R CMD INSTALL rust/scfast-r ; see docs/INSTALL.md
+apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest      # HPC
+docker pull ghcr.io/mukeshkbj/scpipe:latest                             # workstation / cloud
 ```
+
+**Python side only** (prebuilt wheels, no Rust or R needed for the Python steps):
+
+```bash
+pip install "scpipe[all]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple --extra-index-url https://pypi.nvidia.com
+```
+
+The R stages then run in the image when the site file names it (`container.image`; `scpipe init-site`
+prints the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 Copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
 `samples.csv` and `qc_policy.yaml`, then:

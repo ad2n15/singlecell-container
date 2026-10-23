@@ -17,11 +17,59 @@ On a GPU plan `engine_gpu: auto | scfast | rapids` picks between the Rust CUDA b
 only when `scfastR` was built with `--features cuda` and a device is visible. Rust is needed only
 to build `scfast`; without it `engine: auto` falls back to Seurat.
 
-**The CUDA and cuGraph code has never run on a GPU.** It was written and compiled in a workspace
-without one; the kernels were checked by CPU emulation and the cuGraph C-API bindings are
-hand-written against the 24.x headers. Section 1b lists the acceptance tests to run on the L4
-first. Until they pass, leave `engine_gpu: auto` (which stays on rapids until `scfastR` reports a
-CUDA build) or set `engine_gpu: rapids`.
+The CUDA and cuGraph backend has run on an H100 (bench/results/FINAL.md) and on the Iridis X L4
+(PBMC 3k through bench/run_py.py: PC similarity 1.0, kNN overlap 0.998 and ARI 0.91 against
+Seurat). The R side (`scfastR` with `--features cuda`) has not been run through the pipeline on a
+GPU yet, so `engine_gpu: auto` stays on rapids until `scfastR` reports a CUDA build.
+
+## 0. Quick install (recommended)
+
+**Everything, in one image.** R with Seurat 5 and the Bioconductor packages, scpipe, the Rust
+engine built with CUDA and cuGraph (`scfast`, `scfastR`), RAPIDS (cuGraph, cuVS, CuPy,
+rapids-singlecell) and CellTypist's default model, on NVIDIA's RAPIDS base image. Nothing to
+compile; it runs on a GPU or, slower, without one.
+
+```bash
+# HPC (Apptainer / Singularity): pull once, then point the site file at the .sif
+apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
+apptainer exec --nv scpipe.sif scpipe doctor
+apptainer exec --nv scpipe.sif scpipe run --config config.yaml --detach
+
+# Workstation or cloud VM (Docker with the NVIDIA container toolkit)
+docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" ghcr.io/mukeshkbj/scpipe:latest run --config config.yaml
+```
+
+To keep `scpipe` on the host and run only the stages in the image, set in the site file
+(`scpipe init-site` prints these lines when it finds Apptainer or Docker):
+
+```yaml
+container:
+  runtime: apptainer
+  image: /path/to/scpipe.sif          # or docker://ghcr.io/mukeshkbj/scpipe:<version>
+  options: ["--nv"]
+```
+
+Each stage then runs in the image with the run directory, the config directory and the sample
+folders bound; `scpipe doctor` stops asking for R packages on the host and points at the image.
+Check an image after pulling it with
+`apptainer exec --nv scpipe.sif bash /opt/scpipe/containers/smoke_test.sh` (the whole pipeline on
+the test fixture, about 10 minutes on a CPU).
+
+**Python side only (no R, no compiler).** Prebuilt `scfast` wheels (Linux x86_64 with CUDA and
+cuGraph loaded at run time; Linux and macOS ARM for the CPU) and `scpipe`:
+
+```bash
+pip install "scpipe[all]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple \
+    --extra-index-url https://pypi.nvidia.com
+```
+
+`[all]` adds Harmony, the report, the LLM clients and the CUDA 12 GPU stack; use plain `scpipe` on
+a machine without an NVIDIA GPU. The R stages (S0, S1a, S2, S4) still need R: use the image
+through `container:` as above, or install R by hand (sections 1 and 2;
+`Rscript containers/install_r_packages.R` installs every package the stages use).
+
+The wheels and the image are built and published by `.github/workflows/release.yml` on every
+`v*` tag. The sections below build everything from source.
 
 ## 1. Iridis X, L4 login node
 
@@ -41,23 +89,24 @@ module avail 2>&1 | grep -i -E "^R/|python|apptainer|rust|cuda"   # confirm modu
 cd /scratch/$USER && git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
 module load R python                      # confirm names/versions: R >= 4.3, Python >= 3.12
 python3 -m venv /scratch/$USER/venv-scpipe && source /scratch/$USER/venv-scpipe/bin/activate
-pip install -e "python[harmony,llm,report,test,scfast]"
-pip install -e "python[gpu]"              # rapids-singlecell, CUDA 12; large download
 
-# R packages (user library on scratch)
+# Rust engine first (scpipe depends on scfast): needs cargo >= 1.80. On Iridis keep the
+# toolchain on scratch (export RUSTUP_HOME=/scratch/$USER/rustup CARGO_HOME=/scratch/$USER/cargo).
+curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source "${CARGO_HOME:-$HOME/.cargo}/env"
+pip install "maturin>=1.9.4,<2"
+maturin develop --release --features cuda,cugraph -m rust/scfast-py/Cargo.toml   # scfast for Python
+pip install -e "python[harmony,llm,report,dev]"
+pip install -e "python[gpu]" --extra-index-url https://pypi.nvidia.com            # CUDA 12; large download
+
+# R packages (user library on scratch), then scfastR
 mkdir -p /scratch/$USER/Rlib && export R_LIBS_USER=/scratch/$USER/Rlib
-Rscript -e 'install.packages(c("Seurat","SeuratObject","hdf5r","Matrix","jsonlite","digest","yaml","optparse","leidenbase","uwot","harmony","qs2","presto"))'
-Rscript -e 'BiocManager::install(c("DESeq2","limma"))'
-
-# Rust engine (optional but recommended): needs cargo >= 1.80
-curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source $HOME/.cargo/env
-R CMD INSTALL rust/scfast-r                                       # scfastR
-maturin develop --release -m rust/scfast-py/Cargo.toml            # scfast for Python
+Rscript containers/install_r_packages.R
+R CMD INSTALL rust/scfast-r
 ```
 
-If the node has Apptainer, the container route replaces all of the above:
-`apptainer build /scratch/$USER/scpipe.sif containers/scpipe.def`, then set `container.image` in the
-site file (`conf/sites/iridisx.yaml` already passes `--nv`).
+On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into
+`/iridisfs/ddnb/images/` and set `container.image` in the site file (`conf/sites/iridisx.yaml`
+already passes `--nv`).
 
 **Configure and check:**
 
@@ -123,8 +172,8 @@ sudo apt-get install -y build-essential gfortran git tmux cmake pkg-config \
   python3-venv python3-dev r-base r-base-dev
 git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e "python[harmony,llm,report,test,scfast]"
-# R packages, Rust, scfastR, scfast: as in section 1
+# Rust, scfast, the Python package, R packages and scfastR: as in section 1
+# (or skip all of it and use the image, section 0)
 scpipe init-site --out conf/sites/mybox.yaml     # detects scheduler, GPU, container runtime
 ```
 

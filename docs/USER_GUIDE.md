@@ -112,6 +112,20 @@ report:
   top_markers: 10                # markers per cluster shown in report.html
 ```
 
+**NVIDIA models for the gates.** NVIDIA NIM serves an OpenAI-compatible API, hosted or as a local
+container on the same GPU node, so it works through `openai_compatible` with no code change:
+
+```yaml
+llm:
+  default:
+    provider: openai_compatible
+    base_url: https://integrate.api.nvidia.com/v1    # or http://localhost:8000/v1 for a local NIM
+    model: meta/llama-3.3-70b-instruct               # any NIM model that supports tool calls
+    api_key_env: NVIDIA_API_KEY
+```
+
+Check it with `scpipe doctor --config config.yaml`, which makes a tool-use test call.
+
 ### Engine: Rust, Seurat or GPU
 
 `engine` picks the code that does doublets, pre-clustering, PCA, neighbours and Leiden:

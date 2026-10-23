@@ -238,6 +238,13 @@ def site_yaml_text(site: Mapping[str, Any], det: Mapping[str, Any] | None = None
                 lines.append(f"# internet {k}: {'ok' if v.get('ok') else 'NO'} ({v.get('detail')})")
         else:
             lines.append("# internet: not checked")
+    rt = (site.get("container") or {}).get("runtime", "none")
+    if rt != "none" and not (site.get("container") or {}).get("image"):
+        ref = default_image() if rt == "docker" else f"docker://{default_image()}"
+        lines += [f"# {rt} found: to run every stage in the prebuilt scpipe image (R, Seurat, scfast, RAPIDS;",
+                  f"# nothing else to install), set container.image to {ref}",
+                  f"# or, faster to start, to a local copy: {rt} pull scpipe.sif {ref}" if rt != "docker" else
+                  f"# (docker pull {ref} once)."]
     lines += ["# Review the values, set scheduler.partition/account if you submit jobs, then",
               "# point config.yaml at this file with `site: <name>` or `site: path/to/file.yaml`.", ""]
     return "\n".join(lines) + yaml.safe_dump(dict(site), sort_keys=False, allow_unicode=True)
@@ -343,11 +350,63 @@ def container_prefix(cfg: Mapping[str, Any], run_dir: Path) -> str:
     opts = " ".join(shlex.quote(o) for o in c.get("options") or [])
     repo = shlex.quote(str(cfg.get("repo_root") or cfgmod.REPO_ROOT))
     rd = shlex.quote(str(run_dir))
+    # SCPIPE_IN_CONTAINER=1: the runner inside does not wrap its stages in the image again.
     if rt in ("apptainer", "singularity"):
-        return f"{rt} exec {opts} --bind {repo},{rd} {shlex.quote(str(image))}"
+        return f"{rt} exec {opts} --env SCPIPE_IN_CONTAINER=1 --bind {repo},{rd} {shlex.quote(str(image))}"
     if rt == "docker":
-        return f"docker run --rm {opts} -v {repo}:{repo} -v {rd}:{rd} -w {repo} {shlex.quote(str(image))}"
+        return (f"docker run --rm {opts} -e SCPIPE_IN_CONTAINER=1 -v {repo}:{repo} -v {rd}:{rd} -w {repo} "
+                f"--entrypoint '' {shlex.quote(str(image))}")
     return ""
+
+
+IMAGE_REPO_ROOT = "/opt/scpipe"  # where containers/Dockerfile installs the repository files
+# Stage environment variables handed to a docker stage container (apptainer inherits the environment).
+_STAGE_ENV_PREFIXES = ("SCPIPE_", "OMP_", "OPENBLAS_", "MKL_", "VECLIB_", "NUMBA_", "R_MAX_VSIZE",
+                       "ANTHROPIC_", "OPENAI_", "CUDA_VISIBLE_DEVICES")
+
+
+def stage_container_argv(cfg: Mapping[str, Any], run_dir: Path) -> list[str]:
+    """Prefix that runs one stage inside the configured image in ``execution: direct`` ([] when
+    no image is set, or when already inside the image, SCPIPE_IN_CONTAINER=1). The run
+    directory, the config directory and every sample's folder are bound at the same paths, and
+    the stage uses the image's scpipe (IMAGE_REPO_ROOT), not the host's."""
+    c = cfg.get("container") or {}
+    rt, image = c.get("runtime", "none"), c.get("image")
+    if rt == "none" or not image or os.environ.get("SCPIPE_IN_CONTAINER") == "1":
+        return []
+    binds = {str(Path(run_dir).resolve())}
+    if cfg.get("config_dir"):
+        binds.add(str(Path(cfg["config_dir"]).resolve()))
+    for s in cfg.get("samples_resolved") or []:
+        p = Path(s["path"]).resolve()
+        binds.add(str(p if p.is_dir() else p.parent))
+    opts = [str(o) for o in c.get("options") or []]
+    env = {"SCPIPE_IN_CONTAINER": "1", "SCPIPE_REPO_ROOT": IMAGE_REPO_ROOT, "SCPIPE_PYTHON": "python",
+           "PYTHONPATH": f"{IMAGE_REPO_ROOT}/python"}
+    if rt in ("apptainer", "singularity"):
+        argv = [rt, "exec", *opts]
+        for b in sorted(binds):
+            argv += ["--bind", b]
+        argv += ["--env", ",".join(f"{k}={v}" for k, v in env.items())]
+        return argv + [str(image)]
+    if rt == "docker":
+        argv = ["docker", "run", "--rm", "-i", "--user", f"{os.getuid()}:{os.getgid()}", *opts]
+        for b in sorted(binds):
+            argv += ["-v", f"{b}:{b}"]
+        for k, v in env.items():
+            argv += ["-e", f"{k}={v}"]
+        for k in sorted(os.environ):
+            if k.startswith(_STAGE_ENV_PREFIXES) and k not in env:
+                argv += ["-e", k]
+        return argv + ["--entrypoint", "", str(image)]
+    return []
+
+
+def default_image() -> str:
+    """The published image matching this scpipe version (.github/workflows/release.yml)."""
+    from . import __version__
+
+    return f"ghcr.io/mukeshkbj/scpipe:{__version__}"
 
 
 def render_batch_script(cfg: Mapping[str, Any], run_dir: Path, scheduler: str, *, until: str | None = None,

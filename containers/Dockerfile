@@ -1,79 +1,97 @@
-# scpipe single image (docs/DESIGN.md 7.5): CUDA 12 Ubuntu base, R 4.4+ with
-# Seurat 5, BPCells, presto, DESeq2, limma, leidenbase, hdf5r, harmony, and the
-# Python package with the [gpu,harmony] extras (rapids-singlecell, CellTypist), plus the Rust
-# engine (scfastR for R, scfast for Python).
+# scpipe single image (docs/DESIGN.md 7.5): everything every stage needs, prebuilt.
 #
-#   docker build -t scpipe:latest -f containers/Dockerfile .
-#   docker run --rm --gpus all -v $PWD:/work -v /scratch:/scratch scpipe:latest scpipe doctor
+#   NVIDIA RAPIDS base (CUDA 12, Python 3.12, CuPy, cuGraph, cuVS, cuML in /opt/conda)
+#   + R with Seurat 5, BPCells, presto, DESeq2, limma, leidenbase, hdf5r, harmony
+#   + scpipe, rapids-singlecell, CellTypist (with its default model) and harmonypy
+#   + the Rust engine built with CUDA and cuGraph: scfast (Python) and scfastR (R).
+# No Rust toolchain or compiler is needed at run time: the engine is built in the "build" stage.
 #
-# Not built in tests. Apptainer users: containers/scpipe.def builds the same
-# image, or convert this one with `apptainer build scpipe.sif docker-daemon://scpipe:latest`.
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+#   docker build -t scpipe -f containers/Dockerfile .
+#   docker run --rm --gpus all -v $PWD:/work scpipe doctor
+#   apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest     # published by .github/workflows/release.yml
+#   apptainer exec --nv scpipe.sif scpipe run --config config.yaml
+#
+# The image also runs on machines without a GPU: every GPU step falls back to the CPU.
+ARG RAPIDS_IMAGE=nvcr.io/nvidia/rapidsai/base:26.10-cuda12-py3.12
 
+# ---------------------------------------------------------------- base: R and system libraries
+FROM ${RAPIDS_IMAGE} AS base
+USER root
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.12
+# R and its packages use the system toolchain and libraries, never conda's.
+ENV SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# System libraries for R, hdf5r, BPCells, igraph, uwot, curl, and tmux for --detach.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl wget gnupg locales tmux git build-essential gfortran \
+# System libraries for R, hdf5r, BPCells, igraph, uwot and curl; tmux for `scpipe run --detach`.
+RUN PATH=$SYS_PATH apt-get update && PATH=$SYS_PATH apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg locales tmux git build-essential gfortran cmake pkg-config \
       libhdf5-dev libcurl4-openssl-dev libssl-dev libxml2-dev libglpk-dev libgsl-dev \
       libpng-dev libjpeg-dev libtiff-dev libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
       libfreetype6-dev libcairo2-dev libxt-dev libgit2-dev libzstd-dev liblzma-dev libbz2-dev \
-      cmake pkg-config software-properties-common \
-    && locale-gen en_GB.UTF-8 && rm -rf /var/lib/apt/lists/*
+    && sed -i 's/^# *en_GB.UTF-8/en_GB.UTF-8/' /etc/locale.gen && locale-gen \
+    && rm -rf /var/lib/apt/lists/*
 ENV LANG=en_GB.UTF-8 LC_ALL=en_GB.UTF-8 TZ=Etc/UTC
 
-# Current R from CRAN for Ubuntu 22.04 (its r-recommended packages need the latest R, so no pin).
+# Current R from CRAN for Ubuntu 24.04 (its r-recommended packages need the latest R, so no pin).
 RUN curl -fsSL https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc \
-      | tee /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc >/dev/null \
-    && add-apt-repository -y "deb https://cloud.r-project.org/bin/linux/ubuntu jammy-cran40/" \
-    && apt-get update && apt-get install -y --no-install-recommends r-base r-base-dev \
+      > /etc/apt/trusted.gpg.d/cran_ubuntu_key.asc \
+    && echo "deb https://cloud.r-project.org/bin/linux/ubuntu noble-cran40/" > /etc/apt/sources.list.d/cran.list \
+    && PATH=$SYS_PATH apt-get update && PATH=$SYS_PATH apt-get install -y --no-install-recommends r-base r-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# R packages. Binary builds from the Posit Package Manager keep this fast.
-RUN echo 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/jammy/latest"), Ncpus = 4)' \
+# R packages: binary builds from the Posit Package Manager keep this fast.
+COPY containers/install_r_packages.R /tmp/install_r_packages.R
+RUN echo 'options(repos = c(CRAN = "https://packagemanager.posit.co/cran/__linux__/noble/latest"), Ncpus = 4)' \
       > /usr/lib/R/etc/Rprofile.site \
     && echo 'options(HTTPUserAgent = sprintf("R/%s R (%s)", getRversion(), paste(getRversion(), R.version$platform, R.version$arch, R.version$os)))' \
       >> /usr/lib/R/etc/Rprofile.site \
-    && Rscript -e 'install.packages(c("Seurat", "SeuratObject", "Matrix", "hdf5r", "jsonlite", "digest", "yaml", "optparse", "data.table", "R.utils", "harmony", "leidenbase", "uwot", "qs2", "remotes", "BiocManager", "testthat", "RhpcBLASctl", "glmGamPoi"))' \
-    && Rscript -e 'BiocManager::install(c("DESeq2", "limma", "edgeR", "scDblFinder", "SingleR", "celldex", "BiocParallel"), update = FALSE, ask = FALSE)' \
-    && Rscript -e 'remotes::install_github(c("bnprks/BPCells/r", "immunogenomics/presto", "satijalab/seurat-wrappers"), upgrade = "never")' \
-    && Rscript -e 'for (p in c("Seurat","BPCells","presto","DESeq2","limma","leidenbase","hdf5r","harmony")) stopifnot(requireNamespace(p, quietly = TRUE))'
+    && PATH=$SYS_PATH Rscript /tmp/install_r_packages.R && rm /tmp/install_r_packages.R
 
-# Python 3.12 (deadsnakes) + the scpipe package with Harmony, and the prebuilt rapids-singlecell-cu12 wheel
-# (the [gpu] extra pulls the rapids-singlecell sdist, which needs nvcc to build; this runtime image has none).
-RUN add-apt-repository -y ppa:deadsnakes/ppa && apt-get update \
-    && apt-get install -y --no-install-recommends python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev \
-    && rm -rf /var/lib/apt/lists/* \
-    && python${PYTHON_VERSION} -m venv /opt/scpipe-venv
-ENV PATH=/opt/scpipe-venv/bin:$PATH VIRTUAL_ENV=/opt/scpipe-venv
+# ---------------------------------------------------------------- build: the Rust engine
+FROM base AS build
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && /opt/cargo/bin/cargo --version
+COPY rust /src/rust
+WORKDIR /src/rust
+# CUDA and cuGraph are dlopen'ed at run time, so neither is needed to build.
+RUN /opt/conda/bin/pip install --no-cache-dir "maturin>=1.9.4,<2" \
+    && PATH=/opt/cargo/bin:$PATH /opt/conda/bin/maturin build --release --locked \
+         -m scfast-py/Cargo.toml --features cuda,cugraph -o /out
+RUN mkdir -p /out && cd /out \
+    && PATH=/opt/cargo/bin:$SYS_PATH SCFASTR_CARGO_FEATURES=cuda,cugraph SCFASTR_TARGET_DIR=/tmp/scfastr-target \
+         R CMD INSTALL --build /src/rust/scfast-r
+
+# ---------------------------------------------------------------- final image
+FROM base
+COPY --from=build /out /tmp/scfast
 COPY python /opt/scpipe/python
 COPY R /opt/scpipe/R
 COPY conf /opt/scpipe/conf
 COPY config /opt/scpipe/config
 COPY docs /opt/scpipe/docs
-RUN pip install --no-cache-dir --upgrade pip wheel \
-    && pip install --no-cache-dir --extra-index-url=https://pypi.nvidia.com \
-         "/opt/scpipe/python[harmony,test]" jinja2 matplotlib requests pyyaml celltypist \
-         "rapids-singlecell-cu12[rapids]==0.18.1" "cupy-cuda12x" "cudf-cu12==26.10.*" "cuml-cu12==26.10.*" \
-         "cugraph-cu12==26.10.*" "cuvs-cu12==26.10.*" "libcugraph-cu12==26.10.*" \
-    && python -c "import scpipe, rapids_singlecell, harmonypy, celltypist, jinja2, matplotlib"
+COPY tests /opt/scpipe/tests
+COPY containers/smoke_test.sh /opt/scpipe/containers/smoke_test.sh
 
-# Rust toolchain (cargo >= 1.80) for the scfast engine (docs/scfast-integration.md), then scfastR and scfast.
-ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
-    && cargo --version
-COPY rust /opt/scpipe/rust
-RUN R CMD INSTALL /opt/scpipe/rust/scfast-r \
-    && Rscript -e 'stopifnot(requireNamespace("scfastR", quietly = TRUE))' \
-    && pip install --no-cache-dir maturin umap-learn \
-    && maturin build --release -m /opt/scpipe/rust/scfast-py/Cargo.toml -o /tmp/wheels \
-    && pip install --no-cache-dir /tmp/wheels/scfast-*.whl && rm -rf /tmp/wheels /opt/scpipe/rust/target \
-    && python -c "import scfast; print('scfast', scfast.__version__)"
+# scfastR (binary package from the build stage).
+RUN PATH=$SYS_PATH R CMD INSTALL /tmp/scfast/scfastR_*.tar.gz \
+    && PATH=$SYS_PATH Rscript -e 'stopifnot(requireNamespace("scfastR", quietly = TRUE))'
 
-ENV SCPIPE_REPO_ROOT=/opt/scpipe \
+# Python into the RAPIDS conda environment. rapids-singlecell without its [rapids] extra: the
+# RAPIDS libraries are already in the image as conda packages; only its pure-Python deps come in.
+RUN pip install --no-cache-dir /tmp/scfast/scfast-*.whl "/opt/scpipe/python[harmony,report,llm,test]" \
+         "rapids-singlecell-cu12==0.18.1" \
+    && python -c "import scpipe, scfast, rapids_singlecell, cupy, harmonypy, celltypist; i = scfast.device_info(); assert i['cuda_built'], i" \
+    && rm -rf /tmp/scfast
+
+# CellTypist's default model, so annotation works offline (s3_celltypist reads SCPIPE_CELLTYPIST_MODELS).
+ENV SCPIPE_CELLTYPIST_MODELS=/opt/scpipe/models/celltypist
+RUN python -m scpipe.stages.s3_celltypist --models-dir "$SCPIPE_CELLTYPIST_MODELS" --download Immune_All_Low.pkl \
+    && chmod -R a+rX /opt/scpipe
+
+ENV SCPIPE_REPO_ROOT=/opt/scpipe SCPIPE_IN_CONTAINER=1 \
     OMP_NUM_THREADS=8 \
-    MPLCONFIGDIR=/tmp/mpl NUMBA_CACHE_DIR=/tmp/numba
+    MPLCONFIGDIR=/tmp/mpl NUMBA_CACHE_DIR=/tmp/numba CUPY_CACHE_DIR=/tmp/cupy
 WORKDIR /work
-ENTRYPOINT []
-CMD ["scpipe", "--help"]
+USER rapids
+ENTRYPOINT ["scpipe"]
+CMD ["--help"]

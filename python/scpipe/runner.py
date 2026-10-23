@@ -88,6 +88,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from . import config as cfgmod
+from . import site as sitemod
 from .config import ConfigError, canonical_json, get_key
 
 __all__ = [
@@ -195,15 +196,20 @@ def _rscript() -> str:
 
 def _r_stage(stage_id: str) -> Callable[[RunContext], list[str]]:
     def cmd(ctx: RunContext) -> list[str]:
-        script = ctx.repo_root / "R" / "stages" / "run_stage.R"
-        return [_rscript(), str(script), "--stage", stage_id, "--run-dir", str(ctx.run_dir)]
+        image = sitemod.stage_container_argv(ctx.cfg, ctx.run_dir)
+        if image:  # the stage runs in the scpipe image (site.container), with the image's R scripts
+            script, rscript = Path(sitemod.IMAGE_REPO_ROOT) / "R" / "stages" / "run_stage.R", "Rscript"
+        else:
+            script, rscript = ctx.repo_root / "R" / "stages" / "run_stage.R", _rscript()
+        return image + [rscript, str(script), "--stage", stage_id, "--run-dir", str(ctx.run_dir)]
 
     return cmd
 
 
 def _py_stage(module: str) -> Callable[[RunContext], list[str]]:
     def cmd(ctx: RunContext) -> list[str]:
-        return [sys.executable, "-m", module, "--run-dir", str(ctx.run_dir)]
+        image = sitemod.stage_container_argv(ctx.cfg, ctx.run_dir)
+        return image + ["python" if image else sys.executable, "-m", module, "--run-dir", str(ctx.run_dir)]
 
     return cmd
 
@@ -986,6 +992,14 @@ def doctor(config_path: str | None = None, run_dir: str | None = None) -> dict[s
             add("R", p, rpk[p] is not None, rpk[p] or "missing (optional)", required=False)
     stage_script = cfgmod.REPO_ROOT / "R" / "stages" / "run_stage.R"
     add("R", "R/stages/run_stage.R", stage_script.exists(), str(stage_script))
+    r_missing = err is not None or not stage_script.exists() or any(rpk[p] is None for p in R_REQUIRED)
+    rt = sitemod.detect_container_runtime()
+    if r_missing and os.environ.get("SCPIPE_IN_CONTAINER") != "1":
+        ref = sitemod.default_image()
+        hint = (f"no need to install R here: pull the scpipe image ({'docker pull ' + ref if rt == 'docker' else f'{rt} pull scpipe.sif docker://' + ref}) "
+                "and set container.image in the site file, so every stage runs in it"
+                if rt != "none" else f"install R (docs/INSTALL.md), or use a machine with Apptainer or Docker and the image {ref}")
+        add("R", "container", False, hint, required=False)
 
     cfg = None
     if config_path:
@@ -1019,7 +1033,6 @@ def doctor(config_path: str | None = None, run_dir: str | None = None) -> dict[s
     # Portability and LLM checks (docs/agents-spec.md section 8): site file,
     # execution mode, container, API key + tool-use test, budget, Open Targets.
     try:
-        from . import site as sitemod
 
         report["checks"].extend(sitemod.doctor_checks(cfg))
     except Exception as e:  # never let an extra check break doctor
@@ -1172,7 +1185,6 @@ def _parser() -> argparse.ArgumentParser:
 
 def _submit_mode(mode: str, resolved: dict[str, Any], rd: Path, stages: Sequence[Stage], until: str | None, out) -> int:
     """``execution: slurm|pbs|lsf|sge`` submits one job; ``split`` submits the heavy stages (docs/agents-spec.md 8)."""
-    from . import site as sitemod
 
     if _runner_alive(rd):
         raise RunnerError(f"another scpipe runner is active in {rd}")

@@ -189,10 +189,34 @@ def test_container_prefix(project):
     assert S.container_prefix(cfg, rd) == ""
     cfg["container"] = {"runtime": "apptainer", "image": "/img/scpipe.sif", "options": ["--nv"]}
     pre = S.container_prefix(cfg, rd)
-    assert pre.startswith("apptainer exec --nv --bind") and pre.endswith("/img/scpipe.sif") and str(rd) in pre
+    assert pre.startswith("apptainer exec --nv --env SCPIPE_IN_CONTAINER=1 --bind") and pre.endswith("/img/scpipe.sif")
+    assert str(rd) in pre
     assert "apptainer exec --nv" in S.render_batch_script(cfg, rd, "slurm")
     cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/scpipe:1", "options": ["--gpus", "all"]}
-    assert S.container_prefix(cfg, rd).startswith("docker run --rm --gpus all -v")
+    assert S.container_prefix(cfg, rd).startswith("docker run --rm --gpus all -e SCPIPE_IN_CONTAINER=1 -v")
+
+
+def test_stage_container_argv(project, monkeypatch):
+    monkeypatch.delenv("SCPIPE_IN_CONTAINER", raising=False)
+    cfg = resolved(project)
+    rd = Path(cfg["run_dir"])
+    assert S.stage_container_argv(cfg, rd) == []
+    cfg["container"] = {"runtime": "apptainer", "image": "/img/scpipe.sif", "options": ["--nv"]}
+    argv = S.stage_container_argv(cfg, rd)
+    assert argv[:3] == ["apptainer", "exec", "--nv"] and argv[-1] == "/img/scpipe.sif"
+    binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
+    assert str(rd.resolve()) in binds and str(Path(cfg["config_dir"]).resolve()) in binds
+    assert "SCPIPE_REPO_ROOT=/opt/scpipe" in argv[argv.index("--env") + 1]
+    # a stage command then uses the image's R scripts and python
+    ctx = R.RunContext(run_dir=rd, cfg=cfg, repo_root=Path("/host/repo"))
+    r_cmd = R._r_stage("S0")(ctx)
+    assert r_cmd[: len(argv)] == argv and r_cmd[len(argv):len(argv) + 2] == ["Rscript", "/opt/scpipe/R/stages/run_stage.R"]
+    assert R._py_stage("scpipe.stages.s3_celltypist")(ctx)[len(argv)] == "python"
+    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/scpipe:1", "options": ["--gpus", "all"]}
+    d = S.stage_container_argv(cfg, rd)
+    assert d[:3] == ["docker", "run", "--rm"] and d[-3:] == ["--entrypoint", "", "ghcr.io/x/scpipe:1"]
+    monkeypatch.setenv("SCPIPE_IN_CONTAINER", "1")  # inside the image: no second wrap
+    assert S.stage_container_argv(cfg, rd) == []
 
 
 def test_submit_slurm_with_fake_sbatch(project, tmp_path, monkeypatch):

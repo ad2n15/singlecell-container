@@ -19,14 +19,56 @@ cores). Inputs must not be modified from another thread while a call is running.
 
 from __future__ import annotations
 
+import glob
 import math
 import operator
+import os
+import sys
 from typing import Any, Literal
 
 import numpy as np
 
-from . import _scfast
-from ._scfast import __version__
+
+def _find_cugraph_lib() -> None:
+    """Point SCFAST_CUGRAPH_LIB at a pip (libcugraph-cu12) or conda (RAPIDS image) cuGraph, so
+    GPU Leiden needs no environment variables. The Rust side reads the variable on first use."""
+    if os.environ.get("SCFAST_CUGRAPH_LIB"):
+        return
+    try:
+        import libcugraph  # pip wheel; load_library() also loads librmm / libraft it links to
+
+        libcugraph.load_library()
+        hits = glob.glob(os.path.join(os.path.dirname(libcugraph.__file__), "lib*", "libcugraph_c.so"))
+    except Exception:
+        hits = glob.glob(os.path.join(sys.prefix, "lib", "libcugraph_c.so"))
+    if hits:
+        os.environ["SCFAST_CUGRAPH_LIB"] = hits[0]
+
+
+def _preload_cuda_libs() -> None:
+    """Load this environment's CUDA libraries (conda ``lib/`` or pip ``nvidia/*/lib``) globally,
+    so the CUDA backend's dlopen by soname (cudarc dynamic loading) finds them without
+    LD_LIBRARY_PATH. Does nothing when the environment ships none (system CUDA is then used)."""
+    import ctypes
+
+    site = [p for p in sys.path if p.endswith("site-packages")]
+    dirs = [os.path.join(sys.prefix, "lib")] + [d for s in site for d in glob.glob(os.path.join(s, "nvidia", "*", "lib"))]
+    for name in ("libnvrtc.so.1[0-9]", "libcublasLt.so.1[0-9]", "libcublas.so.1[0-9]", "libcusolver.so.1[0-9]"):
+        for d in dirs:
+            hits = glob.glob(os.path.join(d, name))
+            if hits:
+                try:
+                    ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
+                except OSError:
+                    pass
+                break
+
+
+_find_cugraph_lib()
+_preload_cuda_libs()
+
+from . import _scfast  # noqa: E402
+from ._scfast import __version__  # noqa: E402
 
 __all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "read_10x_h5", "snn", "umap"]
 

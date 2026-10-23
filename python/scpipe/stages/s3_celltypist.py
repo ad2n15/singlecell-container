@@ -59,6 +59,8 @@ def models_dir_for(cfg: dict[str, Any], override: str | None = None) -> Path:
     a = annotation_cfg(cfg)
     if a.get("models_dir"):
         return Path(str(a["models_dir"])).expanduser().resolve()
+    if os.environ.get("SCPIPE_CELLTYPIST_MODELS"):  # models baked into the container image
+        return Path(os.environ["SCPIPE_CELLTYPIST_MODELS"])
     base = Path(cfg.get("config_dir") or cfg.get("run_dir") or ".")
     return (base / "refs" / "celltypist").resolve()
 

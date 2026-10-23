@@ -1,0 +1,156 @@
+name: release
+
+# Prebuilt artifacts for the one-line installs (docs/INSTALL.md):
+#   pip install "scpipe[gpu]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple
+#   apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
+# A tag v* builds the scfast wheels, the scpipe wheel and the container, attaches the wheels to
+# the GitHub Release, regenerates the pip index on GitHub Pages and pushes the image to GHCR.
+# workflow_dispatch builds and tests everything without publishing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scfast-wheels:
+    name: scfast wheel (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CUDA and cuGraph are dlopen'ed at run time (cudarc dynamic-loading, libloading), so
+          # the x86_64 wheel builds without a toolkit and still imports on CPU-only machines.
+          - { os: ubuntu-latest, target: x86_64, manylinux: "2_28", features: "cuda,cugraph" }
+          - { os: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28", features: "" }
+          - { os: macos-14, target: aarch64-apple-darwin, manylinux: "", features: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: rust/scfast-py
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          args: --release --locked --out dist ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
+      - name: Import test
+        if: matrix.target != 'aarch64' || runner.arch == 'ARM64'
+        run: |
+          python3 -m venv /tmp/t && /tmp/t/bin/pip install -q rust/scfast-py/dist/*.whl
+          /tmp/t/bin/python -c "import scfast; print(scfast.__version__, scfast.device_info())"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-scfast-${{ matrix.target }}
+          path: rust/scfast-py/dist/*.whl
+
+  scpipe-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install build && python -m build --wheel --outdir dist python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-scpipe
+          path: dist/*.whl
+
+  pip-smoke:
+    # The pip one-liner against the freshly built wheels (no index needed yet).
+    needs: [scfast-wheels, scpipe-wheel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { pattern: wheel-*, merge-multiple: true, path: wheels }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: |
+          python -m pip install --find-links wheels "scpipe[harmony,report,llm]"
+          scpipe --help
+          python -c "import scfast, scpipe; print(scfast.device_info())"
+
+  container:
+    # Builds its own scfast (builder stage of containers/Dockerfile), so it runs alongside the wheels.
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free disk (the RAPIDS base image is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h /
+      - uses: actions/checkout@v4
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/scpipe
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=sha
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: containers/Dockerfile
+          load: true
+          tags: scpipe:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (CPU runner)
+        run: |
+          docker run --rm scpipe:test doctor
+          docker run --rm --entrypoint python scpipe:test -c "import scfast; i = scfast.device_info(); assert i['cuda_built'], i"
+          docker run --rm --entrypoint bash scpipe:test /opt/scpipe/containers/smoke_test.sh
+      - name: Push
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for t in $(echo "${{ steps.meta.outputs.tags }}"); do
+            docker tag scpipe:test "$t" && docker push "$t"
+          done
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pip-smoke, container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { pattern: wheel-*, merge-multiple: true, path: wheels }
+      - name: Attach wheels to the release
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
+            || gh release create "${GITHUB_REF_NAME}" --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" wheels/*.whl --clobber
+      - name: Build the pip index
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: python3 .github/scripts/make_simple_index.py "${GITHUB_REPOSITORY}" site
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - id: pages
+        uses: actions/deploy-pages@v4
