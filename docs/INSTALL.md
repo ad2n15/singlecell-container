@@ -112,8 +112,26 @@ APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif cont
 ```
 
 Iridis has no `fusermount`, so run the image with `--unsquash` (it unpacks to `APPTAINER_TMPDIR`
-first, ~30 s): `apptainer exec --unsquash --nv scpipe.sif scpipe doctor`, and put `--unsquash` in
-`container.options` of the site file.
+first, ~30 s, in RAM on compute nodes, so jobs need ~96 GB): `apptainer exec --unsquash --nv
+scpipe.sif scpipe doctor`, and put `--unsquash` in `container.options` of the site file.
+
+Better on Iridis: unpack the image once into a sandbox directory (~130k files, 12 GB) and run that,
+with no `--unsquash` and no extra memory. Unpack on the local disk and copy with `rsync -a`
+(extracting straight onto GPFS drops the execute bits):
+
+```bash
+apptainer build --sandbox /tmp/$USER-sbx scpipe.sif
+rsync -a /tmp/$USER-sbx/ /iridisfs/ddnb/images/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
+apptainer exec --nv /iridisfs/ddnb/images/scpipe_sandbox scpipe doctor
+```
+
+After a code change, update the sandbox in place instead of rebuilding the image (login node,
+~5 min with the Rust rebuild, ~20 s with `--code-only`); rebuild only when the base image or the
+dependency lists change:
+
+```bash
+containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox
+```
 
 On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into
 `/iridisfs/ddnb/images/` and set `container.image` in the site file (`conf/sites/iridisx.yaml`
