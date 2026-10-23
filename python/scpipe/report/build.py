@@ -349,6 +349,7 @@ def _opentargets(rd: Path) -> dict[str, Any] | None:
     if not s:
         return None
     contrasts = []
+    targets = s.get("targets") or {}
     for c in s.get("contrasts") or []:
         groups = []
         for g in c.get("groups") or []:
@@ -356,9 +357,12 @@ def _opentargets(rd: Path) -> dict[str, Any] | None:
             for d, dd in (g.get("directions") or {}).items():
                 genes = []
                 for ge in (dd.get("genes") or [])[:50]:
-                    t = ge.get("target") or ge
+                    # S4 lists each gene with `target` = its key in the summary's targets table (None without
+                    # a record); a record inlined under `target` is accepted too
+                    t = ge.get("target")
+                    t = (targets.get(t) or {}) if isinstance(t, str) else (t if isinstance(t, Mapping) else ge)
                     genes.append({"gene": ge.get("gene") or ge.get("symbol"), "ensembl": t.get("ensembl_id") or ge.get("ensembl_id"),
-                                  "status": ge.get("status"),
+                                  "status": ge.get("status") or ge.get("lookup_status"),
                                   "drugs": [f"{x.get('drug')} (ph {x.get('phase')}, {x.get('disease')})" for x in (t.get("known_drugs") or [])[:3]],
                                   "diseases": [f"{x.get('name')} ({_float(x.get('score')):.2f})" for x in (t.get("associated_diseases") or [])[:3]],
                                   "tractability": t.get("tractability")})

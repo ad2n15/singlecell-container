@@ -425,3 +425,19 @@ def test_s5_is_registered_last_in_the_runner():
     s5 = runner.STAGES[-1]
     assert "S5/report.html" in s5.outputs and "S5/explorer.html" in s5.outputs
     assert any("llm/ledger.json" in x for x in s5.optional_inputs)
+
+
+def test_opentargets_section_reads_the_stage_shape(run_dir):
+    """S4 writes genes with `target` = a key into the summary's `targets` table."""
+    p = run_dir / "S4" / "opentargets_summary.json"
+    _w(p, {"offline": False, "counts": {}, "targets": {"MS4A1": {
+               "ensembl_id": "ENSG00000156738", "known_drugs": [{"drug": "RITUXIMAB", "phase": 4, "disease": "lymphoma"}],
+               "associated_diseases": [{"name": "follicular lymphoma", "score": 0.9}]}},
+           "contrasts": [{"contrast": "markers", "groups": [{"group": "B cell", "directions": {"up": {"n_de": 240, "n_listed": 2, "genes": [
+               {"gene": "MS4A1", "lookup_status": "record", "target": "MS4A1"},
+               {"gene": "XYZ", "lookup_status": "none", "target": None}]}}}]}]})
+    ot = build._opentargets(run_dir)
+    genes = ot["contrasts"][0]["groups"][0]["directions"][0]["genes"]
+    assert ot["contrasts"][0]["name"] == "markers"
+    assert genes[0]["ensembl"] == "ENSG00000156738" and genes[0]["drugs"] == ["RITUXIMAB (ph 4, lymphoma)"]
+    assert genes[0]["status"] == "record" and genes[1]["drugs"] == []

@@ -33,7 +33,7 @@ flowchart LR
   S0["S0 ingest<br/>(R)"] --> S1a["S1a QC metrics<br/>(R)"] --> S1b["S1b doublets<br/>(Python)"] --> S1c["S1c QC rules<br/>(Python)"]
   S1c --> G1{{"G1 QC gate"}} --> S2["S2 core processing<br/>(R, CPU or GPU)"]
   S2 --> S3["S3 evidence + annotation<br/>(R + Python)"] --> G2{{"G2 context gate"}} --> G3{{"G3 annotation gate"}}
-  G3 --> S4["S4 pseudobulk DGE<br/>+ Open Targets"] --> G4{{"G4 interpretation gate"}} --> S5["S5 report<br/>+ explorer"]
+  G3 --> S4["S4 DGE (FindMarkers or pseudobulk)<br/>+ Open Targets"] --> G4{{"G4 interpretation gate"}} --> S5["S5 report<br/>+ explorer"]
 ```
 
 Stages (S) transform data; gates (G) are decision points where the pipeline may stop for a person.
@@ -256,16 +256,25 @@ The annotation agent may relabel **only** clusters the consensus marked `low_con
 `conflict`, and only with labels from the cell-type table. Output: the final labels in
 `S3/annotation.tsv`. Default mode `auto`.
 
-### S4: Pseudobulk differential expression + Open Targets (R + Python, `scpipe/stages/s4.py`, `R/stages/s4_dge.R`)
+### S4: Differential expression (FindMarkers or pseudobulk) + Open Targets (R + Python, `scpipe/stages/s4.py`, `R/stages/s4_dge.R`)
 
-- **Pseudobulk:** counts summed per sample × group (`dge.group_by`: `cell_type_broad` default,
-  or `cluster`), keeping groups with at least `min_cells_per_sample` (20) cells and
-  `min_replicates` (2) samples per condition.
-- **Contrasts** from config, e.g.
-  `{name: disease_vs_control, numerator: disease, denominator: control, covariates: [batch]}`.
-  With no contrasts S4 records that and moves on.
-- **Test:** `dge.method: deseq2` (default) or `limma_voom` (also the fallback when DESeq2 is
-  missing); significance at `padj` 0.05 and `|log2FC|` ≥ `lfc` 0.5.
+- **FindMarkers (default, `dge.method: findmarkers`):** Seurat `FindMarkers` between two sets
+  of cells with `dge.test` (MAST by default; wilcox, wilcox_limma, LR, t, bimod, negbinom,
+  poisson, DESeq2), genes prefiltered by `min_pct` (0.1) and `logfc_threshold` (0.25); groups run
+  in parallel (`resources.threads`). Without MAST installed, wilcox is used with a note.
+- **Contrasts** name any cell metadata column and the values on each side, e.g.
+  `{name: disease_vs_control, column: condition, numerator: disease, denominator: control}`,
+  `{name: F_vs_M, column: sex, numerator: F, denominator: M}`,
+  `{name: B_vs_rest, column: cell_type_broad, numerator: B cell, denominator: rest, within: none}`.
+  `within` (default `group_by`) tests each cell type separately; covariates become MAST/LR
+  `latent.vars`. With no contrasts and `markers: auto`, the markers of each `group_by` group
+  against the other cells are found (contrast `markers`).
+- **Pseudobulk (`dge.method: pseudobulk`, or `deseq2` / `limma_voom`):** counts summed per sample
+  × group, keeping units with at least `min_cells_per_sample` (20) cells and `min_replicates` (2)
+  samples per side; DESeq2 (`pseudobulk_method: deseq2`) or limma-voom. The contrast column must
+  have one value per sample.
+- Significance at `padj` 0.05 and `|log2FC|` ≥ `lfc` 0.5 (FindMarkers: Seurat's Bonferroni
+  `p_val_adj`); FindMarkers tables also carry `pct_1` / `pct_2`.
 - **Open Targets:** the top `opentargets.max_genes_per_direction` (50) up and down genes are
   annotated with associated diseases, known drugs and tractability (GraphQL API, cached in
   `refs/opentargets`, `offline: true` for no network).
@@ -433,7 +442,7 @@ apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-scpipe/scpipe.sif 
 | `clustering.resolution` | `0.5` | Leiden resolution |
 | `annotation.celltypist` / `celltypist_model` / `min_confidence` | `auto` / `Immune_All_Low.pkl` / `0.6` | CellTypist on/off, model, consensus threshold |
 | `signatures` | — | path to your own signature YAML |
-| `dge.*` | `sample_col: sample_id`, `condition_col: condition`, `group_by: cell_type_broad`, `contrasts: []`, `min_cells_per_sample: 20`, `min_replicates: 2`, `method: deseq2`, `padj: 0.05`, `lfc: 0.5` | pseudobulk DGE |
+| `dge.*` | `method: findmarkers`, `test: MAST`, `pseudobulk_method: deseq2`, `markers: auto`, `group_by: cell_type_broad`, `contrasts: []`, `min_pct: 0.1`, `logfc_threshold: 0.25`, `min_cells_per_side: 10`, `max_cells_per_side: null`, `sample_col: sample_id`, `condition_col: condition`, `min_cells_per_sample: 20`, `min_replicates: 2`, `padj: 0.05`, `lfc: 0.5` | contrasts: `{name, column, numerator, denominator (values or `rest`), within, covariates}`; FindMarkers compares cells (any column), pseudobulk compares samples (DESeq2 / limma-voom); no contrasts + `markers: auto` = markers of each cell type |
 | `opentargets.*` | `enabled: true`, `max_genes_per_direction: 50`, `offline: false`, `cache_dir: refs/opentargets` | gene evidence |
 | `gates` | `G1: auto, G2: review, G3: auto, G4: review` | `auto`, `review`, `escalate` |
 | `llm.default` | `provider: auto` | `auto`, `anthropic`, `openai`, `nvidia`, `openai_compatible`; `model`, `api_key_env`, `base_url` fill in per provider |

@@ -50,6 +50,11 @@ def test_guided_answers_reach_the_run(tmp_path, no_keys):
                "off",          # adaptive QC off
                "3",            # doublets: none (no 'remove' question then)
                "", "0", "0.8", "",       # PCs auto, resolution: 0 refused then 0.8, HVGs default
+               "1", "2",       # DE: FindMarkers, wilcox
+               "2", "sample_id",          # compare two groups of the sample_id column
+               "donor_Z", "",  # group 1: an unknown value refused, then the suggested donor_B
+               "",             # group 2: the suggested donor_A
+               "n",            # across all cells, not within each cell type
                "y",            # Harmony (two samples)
                "2",            # stop at every gate
                ""]             # start
@@ -63,6 +68,11 @@ def test_guided_answers_reach_the_run(tmp_path, no_keys):
     assert saved["doublets"] == {"method": "none"} and saved["clustering"] == {"resolution": 0.8}
     assert saved["pcs"] == "auto" and saved["n_hvg"] == 2000
     assert saved["integration"] == {"method": "harmony", "batch_key": "sample_id"}
+    assert "not a value of sample_id: donor_Z" in text
+    assert saved["dge"] == {"method": "findmarkers", "test": "wilcox", "markers": "auto", "contrasts": [
+        {"name": "donor_B_vs_donor_A", "column": "sample_id", "numerator": "donor_B", "denominator": "donor_A",
+         "within": "none"}]}
+    assert "FindMarkers (wilcox); sample_id: donor_B vs donor_A" in text
     res = yaml.safe_load((cdir / "config.resolved.yaml").read_text())
     pol = yaml.safe_load((cdir / "qc_policy.yaml").read_text())
     assert pol["hard_limits"] == {"min_genes": 300, "min_umis": 400, "max_mito_pct": 15}

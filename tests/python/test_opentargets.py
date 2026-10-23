@@ -447,14 +447,21 @@ def test_config_validates_contrasts_against_sample_sheet(tmp_path):
 
     good = [{"name": "treated_vs_control", "numerator": "treated", "denominator": "control", "covariates": ["batch"]}]
     cfg = load(good)
-    assert cfg["dge"]["contrasts"] == good and cfg["dge"]["method"] == "deseq2"
+    assert cfg["dge"]["contrasts"] == good and cfg["dge"]["method"] == "findmarkers" and cfg["dge"]["test"] == "MAST"
     assert cfg["opentargets"]["cache_dir"] == str(proj / "refs" / "ot")
     with pytest.raises(C.ConfigError, match="'disease' is not a value of samples.csv column 'condition'"):
         load([{"name": "x", "numerator": "disease", "denominator": "control"}])
     with pytest.raises(C.ConfigError, match="'donor' is not a samples.csv column"):
-        load([{"name": "x", "numerator": "treated", "denominator": "control", "covariates": ["donor"]}])
-    with pytest.raises(C.ConfigError, match="dge.condition_col 'group' is not a samples.csv column"):
-        load(good, condition_col="group")
+        load([{"name": "x", "numerator": "treated", "denominator": "control", "covariates": ["donor"]}], method="deseq2")
+    with pytest.raises(C.ConfigError, match="column 'group' is not a samples.csv column"):
+        load(good, condition_col="group", method="pseudobulk")
+    # findmarkers also takes cell-level columns (checked by S4) and lists / 'rest' on either side
+    load([{"name": "b", "column": "cell_type_broad", "numerator": ["B cell", "plasma cell"], "denominator": "rest"}])
+    load([{"name": "t", "column": "condition", "numerator": "treated", "denominator": "rest", "within": "none"}])
+    with pytest.raises(C.ConfigError, match="numerator cannot be 'rest'"):
+        load([{"name": "x", "numerator": "rest", "denominator": "control"}])
+    with pytest.raises(C.ConfigError, match="dge.test"):
+        load(good, test="magic")
     with pytest.raises(C.ConfigError, match="used twice"):
         load(good + good)
     with pytest.raises(C.ConfigError, match="dge.method"):
@@ -466,3 +473,24 @@ def test_no_network_in_tests(tmp_path, no_network):
     c = client(tmp_path)
     with pytest.raises(AssertionError, match="network access attempted"):
         c.target_by_ensembl("ENSG00000163737")
+
+
+def test_shape_target_reads_the_current_api():
+    """drugAndClinicalCandidates (one row per drug with its diseases) and tractability.label, as served
+    since October 2026; each drug's first disease comes before further ones, no pair twice."""
+    from scpipe.opentargets.client import shape_target
+
+    t = {"id": "ENSG1", "approvedSymbol": "MS4A1", "tractability": [{"modality": "AB", "label": "GO CC high conf", "value": True}],
+         "drugAndClinicalCandidates": {"count": 2, "rows": [
+             {"maxClinicalStage": "PHASE_2", "drug": {"id": "D2", "name": "two"}, "diseases": [{"disease": {"id": "X", "name": "x"}}]},
+             {"maxClinicalStage": "APPROVAL", "drug": {"id": "D1", "name": "one",
+                                                       "mechanismsOfAction": {"rows": [{"mechanismOfAction": "CD20 binder"}]}},
+              "diseases": [{"disease": None}, {"disease": {"id": "X", "name": "x"}}, {"disease": {"id": "X", "name": "x"}},
+                           {"disease": {"id": "Y", "name": "y"}}]}]},
+         "associatedDiseases": {"count": 0, "rows": []}}
+    r = shape_target(t, n_drugs=10)
+    assert [(d["drug"], d["disease_id"], d["phase"]) for d in r["known_drugs"]] == [("one", "X", 4), ("two", "X", 2), ("one", "Y", 4)]
+    assert r["known_drugs"][0]["mechanism"] == "CD20 binder" and r["known_drugs"][0]["status"] == "approval"
+    assert r["known_drugs"][0]["evidence_id"] == "OT:ENSG1:drug:D1:X" and r["known_drugs_count"] == 2
+    assert r["tractability"] == [{"modality": "AB", "id": "GO CC high conf", "value": True}] and r["tractability_summary"] == ["AB"]
+    assert len(shape_target(t, n_drugs=2)["known_drugs"]) == 2

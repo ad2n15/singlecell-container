@@ -211,8 +211,8 @@ class Agent:
         tool = self._tool(name)
         if tool is None:
             return {"error": f"unknown tool {name!r}; available: {[t.name for t in self.tools]}"}, True
-        if self.n_tool_calls >= self.max_tool_calls:
-            return {"error": f"tool budget of {self.max_tool_calls} calls is spent; answer now without tools"}, True
+        if self.n_tool_calls >= self.max_tool_calls and not tool.terminal:
+            return {"error": f"tool budget of {self.max_tool_calls} calls is spent; submit the proposal now"}, True
         if arguments is None:
             arguments = {}
         if not isinstance(arguments, Mapping):
@@ -237,14 +237,23 @@ class Agent:
         accepted: dict[str, Any] | None = None
         rejected: dict[str, Any] | None = None
         rejections = 0
+        nudged = False
         final_text = ""
-        for _turn in range(self.max_tool_calls + 2):
+        for _turn in range(self.max_tool_calls + 3):
             allow_tools = self.n_tool_calls < self.max_tool_calls
-            resp = self.call(self.messages, tools=self.tools if allow_tools else [])
+            # with the budget spent only the proposal tool stays, so the agent can still answer
+            resp = self.call(self.messages, tools=self.tools if allow_tools else [t for t in self.tools if t.terminal])
             self.messages.append({"role": "assistant", "content": resp.assistant_content()})
             if resp.text:
                 final_text = resp.text
             if not resp.tool_calls:
+                proposal = next((t.name for t in self.tools if t.terminal), None)
+                if proposal and accepted is None and rejected is None and not nudged:
+                    # some models answer in prose (or with an empty turn) first; ask once for the tool call
+                    nudged = True
+                    self.messages.append({"role": "user", "content": [{"type": "text", "text":
+                        f"Submit your answer by calling the {proposal} tool (inspect with the other tools first if needed)."}]})
+                    continue
                 break
             results: list[dict[str, Any]] = []
             stop = False

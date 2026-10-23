@@ -33,11 +33,24 @@ MAX_TOP = 50
 class InterpretationAgent(Agent):
     role = G4.WORKER_ROLE
     gate = G4.GATE
+    # one summary and hypotheses per contrast x group: 2,048 tokens ran out with six cell types
+    max_tokens = 4096
+    # evidence is fetched gene by gene; markers of every cell type need more than the default 12 lookups
+    max_tool_calls = 24
 
     def user_message(self, bundle: Mapping[str, Any]) -> str:
+        # The per-gene Open Targets evidence, the full gene directions and the evidence ID list are
+        # reached through the tools; sending them inline made the first turn hundreds of thousands of
+        # tokens for a markers-per-cell-type run.
+        view = {k: v for k, v in bundle.items() if k not in ("gene_directions", "evidence_ids")}
+        view["contrasts"] = [
+            {**{k: v for k, v in c.items() if k != "groups"},
+             "groups": [{k: v for k, v in g.items() if k != "opentargets"} for g in c.get("groups", [])]}
+            for c in bundle.get("contrasts", [])]
         return render_bundle_message(
-            bundle,
-            "Evidence bundle for gate G4 (DGE interpretation). Directions come from our data; Open Targets evidence is cited by evidence_id.",
+            view,
+            "Evidence bundle for gate G4 (DGE interpretation). Directions come from our data; Open Targets "
+            "evidence is cited by evidence_id. Per-gene evidence is not shown here: use the tools.",
         )
 
     def build_tools(self, bundle: Mapping[str, Any]) -> list[dict[str, Any]]:

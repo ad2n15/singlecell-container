@@ -26,7 +26,7 @@ STAGES: dict[str, tuple[str, str]] = {
     "S3": ("evidence", "Markers and cell-type evidence"),
     "G2": ("context-review", "Tissue and disease context review"),
     "G3": ("annotation-review", "Cell-type annotation review"),
-    "S4": ("dge", "Pseudobulk differential expression"),
+    "S4": ("dge", "Differential expression"),
     "G4": ("interpretation-review", "DGE interpretation review"),
     "S5": ("report", "Report and export"),
 }

@@ -10,8 +10,11 @@ defaults and the built-in QC policy) and asks for:
 4. doublets (method, and whether called doublets are removed);
 5. clustering (PCs, resolution, HVGs);
 6. batch correction (only with more than one sample);
-7. the LLM for the review agents (from the API keys that are set);
-8. the review gates (agents decide, stop at every gate, or the defaults).
+7. differential expression: FindMarkers (test: MAST, wilcox, ...) or pseudobulk, and either the
+   markers of each cell type or a comparison of two groups defined by any column (condition,
+   donor, sex, age, sample, cell type, cluster ...);
+8. the LLM for the review agents (from the API keys that are set);
+9. the review gates (agents decide, stop at every gate, or the defaults).
 
 Enter keeps the value in brackets. A bad value is explained and asked again.
 :func:`run_wizard` returns the answers as config overrides, a QC policy and an
@@ -24,7 +27,9 @@ script them.
 from __future__ import annotations
 
 import copy
+import csv
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -116,6 +121,85 @@ class _Asker:
             self.say("  please answer y or n")
 
 
+FM_TESTS = [("MAST", "MAST: hurdle model, the default"), ("wilcox", "Wilcoxon rank sum (fast)"),
+            ("LR", "logistic regression"), ("t", "Student's t-test"), ("bimod", "likelihood-ratio for single-cell data"),
+            ("negbinom", "negative binomial (UMI counts)"), ("poisson", "Poisson (UMI counts)"),
+            ("DESeq2", "DESeq2 on single cells")]
+CELL_COLUMNS = ("cell_type_broad", "cell_type_fine", "seurat_clusters")
+_SHEET_SKIP = ("path", "format")
+
+
+def _sample_sheet(cfg: Mapping[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+    """(columns, rows) of the run's samples.csv; empty when it cannot be read."""
+    path = cfg.get("samples_source") or cfg.get("samples")
+    try:
+        with open(str(path), encoding="utf-8-sig", newline="") as fh:
+            rd = csv.DictReader(fh)
+            rows = list(rd)
+            return list(rd.fieldnames or []), rows
+    except (OSError, TypeError, csv.Error):
+        return [], []
+
+
+def _ask_dge(q: "_Asker", say: Say, cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """The dge overrides: method, test, and markers or one two-group contrast."""
+    d0 = cfg.get("dge") or {}
+    say("\nDifferential expression (then Open Targets evidence for the DE genes):")
+    method = q.choice("DE method", [("findmarkers", "FindMarkers (Seurat): compares cells"),
+                                    ("pseudobulk", "Pseudobulk (DESeq2): compares samples; needs >= 2 samples per side"),
+                                    ("none", "none")],
+                      "findmarkers" if d0.get("method", "findmarkers") == "findmarkers" else "pseudobulk")
+    if method == "none":
+        return {"method": "findmarkers", "markers": False, "contrasts": []}
+    out: dict[str, Any] = {"method": method}
+    if method == "findmarkers":
+        out["test"] = q.choice("FindMarkers test", FM_TESTS, str(d0.get("test", "MAST")))
+    header, rows = _sample_sheet(cfg)
+    sheet_cols = [c for c in header if c not in _SHEET_SKIP]
+    if method == "findmarkers":
+        what = q.choice("Compare", [("markers", "markers of each cell type against the other cells"),
+                                    ("groups", "two groups of cells defined by a column")], "markers")
+        if what == "markers":
+            out.update(markers=True, contrasts=[])
+            return out
+    choices = sheet_cols + ([c for c in CELL_COLUMNS] if method == "findmarkers" else [])
+    say("  Columns: " + ", ".join(choices) + (" (any other cell metadata column works too)" if method == "findmarkers" else ""))
+    default_col = next((c for c in sheet_cols if c != "sample_id" and len({r.get(c) for r in rows}) > 1),
+                       sheet_cols[0] if sheet_cols else "condition")
+    while True:
+        col = q.ask("Column that defines the two groups", default_col).strip()
+        if col in sheet_cols or (method == "findmarkers" and col):
+            break
+        say(f"  pseudobulk compares samples: choose a samples.csv column ({', '.join(sheet_cols)})")
+    values = sorted({r.get(col, "") for r in rows if r.get(col, "")}) if col in sheet_cols else []
+    if values:
+        say(f"  values of {col}: {', '.join(values)}")
+
+    def ask_values(text: str, default: str, allow_rest: bool) -> list[str]:
+        while True:
+            got = [v.strip() for v in q.ask(text, default).split(",") if v.strip()]
+            if allow_rest and got == ["rest"]:
+                return got
+            bad = [v for v in got if values and v not in values]
+            if got and not bad:
+                return got
+            say(f"  not a value of {col}: {', '.join(bad)}" if bad else "  please enter at least one value")
+
+    g1 = ask_values("Group 1 (numerator; comma-separated values)", values[-1] if len(values) > 1 else "", False)
+    rest_ok = method == "findmarkers"
+    g2_default = next((v for v in values if v not in g1), "rest" if rest_ok else "")
+    g2 = ask_values("Group 2 (denominator; values" + (", or 'rest' for all other cells)" if rest_ok else ")"),
+                    g2_default, rest_ok)
+    within = d0.get("group_by", "cell_type_broad") if q.yes("Test within each cell type separately", True) else "none"
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{'+'.join(g1)}_vs_{'+'.join(g2)}").strip("-") or "contrast"
+    if not re.match(r"[A-Za-z0-9]", name):
+        name = "c" + name
+    out["contrasts"] = [{"name": name, "column": col, "numerator": g1 if len(g1) > 1 else g1[0],
+                         "denominator": g2 if len(g2) > 1 else g2[0], "within": within}]
+    out["markers"] = "auto"
+    return out
+
+
 def _keys_set(env: Mapping[str, str]) -> list[str]:
     return [p for p in AUTO_ORDER if env.get(PRESETS[p]["api_key_env"])]
 
@@ -170,6 +254,7 @@ def run_wizard(cfg: Mapping[str, Any], *, ask: Ask = terminal_ask, say: Say = pr
             lo=0, lo_open=True, hi=10)}
         res.overrides["n_hvg"] = q.number("Highly variable genes", cfg.get("n_hvg", 2000), integer=True,
                                           lo=100, hi=20000)
+        res.overrides["dge"] = _ask_dge(q, say, cfg)
 
     if ask_batch and n_samples > 1:
         integ = cfg.get("integration") or {}
@@ -226,6 +311,19 @@ def run_wizard(cfg: Mapping[str, Any], *, ask: Ask = terminal_ask, say: Say = pr
                                     f"{(res.overrides.get('clustering') or cfg.get('clustering') or {}).get('resolution')}"
                                     f" / {res.overrides.get('n_hvg', cfg.get('n_hvg'))}"),
     ]
+    dge = {**(cfg.get("dge") or {}), **(res.overrides.get("dge") or {})}
+    if dge.get("contrasts"):
+        c = dge["contrasts"][0]
+        lab = lambda v: "+".join(v) if isinstance(v, list) else str(v)
+        cmp = (f"{c['column']}: {lab(c['numerator'])} vs {lab(c['denominator'])}"
+               + ("" if c.get("within") == "none" else f", within each {c.get('within')}"))
+    elif dge.get("markers") is False or (dge.get("method") != "findmarkers" and not dge.get("contrasts")):
+        cmp = "none"
+    else:
+        cmp = "markers of each cell type vs the other cells"
+    meth = (f"FindMarkers ({dge.get('test', 'MAST')})" if dge.get("method", "findmarkers") == "findmarkers"
+            else f"pseudobulk ({dge.get('pseudobulk_method', 'deseq2')})")
+    res.summary.append(("Differential expression", "none" if cmp == "none" else f"{meth}; {cmp}"))
     if n_samples > 1:
         im = (res.overrides.get("integration") or cfg.get("integration") or {}).get("method", "none")
         res.summary.append(("Batch correction", "Harmony" if im == "harmony" else "none"))

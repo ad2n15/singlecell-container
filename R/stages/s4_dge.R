@@ -1,6 +1,28 @@
-# scpipe stage S4: pseudobulk differential expression (docs/agents-spec.md
-# section 6, DESIGN.md 6.1). The Open Targets half of S4 is Python
+# scpipe stage S4: differential expression (docs/agents-spec.md section 6,
+# DESIGN.md 6.1). The Open Targets half of S4 is Python
 # (python/scpipe/stages/s4_opentargets.py) and runs after this step.
+#
+# Two engines (dge.method):
+# * findmarkers (default): Seurat::FindMarkers between two sets of cells, with
+#   dge.test (MAST by default; wilcox, wilcox_limma, bimod, t, negbinom,
+#   poisson, LR, DESeq2). Each contrast names a cell metadata column (any
+#   samples.csv column, cell_type_broad / cell_type_fine, seurat_clusters, ...),
+#   the values on each side (numerator, denominator; a list, or "rest" for every
+#   other value), and `within`: the column whose groups are tested separately
+#   (default dge.group_by; "none" tests all cells together). Covariates become
+#   latent.vars for MAST, LR, negbinom and poisson. With no contrasts and
+#   dge.markers auto/true, the markers of each group_by group against the rest
+#   of the cells are found (contrast "markers"), so a one-sample study still gets
+#   DE genes and Open Targets evidence.
+# * pseudobulk (or the older values deseq2 / limma_voom): counts summed per
+#   group x sample and tested with DESeq2 or limma-voom (dge.pseudobulk_method);
+#   the contrast column must be constant within each sample (condition, donor,
+#   sex, ...), and each side needs min_replicates samples.
+#
+# FindMarkers tables keep the pseudobulk columns: baseMean is the mean
+# normalised expression of the group's cells, lfcSE is empty, log2fc is
+# avg_log2FC, padj is p_val_adj (Bonferroni, Seurat's), plus pct_1 / pct_2
+# (fraction of cells expressing the gene on each side).
 #
 # Inputs:  S2/object.rds (or .qs2); optional gates/G3/decision.json or
 #          S3/annotation.tsv (cell-type labels)
@@ -47,8 +69,13 @@
 .S4_DEFAULTS <- list(
   sample_col = "sample_id", condition_col = "condition", group_by = "cell_type_broad",
   contrasts = list(), min_cells_per_sample = 20L, min_replicates = 2L,
-  method = "deseq2", padj = 0.05, lfc = 0.5
+  method = "findmarkers", test = "MAST", pseudobulk_method = "deseq2", markers = "auto",
+  min_pct = 0.1, logfc_threshold = 0.25, min_cells_per_side = 10L, max_cells_per_side = NA,
+  padj = 0.05, lfc = 0.5
 )
+.S4_METHODS <- c("findmarkers", "pseudobulk", "deseq2", "limma_voom")
+.S4_TESTS <- c("MAST", "wilcox", "wilcox_limma", "bimod", "t", "negbinom", "poisson", "LR", "DESeq2")
+.S4_LATENT_TESTS <- c("MAST", "LR", "negbinom", "poisson")
 .S4_MIN_GENE_COUNTS <- 10
 .S4_TOP_N <- 10L
 .S4_DGE_COLS <- c("gene", "baseMean", "log2fc", "lfcSE", "pvalue", "padj", "direction")
@@ -65,7 +92,17 @@ s4_config <- function(cfg) {
   str1 <- function(v) is.character(v) && length(v) == 1 && nzchar(v)
   num1 <- function(v) is.numeric(v) && length(v) == 1 && !is.na(v)
   for (k in c("sample_col", "condition_col", "group_by")) chk(str1(d[[k]]), paste0("dge.", k, " must be a non-empty string"))
-  chk(str1(d$method) && d$method %in% c("deseq2", "limma_voom"), "dge.method must be deseq2 or limma_voom")
+  chk(str1(d$method) && d$method %in% .S4_METHODS, paste0("dge.method must be one of ", paste(.S4_METHODS, collapse = ", ")))
+  chk(str1(d$test) && d$test %in% .S4_TESTS, paste0("dge.test must be one of ", paste(.S4_TESTS, collapse = ", ")))
+  chk(str1(d$pseudobulk_method) && d$pseudobulk_method %in% c("deseq2", "limma_voom"),
+      "dge.pseudobulk_method must be deseq2 or limma_voom")
+  mk <- d$markers
+  chk((is.logical(mk) && length(mk) == 1 && !is.na(mk)) || identical(mk, "auto"), "dge.markers must be auto, true or false")
+  chk(num1(d$min_pct) && d$min_pct >= 0 && d$min_pct <= 1, "dge.min_pct must be in [0, 1]")
+  chk(num1(d$logfc_threshold) && d$logfc_threshold >= 0, "dge.logfc_threshold must be >= 0")
+  chk(num1(d$min_cells_per_side) && d$min_cells_per_side >= 1, "dge.min_cells_per_side must be >= 1")
+  chk(is.null(d$max_cells_per_side) || is.na(d$max_cells_per_side) || (num1(d$max_cells_per_side) && d$max_cells_per_side >= 1),
+      "dge.max_cells_per_side must be a number >= 1 or null")
   chk(num1(d$padj) && d$padj > 0 && d$padj <= 1, "dge.padj must be in (0, 1]")
   chk(num1(d$lfc) && d$lfc >= 0, "dge.lfc must be >= 0")
   chk(num1(d$min_cells_per_sample) && d$min_cells_per_sample >= 1, "dge.min_cells_per_sample must be >= 1")
@@ -76,7 +113,14 @@ s4_config <- function(cfg) {
       ct <- d$contrasts[[i]]
       w <- paste0("dge.contrasts[", i, "]")
       if (!is.list(ct)) { chk(FALSE, paste0(w, " must be a mapping")); next }
-      for (k in c("name", "numerator", "denominator")) chk(str1(ct[[k]]), paste0(w, ".", k, " must be a non-empty string"))
+      chk(str1(ct$name), paste0(w, ".name must be a non-empty string"))
+      for (k in c("numerator", "denominator")) {
+        v <- unlist(ct[[k]])
+        chk(is.character(v) && length(v) >= 1 && all(nzchar(v)), paste0(w, ".", k, " must be a value or a list of values"))
+        d$contrasts[[i]][[k]] <- as.character(v)
+      }
+      if (identical(d$contrasts[[i]]$numerator, "rest")) chk(FALSE, paste0(w, ".numerator cannot be 'rest' (use it for the denominator)"))
+      for (k in c("column", "within")) if (!is.null(ct[[k]])) chk(str1(ct[[k]]), paste0(w, ".", k, " must be a column name"))
       if (str1(ct$name)) chk(grepl("^[A-Za-z0-9][A-Za-z0-9._-]*$", ct$name), paste0(w, ".name '", ct$name, "' has characters not allowed in file names"))
       if (!is.null(ct$covariates)) {
         cv <- unlist(ct$covariates)
@@ -91,7 +135,44 @@ s4_config <- function(cfg) {
   if (length(p)) scp_stop("invalid dge config:\n  ", paste(p, collapse = "\n  "))
   d$min_cells_per_sample <- as.integer(d$min_cells_per_sample)
   d$min_replicates <- as.integer(d$min_replicates)
+  d$min_cells_per_side <- as.integer(d$min_cells_per_side)
+  # engine: findmarkers, or pseudobulk with deseq2 / limma_voom (method deseq2 | limma_voom name the
+  # pseudobulk method directly, as before)
+  d$engine <- if (d$method == "findmarkers") "findmarkers" else "pseudobulk"
+  if (d$method %in% c("deseq2", "limma_voom")) d$pseudobulk_method <- d$method
+  for (i in seq_along(d$contrasts)) {
+    d$contrasts[[i]]$column <- d$contrasts[[i]]$column %||% d$condition_col
+    d$contrasts[[i]]$within <- d$contrasts[[i]]$within %||% d$group_by
+  }
   d
+}
+
+#' Side of each cell / unit: "num", "den" or NA from its value of the contrast column.
+s4_sides <- function(values, numerator, denominator) {
+  v <- as.character(values)
+  side <- rep(NA_character_, length(v))
+  side[v %in% numerator] <- "num"
+  if (identical(denominator, "rest")) side[is.na(side) & !is.na(v)] <- "den"
+  else side[v %in% denominator] <- "den"
+  side
+}
+
+.s4_label <- function(x) paste(x, collapse = "+")
+
+#' Check that a contrast's values exist in its column; stop with the available values otherwise.
+s4_check_values <- function(ct, values) {
+  lv <- sort(unique(as.character(values[!is.na(values)])))
+  for (k in c("numerator", "denominator")) {
+    want <- ct[[k]]
+    if (k == "denominator" && identical(want, "rest")) next
+    bad <- setdiff(want, lv)
+    if (length(bad)) scp_stop("dge.contrasts '", ct$name, "': ", k, " '", paste(bad, collapse = "', '"), "' is not a value of '",
+                              ct$column, "' (values: ", paste(utils::head(lv, 30), collapse = ", "),
+                              if (length(lv) > 30) ", ..." else "", ")")
+  }
+  if (!length(setdiff(ct$numerator, ct$denominator)) && !identical(ct$denominator, "rest"))
+    scp_stop("dge.contrasts '", ct$name, "': numerator and denominator are the same")
+  lv
 }
 
 # --------------------------------------------------------------------------
@@ -332,11 +413,234 @@ s4_dge_group <- function(counts, coldata, cond_col, numerator, denominator, cova
   list(table = tab, method_used = method_used, notes = notes, skipped_reason = NULL, n_tested = n_tested, covariates_used = des$covariates)
 }
 
+# --------------------------------------------------------------------------
+# FindMarkers (single-cell tests)
+# --------------------------------------------------------------------------
+
+#' The object ready for FindMarkers: RNA layers joined, a normalised data layer present.
+s4_prepare_findmarkers <- function(obj) {
+  Seurat::DefaultAssay(obj) <- "RNA"
+  if (inherits(obj[["RNA"]], "Assay5") && length(SeuratObject::Layers(obj[["RNA"]], search = "data")) > 1)
+    obj[["RNA"]] <- SeuratObject::JoinLayers(obj[["RNA"]])
+  has_data <- tryCatch(length(SeuratObject::Layers(obj[["RNA"]], search = "data")) > 0, error = function(e) FALSE)
+  if (!has_data) {
+    scp_log("findmarkers: no normalised data layer in the S2 object; running NormalizeData (LogNormalize)")
+    obj <- Seurat::NormalizeData(obj, normalization.method = "LogNormalize", verbose = FALSE)
+  }
+  obj
+}
+
+#' One FindMarkers test between the "num" and "den" cells of `obj`. Returns the same list as
+#' s4_dge_group (table, method_used, notes, skipped_reason, n_tested, covariates_used).
+s4_findmarkers_group <- function(obj, side, test, covariates, d, seed) {
+  notes <- character()
+  test_used <- test
+  if (test == "MAST" && !scp_has_pkg("MAST")) {
+    notes <- c(notes, "MAST is not installed; wilcox used instead")
+    test_used <- "wilcox"
+  }
+  if (test == "DESeq2" && !scp_has_pkg("DESeq2")) {
+    notes <- c(notes, "DESeq2 is not installed; wilcox used instead")
+    test_used <- "wilcox"
+  }
+  latent <- NULL
+  if (length(covariates)) {
+    if (test_used %in% .S4_LATENT_TESTS) {
+      single <- covariates[vapply(covariates, function(cv) length(unique(obj[[cv]][[1]])) < 2, TRUE)]
+      if (length(single)) notes <- c(notes, paste0("covariate(s) ", paste(single, collapse = ", "), " have one level here and were dropped"))
+      latent <- setdiff(covariates, single)
+      if (!length(latent)) latent <- NULL
+    } else {
+      notes <- c(notes, paste0("covariates are used by the MAST, LR, negbinom and poisson tests only; ignored for ", test_used))
+    }
+  }
+  SeuratObject::Idents(obj) <- factor(side, levels = c("den", "num"))
+  maxc <- d$max_cells_per_side
+  maxc <- if (is.null(maxc) || is.na(maxc)) Inf else as.numeric(maxc)
+  fm <- tryCatch(suppressWarnings(suppressMessages(Seurat::FindMarkers(
+    obj, ident.1 = "num", ident.2 = "den", test.use = test_used, logfc.threshold = d$logfc_threshold,
+    min.pct = d$min_pct, max.cells.per.ident = maxc, latent.vars = latent, random.seed = seed, verbose = FALSE))),
+    error = function(e) e)
+  if (inherits(fm, "error"))
+    return(list(table = NULL, method_used = NULL, notes = notes, n_tested = 0L, covariates_used = latent %||% character(),
+                skipped_reason = paste0("FindMarkers (", test_used, ") failed: ", conditionMessage(fm))))
+  if (!nrow(fm))
+    return(list(table = NULL, method_used = NULL, notes = notes, n_tested = 0L, covariates_used = latent %||% character(),
+                skipped_reason = sprintf("no gene passed min.pct %g and logfc.threshold %g", d$min_pct, d$logfc_threshold)))
+  genes <- rownames(fm)
+  dat <- SeuratObject::LayerData(obj, assay = "RNA", layer = "data")[genes, , drop = FALSE]
+  tab <- data.frame(gene = genes, baseMean = as.numeric(Matrix::rowMeans(dat)), log2fc = as.numeric(fm$avg_log2FC),
+                    lfcSE = NA_real_, pvalue = as.numeric(fm$p_val), padj = as.numeric(fm$p_val_adj),
+                    stringsAsFactors = FALSE)
+  tab$direction <- s4_direction(tab$log2fc, tab$padj, d$padj, d$lfc)
+  tab$pct_1 <- as.numeric(fm$pct.1); tab$pct_2 <- as.numeric(fm$pct.2)
+  o <- order(is.na(tab$padj), tab$padj, tab$pvalue, -abs(tab$log2fc))
+  tab <- tab[o, c(.S4_DGE_COLS, "pct_1", "pct_2"), drop = FALSE]
+  rownames(tab) <- NULL
+  list(table = tab, method_used = paste0("findmarkers:", test_used), notes = notes, skipped_reason = NULL,
+       n_tested = nrow(tab), covariates_used = latent %||% character())
+}
+
 .s4_top <- function(tab, dir, n = .S4_TOP_N) {
   t <- tab[tab$direction == dir, , drop = FALSE]
   t <- t[order(t$padj, -abs(t$log2fc)), , drop = FALSE]
   t <- utils::head(t, n)
   lapply(seq_len(nrow(t)), function(i) list(gene = t$gene[i], log2fc = round(t$log2fc[i], 4), padj = signif(t$padj[i], 4)))
+}
+
+.s4_col <- function(x) if (identical(x, "cluster")) "seurat_clusters" else x
+
+#' Parallel FindMarkers workers: SCPIPE_THREADS (the runner's resources.threads), at least 1.
+s4_workers <- function() {
+  n <- suppressWarnings(as.integer(Sys.getenv("SCPIPE_THREADS", "1")))
+  if (is.na(n) || n < 1) 1L else n
+}
+
+.s4_group_entry <- function(g, numerator, denominator, n_samples, n_cells, covariates) {
+  list(group = g, file = NULL, numerator = numerator, denominator = denominator, n_samples = n_samples, n_cells = n_cells,
+       covariates_used = as.list(covariates), method_used = NULL, n_tested = 0L, n_up = 0L, n_down = 0L,
+       skipped_reason = NULL, notes = list(), top_up = list(), top_down = list())
+}
+
+.s4_store <- function(entry, r, f) {
+  entry$notes <- as.list(r$notes); entry$covariates_used <- as.list(r$covariates_used); entry$n_tested <- as.integer(r$n_tested)
+  if (is.null(r$table)) { entry$skipped_reason <- r$skipped_reason; return(entry) }
+  scp_write_tsv_gz(r$table, f)
+  entry$file <- file.path("S4", "dge", basename(f))
+  entry$method_used <- r$method_used
+  entry$n_up <- sum(r$table$direction == "up"); entry$n_down <- sum(r$table$direction == "down")
+  entry$top_up <- .s4_top(r$table, "up"); entry$top_down <- .s4_top(r$table, "down")
+  entry
+}
+
+#' One contrast with FindMarkers: per group of `within` (or all cells), or each group of the
+#' column against the rest (`each`). Returns list(entry, methods).
+s4_contrast_findmarkers <- function(obj, md, ct, col, within, each, d, seed, dge_dir) {
+  vals <- as.character(md[[col]])
+  samp <- if (d$sample_col %in% colnames(md)) as.character(md[[d$sample_col]]) else rep("all", nrow(md))
+  num_l <- if (each) "each group" else .s4_label(ct$numerator)
+  den_l <- if (each) "the other cells" else .s4_label(ct$denominator)
+  groups <- if (each) sort(unique(vals[!is.na(vals)])) else if (is.null(within)) "all cells" else
+    sort(unique(as.character(md[[within]][!is.na(md[[within]])])))
+  side_all <- if (each) NULL else s4_sides(vals, ct$numerator, ct$denominator)
+  fnames <- make.unique(paste0(ct$name, "__", .s4_safe_name(groups)), sep = ".")
+  one <- function(gi) {
+    g <- groups[[gi]]
+    if (each) {
+      side <- ifelse(vals == g, "num", "den"); keep <- !is.na(vals)
+    } else {
+      side <- side_all
+      keep <- !is.na(side) & (if (is.null(within)) TRUE else (as.character(md[[within]]) == g & !is.na(md[[within]])))
+    }
+    idx <- which(keep); sd <- side[idx]
+    n1 <- sum(sd == "num"); n2 <- sum(sd == "den")
+    entry <- .s4_group_entry(g, if (each) g else num_l, if (each) "rest" else den_l,
+                             list(numerator = length(unique(samp[idx][sd == "num"])), denominator = length(unique(samp[idx][sd == "den"]))),
+                             list(numerator = n1, denominator = n2), ct$covariates)
+    if (n1 < d$min_cells_per_side || n2 < d$min_cells_per_side) {
+      entry$skipped_reason <- sprintf("%d %s and %d %s cell(s); min_cells_per_side is %d", n1, entry$numerator, n2,
+                                      entry$denominator, d$min_cells_per_side)
+      scp_log("  ", g, ": skipped (", entry$skipped_reason, ")")
+      return(list(entry = entry, method = NULL))
+    }
+    r <- s4_findmarkers_group(obj[, idx], sd, d$test, ct$covariates, d, seed + gi)
+    entry <- .s4_store(entry, r, file.path(dge_dir, paste0(fnames[[gi]], ".tsv.gz")))
+    if (is.null(entry$skipped_reason)) {
+      scp_log(sprintf("  %s: %s, %d tested, %d up, %d down (%d vs %d cells)", g, r$method_used, entry$n_tested,
+                      entry$n_up, entry$n_down, n1, n2))
+    } else scp_log("  ", g, ": skipped (", entry$skipped_reason, ")")
+    list(entry = entry, method = if (is.null(entry$skipped_reason)) r$method_used else NULL)
+  }
+  # Groups are independent: test them side by side (forked workers, one BLAS thread each).
+  workers <- min(length(groups), s4_workers())
+  res <- if (workers > 1 && .Platform$OS.type == "unix") {
+    scp_log(sprintf("  testing %d groups with %d workers", length(groups), workers))
+    parallel::mclapply(seq_along(groups), function(gi) {
+      if (scp_has_pkg("RhpcBLASctl")) try(RhpcBLASctl::blas_set_num_threads(1), silent = TRUE)
+      one(gi)
+    }, mc.cores = workers, mc.preschedule = FALSE)
+  } else lapply(seq_along(groups), one)
+  group_out <- list(); methods <- character()
+  for (gi in seq_along(groups)) {
+    r <- res[[gi]]
+    if (inherits(r, "try-error") || is.null(r$entry)) {
+      e <- .s4_group_entry(groups[[gi]], num_l, den_l, list(), list(), ct$covariates)
+      e$skipped_reason <- paste0("FindMarkers worker failed: ", trimws(as.character(r)))
+      scp_warn_log("  ", groups[[gi]], ": ", e$skipped_reason)
+      group_out[[gi]] <- e
+    } else {
+      group_out[[gi]] <- r$entry
+      if (!is.null(r$method)) methods <- union(methods, r$method)
+    }
+  }
+  side_cells <- if (each) NULL else side_all
+  samples_side <- if (each) list() else list(numerator = sort(unique(samp[which(side_cells == "num")])),
+                                             denominator = sort(unique(samp[which(side_cells == "den")])))
+  list(methods = methods, entry = list(
+    name = ct$name, engine = "findmarkers", column = col, numerator = num_l, denominator = den_l,
+    within = within %||% "none", covariates = as.list(ct$covariates), samples = samples_side, groups = group_out))
+}
+
+#' One contrast with pseudobulk counts (`pb` from s4_pseudobulk by within-group x sample). The contrast
+#' column and the covariates must have one value per sample. Returns list(entry, methods).
+s4_contrast_pseudobulk <- function(pb, md, ct, col, d, out_dir, dge_dir) {
+  cols <- unique(c(col, ct$covariates))
+  sm <- unique(data.frame(sample = as.character(md[[d$sample_col]]), lapply(md[cols], as.character),
+                          stringsAsFactors = FALSE, check.names = FALSE))
+  if (anyDuplicated(sm$sample)) {
+    bad <- unique(sm$sample[duplicated(sm$sample)])
+    scp_stop("dge.contrasts '", ct$name, "': ", paste(cols, collapse = "/"), " vary within ", d$sample_col, " ",
+             paste(utils::head(bad, 5), collapse = ", "), ". Pseudobulk compares samples, so the column needs one value ",
+             "per sample; method findmarkers compares cells and accepts any column")
+  }
+  rownames(sm) <- sm$sample
+  num_l <- .s4_label(ct$numerator); den_l <- .s4_label(ct$denominator)
+  u <- pb$units
+  u$side <- s4_sides(sm[u$sample, col], ct$numerator, ct$denominator)
+  for (cv in ct$covariates) u[[cv]] <- sm[u$sample, cv]
+  u <- u[!is.na(u$side), , drop = FALSE]
+  u$condition <- ifelse(u$side == "num", num_l, den_l)
+  u$included <- u$n_cells >= d$min_cells_per_sample
+  u$exclude_reason <- ifelse(u$included, "", sprintf("fewer than %d cells", d$min_cells_per_sample))
+  pb_dir <- file.path(out_dir, "pseudobulk", ct$name); dir.create(pb_dir, recursive = TRUE, showWarnings = FALSE)
+  inc <- u[u$included, , drop = FALSE]
+  cm <- as.matrix(pb$counts[, inc$pb_id, drop = FALSE])
+  scp_write_tsv_gz(data.frame(gene = rownames(cm), cm, check.names = FALSE, stringsAsFactors = FALSE), file.path(pb_dir, "counts.tsv.gz"))
+  .s4_write_tsv(u, file.path(pb_dir, "samples.tsv"))
+  samples_side <- list(numerator = sort(unique(inc$sample[inc$side == "num"])), denominator = sort(unique(inc$sample[inc$side == "den"])))
+  groups <- sort(unique(u$group))
+  fnames <- make.unique(paste0(ct$name, "__", .s4_safe_name(groups)), sep = ".")
+  methods <- character(); group_out <- list()
+  for (gi in seq_along(groups)) {
+    g <- groups[[gi]]
+    ug <- inc[inc$group == g, , drop = FALSE]
+    n_num <- sum(ug$side == "num"); n_den <- sum(ug$side == "den")
+    entry <- .s4_group_entry(g, num_l, den_l, list(numerator = n_num, denominator = n_den),
+                             list(numerator = sum(ug$n_cells[ug$side == "num"]), denominator = sum(ug$n_cells[ug$side == "den"])),
+                             ct$covariates)
+    if (n_num < d$min_replicates || n_den < d$min_replicates) {
+      entry$skipped_reason <- sprintf("%d %s and %d %s pseudobulk sample(s) with >= %d cells; min_replicates is %d per side",
+                                      n_num, num_l, n_den, den_l, d$min_cells_per_sample, d$min_replicates)
+      scp_log("  group ", g, ": skipped (", entry$skipped_reason, ")")
+      group_out[[gi]] <- entry; next
+    }
+    coldata <- data.frame(sample = ug$sample, side = ug$side, ug[, ct$covariates, drop = FALSE], row.names = ug$pb_id,
+                          stringsAsFactors = FALSE, check.names = FALSE)
+    r <- s4_dge_group(pb$counts[, ug$pb_id, drop = FALSE], coldata, "side", "num", "den",
+                      ct$covariates, d$pseudobulk_method, d$padj, d$lfc, d$min_replicates)
+    entry <- .s4_store(entry, r, file.path(dge_dir, paste0(fnames[[gi]], ".tsv.gz")))
+    if (is.null(entry$skipped_reason)) {
+      methods <- union(methods, r$method_used)
+      scp_log(sprintf("  group %s: %s, %d tested, %d up, %d down (%d vs %d samples)", g, r$method_used, entry$n_tested,
+                      entry$n_up, entry$n_down, n_num, n_den))
+    } else scp_log("  group ", g, ": skipped (", entry$skipped_reason, ")")
+    group_out[[gi]] <- entry
+  }
+  list(methods = methods, entry = list(
+    name = ct$name, engine = "pseudobulk", column = col, numerator = num_l, denominator = den_l,
+    within = if (identical(unique(u$group), "all cells")) "none" else ct$within, covariates = as.list(ct$covariates),
+    samples = samples_side, pseudobulk_dir = file.path("S4", "pseudobulk", ct$name),
+    n_units = nrow(u), n_units_excluded = sum(!u$included), groups = group_out))
 }
 
 # --------------------------------------------------------------------------
@@ -378,126 +682,83 @@ run_s4 <- function(cfg, repo) {
   }
   if (!(gb %in% colnames(md))) scp_stop("the S2 object has no '", gb, "' column")
 
-  # per-cell sample / condition / covariates
-  all_covs <- unique(unlist(lapply(d$contrasts, function(ct) ct$covariates)))
-  need_cols <- unique(c(d$sample_col, d$condition_col, all_covs))
-  miss <- setdiff(need_cols, colnames(md))
-  if (length(miss) && !length(d$contrasts) && !(d$sample_col %in% miss)) {
-    # No contrasts: the condition / covariate columns are not needed. Pseudobulk still runs;
-    # record the absence instead of failing the run (one-sample or no-condition studies).
-    cond_note <- sprintf("dge: column(s) %s not in the cell metadata and dge.contrasts is empty: pseudobulk only, no DGE",
-                         paste(miss, collapse = ", "))
-    scp_warn_log(cond_note); notes <- c(notes, cond_note)
-    need_cols <- setdiff(need_cols, miss)
-    if (!(d$condition_col %in% colnames(md))) { md[[d$condition_col]] <- "unspecified"; need_cols <- c(need_cols, d$condition_col) }
-    miss <- character()
+  # contrasts: the configured ones; with findmarkers and none configured (or markers: true), the
+  # markers of each group_by group against the other cells
+  contrasts <- d$contrasts
+  if (d$engine == "findmarkers" && (isTRUE(d$markers) || (identical(d$markers, "auto") && !length(contrasts)))) {
+    contrasts <- c(contrasts, list(list(name = "markers", column = gb, numerator = ".each", denominator = "rest",
+                                        within = "none", covariates = character())))
+    scp_log("dge: markers of each ", gb, " group against the other cells (FindMarkers, ", d$test, ")")
   }
-  if (length(miss)) scp_stop("dge: column(s) not in the cell metadata (sample sheet columns become cell metadata in S0): ",
-                             paste(miss, collapse = ", "), "; available: ", paste(colnames(md), collapse = ", "))
-  sample_v <- as.character(md[[d$sample_col]])
-  group_v <- as.character(md[[gb]])
-  unit_meta <- unique(data.frame(lapply(md[need_cols], as.character), stringsAsFactors = FALSE))
-  if (anyDuplicated(unit_meta[[d$sample_col]])) {
-    bad <- unique(unit_meta[[d$sample_col]][duplicated(unit_meta[[d$sample_col]])])
-    scp_stop("dge: condition/covariates vary within sample_col '", d$sample_col, "' for ", paste(bad, collapse = ", "),
-             " (each pseudobulk unit must have one condition and one value per covariate)")
-  }
-  rownames(unit_meta) <- unit_meta[[d$sample_col]]
-  cond_levels <- sort(unique(unit_meta[[d$condition_col]]))
-  for (ct in d$contrasts) for (k in c("numerator", "denominator"))
-    if (!(ct[[k]] %in% cond_levels)) scp_stop("dge.contrasts '", ct$name, "': ", k, " '", ct[[k]], "' is not a value of '", d$condition_col,
-                                               "' (values: ", paste(cond_levels, collapse = ", "), ")")
-
-  pb <- tm("pseudobulk", s4_pseudobulk(obj, group_v, sample_v))
-  units <- pb$units
-  units$condition <- unit_meta[units$sample, d$condition_col]
-  for (cv in all_covs) units[[cv]] <- unit_meta[units$sample, cv]
-  scp_log(sprintf("pseudobulk: %d units (%d groups x %d samples) via %s", nrow(units), length(unique(units$group)),
-                  length(unique(units$sample)), pb$method))
-  if (!length(d$contrasts)) {
+  if (!length(contrasts)) {
     notes <- c(notes, "dge.contrasts is empty: no differential expression was run")
-    scp_warn_log("dge.contrasts is empty: nothing to test")
+    scp_warn_log("dge.contrasts is empty: nothing to test (set dge.contrasts, or method findmarkers for markers per group)")
   }
 
   dge_dir <- file.path(out_dir, "dge"); dir.create(dge_dir, recursive = TRUE, showWarnings = FALSE)
   unlink(list.files(dge_dir, pattern = "\\.tsv\\.gz$", full.names = TRUE))
   method_used_all <- character()
   contrast_out <- list()
-  for (ct in d$contrasts) {
+  fobj <- if (d$engine == "findmarkers" && length(contrasts)) tm("prepare", s4_prepare_findmarkers(obj)) else NULL
+  pb_cache <- list()
+  pb_method <- NULL
+  for (ct in contrasts) {
     t0 <- proc.time()[["elapsed"]]
-    scp_log("contrast ", ct$name, ": ", ct$numerator, " vs ", ct$denominator,
+    col <- .s4_col(ct$column)
+    within <- if (tolower(ct$within) %in% c("none", "all")) NULL else if (identical(ct$within, gb_req)) gb else .s4_col(ct$within)
+    for (cc in c(col, within, ct$covariates))
+      if (!(cc %in% colnames(md))) scp_stop("dge.contrasts '", ct$name, "': column '", cc, "' is not in the cell metadata ",
+                                            "(samples.csv columns, cell_type_broad, cell_type_fine, seurat_clusters, ...); available: ",
+                                            paste(colnames(md), collapse = ", "))
+    each <- identical(ct$numerator, ".each")
+    if (!each) s4_check_values(ct, md[[col]])
+    scp_log("contrast ", ct$name, ": ", if (each) paste0("each ", col, " group vs the rest") else
+              paste0(col, " ", .s4_label(ct$numerator), " vs ", .s4_label(ct$denominator)),
+            if (is.null(within)) "" else paste0(", within each ", within),
             if (length(ct$covariates)) paste0(" (covariates: ", paste(ct$covariates, collapse = ", "), ")") else "")
-    u <- units[units$condition %in% c(ct$numerator, ct$denominator), , drop = FALSE]
-    u$included <- u$n_cells >= d$min_cells_per_sample
-    u$exclude_reason <- ifelse(u$included, "", sprintf("fewer than %d cells", d$min_cells_per_sample))
-    pb_dir <- file.path(out_dir, "pseudobulk", ct$name); dir.create(pb_dir, recursive = TRUE, showWarnings = FALSE)
-    inc <- u[u$included, , drop = FALSE]
-    cm <- as.matrix(pb$counts[, inc$pb_id, drop = FALSE])
-    scp_write_tsv_gz(data.frame(gene = rownames(cm), cm, check.names = FALSE, stringsAsFactors = FALSE), file.path(pb_dir, "counts.tsv.gz"))
-    .s4_write_tsv(u, file.path(pb_dir, "samples.tsv"))
-    samples_side <- list(numerator = sort(unique(inc$sample[inc$condition == ct$numerator])),
-                         denominator = sort(unique(inc$sample[inc$condition == ct$denominator])))
-    groups <- sort(unique(u$group))
-    fnames <- make.unique(paste0(ct$name, "__", .s4_safe_name(groups)), sep = ".")
-    group_out <- list()
-    for (gi in seq_along(groups)) {
-      g <- groups[[gi]]
-      ug <- inc[inc$group == g, , drop = FALSE]
-      n_num <- sum(ug$condition == ct$numerator); n_den <- sum(ug$condition == ct$denominator)
-      cells <- list(numerator = sum(ug$n_cells[ug$condition == ct$numerator]), denominator = sum(ug$n_cells[ug$condition == ct$denominator]))
-      entry <- list(group = g, file = NULL, n_samples = list(numerator = n_num, denominator = n_den), n_cells = cells,
-                    covariates_used = as.list(ct$covariates), method_used = NULL, n_tested = 0L, n_up = 0L, n_down = 0L,
-                    skipped_reason = NULL, notes = list(), top_up = list(), top_down = list())
-      if (n_num < d$min_replicates || n_den < d$min_replicates) {
-        entry$skipped_reason <- sprintf("%d %s and %d %s pseudobulk sample(s) with >= %d cells; min_replicates is %d per side",
-                                        n_num, ct$numerator, n_den, ct$denominator, d$min_cells_per_sample, d$min_replicates)
-        scp_log("  group ", g, ": skipped (", entry$skipped_reason, ")")
-        group_out[[gi]] <- entry; next
+    r <- if (d$engine == "findmarkers") {
+      s4_contrast_findmarkers(fobj, md, ct, col, within, each, d, cfg$seed %||% 42L, dge_dir)
+    } else {
+      key <- within %||% ".all"
+      if (is.null(pb_cache[[key]])) {
+        if (!(d$sample_col %in% colnames(md))) scp_stop("dge: sample_col '", d$sample_col, "' is not in the cell metadata")
+        gv <- if (is.null(within)) rep("all cells", ncol(obj)) else as.character(md[[within]])
+        pb_cache[[key]] <- tm(paste0("pseudobulk_", key), s4_pseudobulk(obj, gv, as.character(md[[d$sample_col]])))
+        pb_method <- pb_cache[[key]]$method
+        u <- pb_cache[[key]]$units
+        scp_log(sprintf("pseudobulk: %d units (%d groups x %d samples) via %s", nrow(u), length(unique(u$group)),
+                        length(unique(u$sample)), pb_cache[[key]]$method))
       }
-      coldata <- data.frame(ug[, c("sample", "condition", ct$covariates), drop = FALSE], row.names = ug$pb_id, stringsAsFactors = FALSE)
-      colnames(coldata)[2] <- d$condition_col
-      r <- s4_dge_group(pb$counts[, ug$pb_id, drop = FALSE], coldata, d$condition_col, ct$numerator, ct$denominator,
-                        ct$covariates, d$method, d$padj, d$lfc, d$min_replicates)
-      entry$notes <- as.list(r$notes); entry$covariates_used <- as.list(r$covariates_used); entry$n_tested <- as.integer(r$n_tested)
-      if (is.null(r$table)) {
-        entry$skipped_reason <- r$skipped_reason
-        scp_log("  group ", g, ": skipped (", r$skipped_reason, ")")
-        group_out[[gi]] <- entry; next
-      }
-      f <- file.path(dge_dir, paste0(fnames[[gi]], ".tsv.gz"))
-      scp_write_tsv_gz(r$table, f)
-      entry$file <- file.path("S4", "dge", basename(f))
-      entry$method_used <- r$method_used
-      method_used_all <- union(method_used_all, r$method_used)
-      entry$n_up <- sum(r$table$direction == "up"); entry$n_down <- sum(r$table$direction == "down")
-      entry$top_up <- .s4_top(r$table, "up"); entry$top_down <- .s4_top(r$table, "down")
-      scp_log(sprintf("  group %s: %s, %d tested, %d up, %d down (%d vs %d samples)", g, r$method_used, entry$n_tested,
-                      entry$n_up, entry$n_down, n_num, n_den))
-      group_out[[gi]] <- entry
+      s4_contrast_pseudobulk(pb_cache[[key]], md, ct, col, d, out_dir, dge_dir)
     }
+    method_used_all <- union(method_used_all, r$methods)
     timings[[paste0("contrast_", ct$name)]] <- round(proc.time()[["elapsed"]] - t0, 3)
-    contrast_out[[length(contrast_out) + 1]] <- list(
-      name = ct$name, numerator = ct$numerator, denominator = ct$denominator, covariates = as.list(ct$covariates),
-      samples = samples_side, pseudobulk_dir = file.path("S4", "pseudobulk", ct$name),
-      n_units = nrow(u), n_units_excluded = sum(!u$included), groups = group_out)
+    contrast_out[[length(contrast_out) + 1]] <- r$entry
   }
+  sample_v <- if (d$sample_col %in% colnames(md)) as.character(md[[d$sample_col]]) else rep("all", ncol(obj))
+  group_v <- as.character(md[[gb]])
+  cond_levels <- if (d$condition_col %in% colnames(md)) sort(unique(as.character(md[[d$condition_col]]))) else character()
 
   summary <- list(
     stage = "S4", step = "dge", run_id = cfg$run_id, config_hash = cfg$config_hash, created_utc = .scp_utc(),
-    method = list(requested = d$method, used = as.list(method_used_all),
-                  available = list(DESeq2 = scp_has_pkg("DESeq2"), limma = scp_has_pkg("limma"))),
+    method = list(requested = d$method, engine = d$engine,
+                  test = if (d$engine == "findmarkers") d$test else NULL,
+                  pseudobulk_method = if (d$engine == "pseudobulk") d$pseudobulk_method else NULL,
+                  used = as.list(method_used_all),
+                  available = list(DESeq2 = scp_has_pkg("DESeq2"), limma = scp_has_pkg("limma"), MAST = scp_has_pkg("MAST"))),
     group_by = list(requested = gb_req, used = gb, note = gb_note),
     labels = list(source = lab$source, note = lab$note, n_unassigned_cells = lab$n_unassigned),
     sample_col = d$sample_col, condition_col = d$condition_col, condition_levels = as.list(cond_levels),
     thresholds = list(padj = d$padj, lfc = d$lfc, min_cells_per_sample = d$min_cells_per_sample,
-                      min_replicates = d$min_replicates, min_gene_counts = .S4_MIN_GENE_COUNTS),
+                      min_replicates = d$min_replicates, min_gene_counts = .S4_MIN_GENE_COUNTS,
+                      min_pct = d$min_pct, logfc_threshold = d$logfc_threshold, min_cells_per_side = d$min_cells_per_side),
     n_cells = ncol(obj), n_genes = nrow(obj), n_groups = length(unique(group_v)), n_samples = length(unique(sample_v)),
-    pseudobulk_method = pb$method, gene_map = "S4/gene_map.tsv",
+    pseudobulk_method = pb_method, gene_map = "S4/gene_map.tsv",
     contrasts = contrast_out, notes = as.list(notes),
     timings_s = timings, total_s = round(sum(unlist(timings)), 3),
     peak_memory = list(r_peak_rss_gb = scp_peak_mem_gb()),
     packages = list(R = paste(R.version$major, R.version$minor, sep = "."), Seurat = scp_pkg_version("Seurat"),
-                    DESeq2 = scp_pkg_version("DESeq2"), limma = scp_pkg_version("limma"))
+                    DESeq2 = scp_pkg_version("DESeq2"), limma = scp_pkg_version("limma"), MAST = scp_pkg_version("MAST"))
   )
   scp_write_json(summary, file.path(out_dir, "dge_summary.json"))
   n_tab <- sum(vapply(contrast_out, function(c) sum(vapply(c$groups, function(g) !is.null(g$file), TRUE)), 1))

@@ -84,7 +84,42 @@ def read_opentargets_summary(path: str | Path) -> dict[str, Any]:
     raw = _load_json(Path(path))
     if not isinstance(raw, Mapping):
         raise ValueError(f"{path}: expected a JSON object")
-    return dict(raw)
+    out = dict(raw)
+    if isinstance(raw.get("contrasts"), list):
+        out["contrasts"] = _by_contrast(raw)
+    return out
+
+
+# Evidence kept per gene for the agent (the full records stay in S4/opentargets_summary.json).
+_EVIDENCE_GENES = 20      # per contrast x group x direction (the top-ranked DE genes)
+_EVIDENCE_DISEASES = 5
+_EVIDENCE_DRUGS = 3
+
+
+def _by_contrast(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """The stage's summary (``contrasts: [{contrast, groups: [{group, directions}]}]`` plus ``targets``)
+    as ``{contrast: {group: {direction: {n_genes, n_with_evidence, genes: [{gene, ..., evidence}]}}}}``."""
+    targets = raw.get("targets") or {}
+    out: dict[str, Any] = {}
+    for c in raw.get("contrasts") or []:
+        cd = out.setdefault(str(c.get("contrast")), {})
+        for g in c.get("groups") or []:
+            gd = cd.setdefault(str(g.get("group")), {})
+            for dirn, blk in (g.get("directions") or {}).items():
+                genes = []
+                for x in (blk.get("genes") or [])[:_EVIDENCE_GENES]:
+                    t = targets.get(x.get("target") or "") or {}
+                    ev = [{"evidence_id": d.get("evidence_id"), "type": "associated_disease", "label": d.get("name"),
+                           "efo_id": d.get("efo_id"), "score": d.get("score")}
+                          for d in (t.get("associated_diseases") or [])[:_EVIDENCE_DISEASES]]
+                    ev += [{"evidence_id": k.get("evidence_id"), "type": "known_drug", "label": k.get("drug"),
+                            "phase": k.get("phase"), "disease": k.get("disease"), "mechanism": k.get("mechanism")}
+                           for k in (t.get("known_drugs") or [])[:_EVIDENCE_DRUGS]]
+                    genes.append({"gene": x.get("gene"), "symbol": x.get("symbol"), "ensembl_id": x.get("ensembl_id"),
+                                  "direction": dirn, "log2fc": x.get("log2fc"), "padj": x.get("padj"), "evidence": ev})
+                gd[str(dirn)] = {"n_genes": blk.get("n_de", len(genes)),
+                                 "n_with_evidence": sum(1 for x in genes if x["evidence"]), "genes": genes}
+    return out
 
 
 def collect_evidence_ids(node: Any, out: dict[str, dict] | None = None) -> dict[str, dict]:
@@ -166,7 +201,8 @@ def build_bundle(run_dir: str | Path, cfg: Mapping[str, Any] | None = None) -> d
             })
         contrasts.append({"contrast": cname, "numerator": c.get("numerator"), "denominator": c.get("denominator"),
                           "covariates": list(c.get("covariates") or []), "groups": groups})
-    ids = collect_evidence_ids(ot)
+    # the IDs the agent can cite: those of the evidence in the bundle (not every drug row of every target)
+    ids = collect_evidence_ids(contrasts)
     return {
         "gate": GATE,
         "method": dge.get("method"), "padj": dge.get("padj"), "lfc": dge.get("lfc"),

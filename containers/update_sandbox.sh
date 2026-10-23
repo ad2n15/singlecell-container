@@ -1,8 +1,9 @@
 #!/bin/bash
 # Update an unpacked scpipe image (Apptainer sandbox) in place from this checkout: scpipe's code
 # under /opt/scpipe, the scpipe Python package, and scfast + scfastR rebuilt from rust/.
+# R packages listed in containers/install_r_packages.R that the sandbox lacks are installed too.
 # Minutes instead of the ~1 h full build; rebuild the image (scpipe-build.def) instead when the
-# base image, R/Python dependency lists or system libraries change.
+# base image, the Python dependency list or system libraries change.
 #
 #   containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox             # code + Rust
 #   containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox --code-only # no Rust rebuild
@@ -32,6 +33,7 @@ trap 'rm -rf "$W"' EXIT
 echo "== source $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')$(git -C "$REPO" diff --quiet 2>/dev/null || echo ' (with uncommitted changes)')"
 rsync -a --exclude target --exclude __pycache__ --exclude '*.o' --exclude '*.so' \
   "$REPO/python" "$REPO/rust" "$W/"
+cp "$REPO/containers/install_r_packages.R" "$W/"
 
 echo "== build inside the sandbox"
 apptainer exec --cleanenv -B "$W:/work" --env CODE_ONLY=$CODE_ONLY "$SBX" bash -c '
@@ -50,6 +52,8 @@ if [ "$CODE_ONLY" = 0 ]; then
     R CMD INSTALL --no-test-load -l /work/rlib rust/scfast-r
 fi
 /opt/conda/bin/pip install --quiet --no-cache-dir --no-deps --target /work/py /work/python $(ls /work/wheels/scfast-*.whl 2>/dev/null)
+# R packages the sandbox lacks (e.g. one newly added to install_r_packages.R), into /work/rlib-extra
+PATH=$SYS_PATH SCPIPE_R_LIB=/work/rlib-extra Rscript /work/install_r_packages.R
 '
 
 echo "== install into $SBX"
@@ -62,6 +66,11 @@ for p in "${pkgs[@]}"; do
   rsync -a "$W/py/$p" "$W"/py/"$p"-*.dist-info "$SP/"
 done
 [ $CODE_ONLY = 0 ] && rsync -a --delete "$W/rlib/scfastR/" "$RLIB/scfastR/"
+for d in "$W"/rlib-extra/*/; do
+  [ -d "$d" ] || continue
+  echo "   R package $(basename "$d")"
+  rsync -a --delete "$d" "$RLIB/$(basename "$d")/"
+done
 chmod -R a+rX "$SBX/opt/scpipe"
 { echo "updated $(date -u +%FT%TZ) from $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
   git -C "$REPO" diff --quiet 2>/dev/null || echo "with uncommitted changes"; } > "$SBX/opt/scpipe/UPDATED"

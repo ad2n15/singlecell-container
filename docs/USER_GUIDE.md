@@ -50,7 +50,7 @@ The terminal, `scpipe status` and the dashboard show each stage's name; on the c
 | S3 | `evidence` | Markers, signature scores, CellTypist (if installed), consensus annotation in code |
 | G2 | `context-review` | Context agent: tissue and disease candidates (gate) |
 | G3 | `annotation-review` | Annotation agent (gate) |
-| S4 | `dge` | Pseudobulk DGE per contrast and cell type, Open Targets evidence for the DE genes |
+| S4 | `dge` | Differential expression (FindMarkers with MAST by default, or pseudobulk DESeq2) per comparison and cell type; markers of each cell type when no comparison is set; Open Targets evidence for the DE genes |
 | G4 | `interpretation-review` | Interpretation agent writes labelled hypotheses, the reviewer checks every cited ID (gate) |
 | S5 | `report` | `report.html` and `explorer.html` |
 
@@ -74,8 +74,10 @@ line per stage instead. `--progress live|plain` forces either.
 4. doublets: Scrublet, scDblFinder or none, and whether called doublets are removed;
 5. clustering: PCs (`auto`), Leiden resolution (0.5), highly variable genes (2000);
 6. batch correction with Harmony (only with more than one sample);
-7. the LLM for the review agents, from the API keys that are set;
-8. the review gates: agents decide, stop at every gate, or the defaults.
+7. differential expression: FindMarkers (MAST, wilcox, LR, ...) or pseudobulk, and either the
+   markers of each cell type or two groups of any column (condition, donor, sex, cell type, ...);
+8. the LLM for the review agents, from the API keys that are set;
+9. the review gates: agents decide, stop at every gate, or the defaults.
 
 It then shows a summary and asks to start. The answers are saved as
 `<run-dir>/config/wizard.yaml` (plus `wizard_qc_policy.yaml`), and the command that repeats the
@@ -121,14 +123,23 @@ llm:                             # optional: without it the first key set is use
   replay: false                  # true: reuse logged outputs for identical prompts (no calls, no cost)
 
 dge:
-  sample_col: sample_id
-  condition_col: condition
-  group_by: cell_type_broad      # or cluster
-  contrasts:
-    - {name: disease_vs_control, numerator: disease, denominator: control, covariates: [batch]}
-  min_cells_per_sample: 20
-  min_replicates: 2
-  method: deseq2                 # limma_voom is the fallback when DESeq2 is missing
+  method: findmarkers            # findmarkers (Seurat, compares cells) | pseudobulk (compares samples)
+  test: MAST                     # FindMarkers test: MAST, wilcox, wilcox_limma, LR, t, bimod, negbinom, poisson, DESeq2
+  pseudobulk_method: deseq2      # method pseudobulk: deseq2 | limma_voom
+  markers: auto                  # auto: with no contrasts, markers of each cell type vs the other cells; true: always too
+  group_by: cell_type_broad      # the groups tested separately (cell_type_fine, cluster, ...)
+  contrasts:                     # each side is one or more values of any cell metadata column
+    - {name: disease_vs_control, column: condition, numerator: disease, denominator: control, covariates: [batch]}
+    - {name: female_vs_male, column: sex, numerator: F, denominator: M}
+    - {name: old_vs_young, column: age_group, numerator: [60-70, 70-80], denominator: rest, within: none}
+    - {name: B_vs_T, column: cell_type_broad, numerator: B cell, denominator: T cell, within: none}
+  min_pct: 0.1                   # FindMarkers: genes expressed in at least this fraction of one side
+  logfc_threshold: 0.25          # FindMarkers: minimum |log2 FC| to test a gene
+  min_cells_per_side: 10         # FindMarkers: fewer cells on a side skips the group
+  max_cells_per_side: null       # FindMarkers: downsample each side to this many cells (speed)
+  sample_col: sample_id          # pseudobulk: the sample column (one pseudobulk per group x sample)
+  min_cells_per_sample: 20       # pseudobulk: smaller pseudobulk samples are dropped
+  min_replicates: 2              # pseudobulk: samples needed on each side
   padj: 0.05
   lfc: 0.5
 
@@ -161,6 +172,28 @@ A local NIM or vLLM server: `{provider: openai_compatible, base_url: http://loca
 The NVIDIA preset asks for JSON with `json_object` (not every NIM model supports `json_schema`); use
 a NIM model that supports tool calls. `scpipe doctor` shows which provider and model were chosen and
 makes a tool-use test call.
+
+### Differential expression (S4)
+
+By default S4 runs Seurat `FindMarkers` with the MAST test. Each comparison in `dge.contrasts`
+names a cell metadata `column` and the values on each side:
+- **Columns:** any `samples.csv` column (condition, donor, sex, age group, sample, batch, ...) becomes
+  cell metadata, so it works, as do `cell_type_broad`, `cell_type_fine` and `seurat_clusters`.
+- **Sides:** `numerator` and `denominator` take one value or a list; `denominator: rest` means every
+  other value.
+- **Groups:** the comparison runs within each cell type (`group_by`) unless `within: none`, which
+  uses all cells together.
+- **Covariates:** these are passed to MAST, LR, negbinom and poisson as `latent.vars`.
+
+With no comparisons set, S4 finds the markers of each cell type against the other cells, so a
+single-sample study still gets DE genes and Open Targets evidence. Groups are tested in parallel
+(`resources.threads`). `test` picks another FindMarkers test (`wilcox` is much faster than MAST on
+large data).
+
+`method: pseudobulk` (DESeq2, or `pseudobulk_method: limma_voom`) sums counts per cell type and
+sample and compares samples instead. Its column must have one value per sample, and each side
+needs `min_replicates` samples. Configs that set `method: deseq2` or `limma_voom` keep running
+pseudobulk.
 
 ### Engine: Rust, Seurat or GPU
 

@@ -336,7 +336,7 @@ def test_g2_two_violations_fall_back_to_baseline(run_dir):
 
 
 def test_g2_no_proposal_is_fallback(run_dir):
-    prov = mock_provider("context_worker", [{"text": "The tissue is probably blood."}])
+    prov = mock_provider("context_worker", [{"text": "The tissue is probably blood."}, {"text": "Blood."}])
     out = ContextAgent(prov).run(G2.build_bundle(run_dir, {}))
     assert out["fallback"] and out["proposal"] == {} and not out["policy_check"]["ok"]
 
@@ -610,7 +610,7 @@ def test_gate_stage_cli_exit_codes(run_dir, gate, module):
 
 def test_max_tool_calls_is_twelve(run_dir):
     many = [{"tool_calls": [call("list_clusters")] * 6}, {"tool_calls": [call("list_clusters")] * 6},
-            {"tool_calls": [call("list_clusters")]}, {"text": "done"}]
+            {"tool_calls": [call("list_clusters")]}, {"text": "done"}, {"text": "done"}]
     prov = mock_provider("context_worker", many)
     agent = ContextAgent(prov)
     out = agent.run(G2.build_bundle(run_dir, {}))
@@ -660,3 +660,26 @@ def test_shim_fallback_loop_matches_contract(run_dir):
     files = fb.write_gate_files(run_dir / "gates" / "G2", b, out, {"verdict": "approve", "findings": [], "reviewer": {"model": "x"}},
                                {"gate": "G2", "mode": "auto", "decided_by": "agent", "decided_utc": "t", "decision": out["proposal"], "changes_vs_proposal": []})
     assert set(files) == {"bundle", "proposal", "review", "decision", "report"}
+
+
+def test_g4_reads_the_stage_opentargets_summary(tmp_path):
+    """S4 writes contrasts as a list with a separate targets table; G4 turns it into per-gene evidence."""
+    from scpipe.gates.g4_interpretation import read_opentargets_summary
+
+    stage = {"contrasts": [{"contrast": "markers", "groups": [{"group": "B cell", "directions": {
+        "up": {"n_de": 240, "genes": [{"gene": "MS4A1", "symbol": "MS4A1", "ensembl_id": "ENSG1", "log2fc": 5.7, "padj": 0.0,
+                                       "target": "MS4A1"},
+                                      {"gene": "XYZ", "symbol": "XYZ", "target": None}]},
+        "down": {"n_de": 0, "genes": []}}}]}],
+        "targets": {"MS4A1": {"associated_diseases": [{"efo_id": "MONDO_1", "name": "lymphoma", "score": 0.8,
+                                                       "evidence_id": "OT:ENSG1:disease:MONDO_1"}],
+                              "known_drugs": [{"drug": "RITUXIMAB", "phase": 4, "disease": "lymphoma", "mechanism": "CD20",
+                                               "evidence_id": "OT:ENSG1:drug:CHEMBL1:MONDO_1"}]}}}
+    p = tmp_path / "ot.json"
+    p.write_text(json.dumps(stage))
+    ot = read_opentargets_summary(p)
+    up = ot["contrasts"]["markers"]["B cell"]["up"]
+    assert up["n_genes"] == 240 and up["n_with_evidence"] == 1
+    ev = up["genes"][0]["evidence"]
+    assert [e["evidence_id"] for e in ev] == ["OT:ENSG1:disease:MONDO_1", "OT:ENSG1:drug:CHEMBL1:MONDO_1"]
+    assert up["genes"][1]["evidence"] == []

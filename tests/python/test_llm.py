@@ -387,18 +387,36 @@ def test_agent_two_rejections_then_fallback_and_no_proposal():
     out = ag.run({})
     assert out["fallback"] is True and out["policy_check"] == {"ok": False, "violations": ["value must be >= 0"]}
     assert out["proposal"] == {"value": -2} and ag.n_calls == 2  # stops after the second rejection
-    ag = Toy(get_provider(mock_cfg("qc_worker", [{"text": "nothing to do"}]), "qc_worker"))
+    ag = Toy(get_provider(mock_cfg("qc_worker", [{"text": "nothing to do"}, {"text": "still nothing"}]), "qc_worker"))
     out = ag.run({})
-    assert out["fallback"] and out["rationale"] == "nothing to do" and "no proposal" in out["policy_check"]["violations"][0]
+    assert out["fallback"] and out["rationale"] == "still nothing" and "no proposal" in out["policy_check"]["violations"][0]
+    # one nudge to use the proposal tool, then it stops
+    assert ag.n_calls == 2 and "calling the propose tool" in ag.provider.calls[1]["messages"][-1]["content"][0]["text"]
+
+
+def test_agent_is_nudged_once_then_proposes():
+    script = [{"text": "Blood, probably."}, {"tool": "propose", "arguments": {"value": 1, "rationale": "r"}}]
+    ag = Toy(get_provider(mock_cfg("qc_worker", script), "qc_worker"))
+    out = ag.run({})
+    assert out["fallback"] is False and out["proposal"] == {"value": 1} and ag.n_calls == 2
+
+
+def test_proposal_tool_stays_after_the_budget_is_spent():
+    script = [{"tool_calls": [{"name": "add", "arguments": {"a": 1, "b": 1}}] * 2},
+              {"tool": "propose", "arguments": {"value": 2, "rationale": "after the budget"}}]
+    ag = Toy(get_provider(mock_cfg("qc_worker", script), "qc_worker"), max_tool_calls=2)
+    out = ag.run({})
+    assert out["fallback"] is False and out["proposal"] == {"value": 2}
+    assert ag.provider.calls[1]["tools"] == ["propose"]  # only the proposal tool is offered
 
 
 def test_agent_tool_budget_is_capped():
-    script = [{"tool_calls": [{"name": "add", "arguments": {"a": 1, "b": 1}}] * 5} for _ in range(3)] + [{"text": "done"}]
+    script = [{"tool_calls": [{"name": "add", "arguments": {"a": 1, "b": 1}}] * 5} for _ in range(3)] + [{"text": "done"}] * 2
     ag = Toy(get_provider(mock_cfg("qc_worker", script), "qc_worker"), max_tool_calls=12)
     prov = ag.provider
     out = ag.run({})
     assert ag.n_tool_calls == 12 and out["fallback"]
-    assert prov.calls[-1]["tools"] == []  # the last turn is asked without tools
+    assert prov.calls[-1]["tools"] == ["propose"]  # after the budget only the proposal tool is offered
     errs = [json.loads(b["content"]) for c in prov.calls for m in c["messages"] if isinstance(m["content"], list)
             for b in m["content"] if b.get("type") == "tool_result" and b["is_error"]]
     assert any("tool budget" in e["error"] for e in errs)

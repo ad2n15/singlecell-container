@@ -157,7 +157,18 @@ check_planted <- function(tab, label) {
 # ------------------------------------------------------------------ helpers
 test_that("s4_config fills defaults and validates", {
   d <- s4_config(list(dge = NULL))
-  expect_equal(d$method, "deseq2"); expect_equal(d$group_by, "cell_type_broad"); expect_equal(length(d$contrasts), 0)
+  expect_equal(d$method, "findmarkers"); expect_equal(d$engine, "findmarkers"); expect_equal(d$test, "MAST")
+  expect_equal(d$group_by, "cell_type_broad"); expect_equal(length(d$contrasts), 0)
+  d <- s4_config(list(dge = list(method = "deseq2")))
+  expect_equal(d$engine, "pseudobulk"); expect_equal(d$pseudobulk_method, "deseq2")
+  d <- s4_config(list(dge = list(method = "pseudobulk", pseudobulk_method = "limma_voom")))
+  expect_equal(d$engine, "pseudobulk"); expect_equal(d$pseudobulk_method, "limma_voom")
+  expect_error(s4_config(list(dge = list(test = "magic"))), "dge.test")
+  expect_error(s4_config(list(dge = list(contrasts = list(list(name = "a", numerator = "rest", denominator = "x"))))), "rest")
+  d <- s4_config(list(dge = list(contrasts = list(list(name = "a", column = "sex", numerator = list("F"), denominator = "rest")))))
+  expect_equal(d$contrasts[[1]]$column, "sex"); expect_equal(d$contrasts[[1]]$within, "cell_type_broad")
+  expect_equal(s4_sides(c("F", "M", NA, "X"), "F", "rest"), c("num", "den", NA, "den"))
+  expect_equal(s4_sides(c("a", "b", "c"), c("a", "b"), "c"), c("num", "num", "den"))
   expect_error(s4_config(list(dge = list(method = "edger"))), "dge.method")
   expect_error(s4_config(list(dge = list(contrasts = list(list(name = "a"))))), "numerator")
   expect_error(s4_config(list(dge = list(contrasts = list(list(name = "a/b", numerator = "x", denominator = "y"))))), "file names")
@@ -366,6 +377,71 @@ test_that("S4 validates contrasts against the data and handles an empty contrast
   expect_equal(length(summ$contrasts), 0)
   expect_true(any(grepl("contrasts is empty", unlist(summ$notes))))
   expect_true(file.exists(file.path(cfg$run_dir, "S4", "dge_summary.json")))
+  unlink(cfg$run_dir, recursive = TRUE)
+})
+
+test_that("FindMarkers (default engine): markers of each cell type when no contrast is set", {
+  obj <- make_object()
+  cfg <- make_run(obj, list(test = "wilcox", min_cells_per_side = 5L))
+  summ <- run_s4(cfg, REPO)
+  expect_equal(summ$method$engine, "findmarkers"); expect_equal(unlist(summ$method$used), "findmarkers:wilcox")
+  expect_equal(length(summ$contrasts), 1)
+  ct <- summ$contrasts[[1]]
+  expect_equal(ct$name, "markers"); expect_equal(ct$within, "none")
+  expect_equal(sort(vapply(ct$groups, function(g) g$group, "")), sort(unname(unlist(CLUSTER_LABELS))))
+  markers <- jsonlite::fromJSON(file.path(FIX, "expected.json"))$marker_genes
+  for (g in ct$groups) {
+    expect_equal(g$denominator, "rest")
+    tab <- read_dge(file.path(cfg$run_dir, g$file))
+    expect_true(all(c("gene", "baseMean", "log2fc", "lfcSE", "pvalue", "padj", "direction", "pct_1", "pct_2") %in% colnames(tab)))
+    expect_gt(g$n_up, 0)
+    expect_equal(g$n_cells$numerator + g$n_cells$denominator, ncol(obj))
+  }
+  # the planted marker genes of each type are among its top markers
+  for (g in ct$groups) {
+    top <- vapply(g$top_up, function(x) x$gene, "")
+    expect_true(any(markers[[g$group]] %in% top), info = g$group)
+  }
+  unlink(cfg$run_dir, recursive = TRUE)
+})
+
+test_that("FindMarkers compares two groups of any column, within each cell type or across all cells", {
+  obj <- make_object()
+  cfg <- make_run(obj, list(test = "wilcox", min_cells_per_side = 5L, contrasts = list(
+    list(name = "treated_vs_control", column = "condition", numerator = "treated", denominator = "control"),
+    list(name = "donorB_all", column = "donor", numerator = "donor_B", denominator = "rest", within = "none"))))
+  summ <- run_s4(cfg, REPO)
+  expect_equal(vapply(summ$contrasts, function(c) c$name, ""), c("treated_vs_control", "donorB_all"))  # no markers: contrasts set
+  tc <- summ$contrasts[[1]]
+  expect_equal(tc$column, "condition"); expect_equal(tc$within, "cell_type_broad")
+  found_up <- unique(unlist(lapply(tc$groups, function(g) {
+    if (is.null(g$file)) return(character())
+    t <- read_dge(file.path(cfg$run_dir, g$file)); t$gene[t$direction == "up"]
+  })))
+  expect_gt(mean(PLANTED$up %in% found_up), 0.6)
+  dn <- summ$contrasts[[2]]
+  expect_equal(length(dn$groups), 1); expect_equal(dn$groups[[1]]$group, "all cells")
+  expect_equal(unlist(dn$samples$numerator), c("donor_B_a", "donor_B_b"))
+  unlink(cfg$run_dir, recursive = TRUE)
+  # markers: true adds the per-group markers to the configured contrasts
+  cfg <- make_run(obj, list(test = "wilcox", markers = TRUE, min_cells_per_side = 5L, contrasts = list(
+    list(name = "tc", numerator = "treated", denominator = "control", within = "none"))))
+  expect_equal(vapply(run_s4(cfg, REPO)$contrasts, function(c) c$name, ""), c("tc", "markers"))
+  unlink(cfg$run_dir, recursive = TRUE)
+})
+
+test_that("pseudobulk takes any sample-level column and refuses cell-level ones", {
+  skip_if_not(has_deseq2, "DESeq2 not installed")
+  obj <- make_object()
+  cfg <- make_run(obj, default_dge(contrasts = list(list(name = "tc", column = "condition", numerator = "treated",
+                                                         denominator = "rest"))))
+  summ <- run_s4(cfg, REPO)
+  expect_equal(summ$method$engine, "pseudobulk"); expect_equal(summ$contrasts[[1]]$denominator, "rest")
+  expect_true(any(vapply(summ$contrasts[[1]]$groups, function(g) !is.null(g$file), TRUE)))
+  unlink(cfg$run_dir, recursive = TRUE)
+  cfg <- make_run(obj, default_dge(contrasts = list(list(name = "ct", column = "cell_type_broad", numerator = "B",
+                                                         denominator = "rest", within = "none"))))
+  expect_error(run_s4(cfg, REPO), "one value per sample")
   unlink(cfg$run_dir, recursive = TRUE)
 })
 

@@ -6,10 +6,10 @@ string here changes every cache key that uses it.
 
 Field names follow the public schema at
 https://api.platform.opentargets.org/api/v4/graphql/schema (search, target,
-tractability, knownDrugs, associatedDiseases). They could not be checked
-against the live endpoint from the build workspace (no network), so if the
-schema has moved the error surfaces as ``OpenTargetsError`` with the server's
-message and only this file needs changing.
+tractability, drugAndClinicalCandidates, associatedDiseases), checked against the live
+endpoint in October 2026, when it replaced knownDrugs and tractability.id (now label). If the
+schema moves again the error surfaces as ``OpenTargetsError`` with the server's message and
+only this file (and ``client.shape_target``) needs changing.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ query TargetSearch($text: String!) {
 # Evidence for one target: tractability, known drugs (name, phase, disease,
 # mechanism) and the ten strongest disease associations.
 TARGET_EVIDENCE = """
-query TargetEvidence($id: String!, $drugs: Int!, $diseases: Int!) {
+query TargetEvidence($id: String!, $diseases: Int!) {
   target(ensemblId: $id) {
     id
     approvedSymbol
@@ -51,22 +51,27 @@ query TargetEvidence($id: String!, $drugs: Int!, $diseases: Int!) {
     biotype
     tractability {
       modality
-      id
+      label
       value
     }
-    knownDrugs(size: $drugs) {
+    drugAndClinicalCandidates {
       count
       rows {
+        maxClinicalStage
         drug {
           id
           name
+          mechanismsOfAction {
+            rows {
+              mechanismOfAction
+            }
+          }
         }
-        phase
-        status
-        mechanismOfAction
-        disease {
-          id
-          name
+        diseases {
+          disease {
+            id
+            name
+          }
         }
       }
     }

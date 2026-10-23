@@ -118,14 +118,20 @@ llm:
 
 # Pseudobulk differential expression (S4). Conditions and covariates are samples.csv columns.
 dge:
-  sample_col: sample_id
-  condition_col: condition
-  group_by: cell_type_broad     # or cluster
-  contrasts:
-    - {name: treated_vs_control, numerator: treated, denominator: control, covariates: [batch]}
-  min_cells_per_sample: 20
-  min_replicates: 2
-  method: deseq2                # limma_voom is the fallback when DESeq2 is missing
+  method: findmarkers            # findmarkers (Seurat, compares cells) | pseudobulk (compares samples)
+  test: MAST                     # FindMarkers test: MAST, wilcox, wilcox_limma, LR, t, bimod, negbinom, poisson, DESeq2
+  pseudobulk_method: deseq2      # method pseudobulk: deseq2 | limma_voom
+  markers: auto                  # auto: with no contrasts, markers of each cell type vs the other cells; true: always too
+  group_by: cell_type_broad      # the groups tested separately (cell_type_fine, cluster, ...)
+  contrasts:                     # each side is one or more values of any cell metadata column
+    - {name: treated_vs_control, column: condition, numerator: treated, denominator: control, covariates: [batch]}
+  min_pct: 0.1                   # FindMarkers: genes expressed in at least this fraction of one side
+  logfc_threshold: 0.25          # FindMarkers: minimum |log2 FC| to test a gene
+  min_cells_per_side: 10         # FindMarkers: fewer cells on a side skips the group
+  max_cells_per_side: null       # FindMarkers: downsample each side to this many cells (speed)
+  sample_col: sample_id          # pseudobulk: the sample column (one pseudobulk per group x sample)
+  min_cells_per_sample: 20       # pseudobulk: smaller pseudobulk samples are dropped
+  min_replicates: 2              # pseudobulk: samples needed on each side
   padj: 0.05
   lfc: 0.5
 

@@ -205,13 +205,13 @@ class OpenTargetsClient:
 
     def target_by_ensembl(self, ensembl_id: str, *, n_drugs: int = 50, n_diseases: int = 10) -> dict[str, Any] | None:
         """Evidence for a target (see :func:`shape_target`); ``{}`` if unknown, ``None`` offline-miss."""
-        data, _ = self.query(Q.TARGET_EVIDENCE, {"id": ensembl_id, "drugs": int(n_drugs), "diseases": int(n_diseases)})
+        data, _ = self.query(Q.TARGET_EVIDENCE, {"id": ensembl_id, "diseases": int(n_diseases)})
         if data is None:
             return None
         t = data.get("target")
         if not t:
             return {}
-        return shape_target(t)
+        return shape_target(t, n_drugs=n_drugs)
 
     def target_by_symbol(self, symbol: str, **kw) -> dict[str, Any] | None:
         """Symbol -> search -> target evidence. ``{}`` when the symbol has no target, ``None`` offline-miss."""
@@ -234,7 +234,47 @@ class OpenTargetsClient:
                 "cache_dir": str(self.cache_dir) if self.cache_dir else None, "endpoint": self.endpoint}
 
 
-def shape_target(t: dict[str, Any]) -> dict[str, Any]:
+_STAGE_PHASE = {"PHASE_1": 1, "PHASE_1_2": 1.5, "PHASE_2": 2, "PHASE_2_3": 2.5, "PHASE_3": 3, "PHASE_4": 4, "APPROVAL": 4}
+
+
+def _known_drugs(t: dict[str, Any], ens: Any, n: int) -> tuple[list[dict[str, Any]], int]:
+    """(drug x disease rows, number of drugs) from ``drugAndClinicalCandidates`` (current API, one row per
+    drug with its diseases) or ``knownDrugs`` (the API before October 2026, one row per drug x disease)."""
+    kd: list[dict[str, Any]] = []
+    if "drugAndClinicalCandidates" in t:
+        block = t.get("drugAndClinicalCandidates") or {}
+        rows = sorted(block.get("rows") or [], key=lambda r: -(_STAGE_PHASE.get(str(r.get("maxClinicalStage")), 0)))
+        per_drug = []
+        for row in rows:
+            drug = row.get("drug") or {}
+            stage = row.get("maxClinicalStage")
+            moa = [m.get("mechanismOfAction") for m in ((drug.get("mechanismsOfAction") or {}).get("rows") or [])
+                   if m.get("mechanismOfAction")]
+            diseases = [d.get("disease") for d in row.get("diseases") or [] if d.get("disease")] or [{}]
+            per_drug.append([{"drug": drug.get("name"), "drug_id": drug.get("id"), "phase": _STAGE_PHASE.get(str(stage)),
+                              "status": str(stage).lower() if stage else None, "disease": dis.get("name"),
+                              "disease_id": dis.get("id"), "mechanism": moa[0] if moa else None,
+                              "evidence_id": f"OT:{ens}:drug:{drug.get('id')}:{dis.get('id')}"} for dis in diseases])
+        # every drug's first disease, then the further ones, without repeating a drug x disease pair
+        seen: set[str] = set()
+        for k in range(max((len(x) for x in per_drug), default=0)):
+            for entries in per_drug:
+                if k < len(entries) and len(kd) < n and entries[k]["evidence_id"] not in seen:
+                    seen.add(entries[k]["evidence_id"])
+                    kd.append(entries[k])
+        return kd, int(block.get("count") or len(rows))
+    for row in ((t.get("knownDrugs") or {}).get("rows")) or []:
+        drug = row.get("drug") or {}
+        dis = row.get("disease") or {}
+        kd.append({
+            "drug": drug.get("name"), "drug_id": drug.get("id"), "phase": row.get("phase"), "status": row.get("status"),
+            "disease": dis.get("name"), "disease_id": dis.get("id"), "mechanism": row.get("mechanismOfAction"),
+            "evidence_id": f"OT:{ens}:drug:{drug.get('id')}:{dis.get('id')}",
+        })
+    return kd, int((t.get("knownDrugs") or {}).get("count", len(kd)))
+
+
+def shape_target(t: dict[str, Any], n_drugs: int = 50) -> dict[str, Any]:
     """Flatten a ``target`` GraphQL object to the spec's shape.
 
     ``{ensembl_id, approved_symbol, approved_name, biotype, tractability:[{modality,id,value}],
@@ -244,26 +284,20 @@ def shape_target(t: dict[str, Any]) -> dict[str, Any]:
     ``OT:<ensembl>:disease:<efo>``) are what the G4 agent cites.
     """
     ens = t.get("id")
-    kd = []
-    for row in ((t.get("knownDrugs") or {}).get("rows")) or []:
-        drug = row.get("drug") or {}
-        dis = row.get("disease") or {}
-        kd.append({
-            "drug": drug.get("name"), "drug_id": drug.get("id"), "phase": row.get("phase"), "status": row.get("status"),
-            "disease": dis.get("name"), "disease_id": dis.get("id"), "mechanism": row.get("mechanismOfAction"),
-            "evidence_id": f"OT:{ens}:drug:{drug.get('id')}:{dis.get('id')}",
-        })
+    kd, n_kd = _known_drugs(t, ens, n_drugs)
     ad = []
     for row in ((t.get("associatedDiseases") or {}).get("rows")) or []:
         dis = row.get("disease") or {}
         ad.append({"efo_id": dis.get("id"), "name": dis.get("name"), "score": row.get("score"),
                    "evidence_id": f"OT:{ens}:disease:{dis.get('id')}"})
-    tract = [{"modality": x.get("modality"), "id": x.get("id"), "value": x.get("value")} for x in (t.get("tractability") or [])]
+    # tractability `label` (current API) was `id` before October 2026
+    tract = [{"modality": x.get("modality"), "id": x.get("label") or x.get("id"), "value": x.get("value")}
+             for x in (t.get("tractability") or [])]
     return {
         "ensembl_id": ens, "approved_symbol": t.get("approvedSymbol"), "approved_name": t.get("approvedName"),
         "biotype": t.get("biotype"), "tractability": tract,
         "tractability_summary": sorted({x["modality"] for x in tract if x.get("value") and x.get("modality")}),
-        "known_drugs": kd, "known_drugs_count": (t.get("knownDrugs") or {}).get("count", len(kd)),
+        "known_drugs": kd, "known_drugs_count": n_kd,
         "associated_diseases": ad, "associated_diseases_count": (t.get("associatedDiseases") or {}).get("count", len(ad)),
     }
 

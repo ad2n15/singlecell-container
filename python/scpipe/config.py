@@ -107,15 +107,27 @@ DEFAULTS: dict[str, Any] = {
                    "models_dir": None},
     # Optional path to a signature YAML replacing R/stages/data/signatures.yaml.
     "signatures": None,
-    # S4 pseudobulk DGE and Open Targets (docs/agents-spec.md section 6)
+    # S4 differential expression and Open Targets (docs/agents-spec.md section 6).
+    # method findmarkers: Seurat::FindMarkers with `test` between two sets of cells; pseudobulk
+    # (or deseq2 / limma_voom): counts summed per group x sample, DESeq2 or limma-voom.
+    # contrasts: [{name, column (default condition_col), numerator, denominator (values; "rest" =
+    # every other value), within (default group_by; "none" = all cells), covariates}]. With no
+    # contrasts and markers auto, findmarkers finds the markers of each group_by group vs the rest.
     "dge": {
+        "method": "findmarkers",
+        "test": "MAST",
+        "pseudobulk_method": "deseq2",
+        "markers": "auto",
         "sample_col": "sample_id",
         "condition_col": "condition",
         "group_by": "cell_type_broad",
         "contrasts": [],
+        "min_pct": 0.1,
+        "logfc_threshold": 0.25,
+        "min_cells_per_side": 10,
+        "max_cells_per_side": None,
         "min_cells_per_sample": 20,
         "min_replicates": 2,
-        "method": "deseq2",
         "padj": 0.05,
         "lfc": 0.5,
     },
@@ -178,7 +190,9 @@ ALLOWED = {
     "integration.method": ("none", "harmony"),
     "integration.engine": ("auto", "scfast", "r"),
     "annotation.celltypist": ("auto", "off"),
-    "dge.method": ("deseq2", "limma_voom"),
+    "dge.method": ("findmarkers", "pseudobulk", "deseq2", "limma_voom"),
+    "dge.test": ("MAST", "wilcox", "wilcox_limma", "bimod", "t", "negbinom", "poisson", "LR", "DESeq2"),
+    "dge.pseudobulk_method": ("deseq2", "limma_voom"),
 }
 
 _CONTRAST_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
@@ -403,8 +417,14 @@ def _check_dge(cfg: dict[str, Any], problems: list[str]) -> None:
 
     for k in ("sample_col", "condition_col", "group_by"):
         need(isinstance(d[k], str) and bool(d[k].strip()), f"dge.{k} must be a non-empty string, got {d[k]!r}")
-    for k in ("min_cells_per_sample", "min_replicates"):
+    for k in ("min_cells_per_sample", "min_replicates", "min_cells_per_side"):
         need(_is_int(d[k]) and d[k] >= 1, f"dge.{k} must be an integer >= 1, got {d[k]!r}")
+    need(d["max_cells_per_side"] is None or (_is_int(d["max_cells_per_side"]) and d["max_cells_per_side"] >= 1),
+         f"dge.max_cells_per_side must be an integer >= 1 or null, got {d['max_cells_per_side']!r}")
+    need(_is_num(d["min_pct"]) and 0 <= d["min_pct"] <= 1, f"dge.min_pct must be a number in [0, 1], got {d['min_pct']!r}")
+    need(_is_num(d["logfc_threshold"]) and d["logfc_threshold"] >= 0,
+         f"dge.logfc_threshold must be a number >= 0, got {d['logfc_threshold']!r}")
+    need(d["markers"] in ("auto", True, False), f"dge.markers must be auto, true or false, got {d['markers']!r}")
     need(_is_num(d["padj"]) and 0 < d["padj"] <= 1, f"dge.padj must be a number in (0, 1], got {d['padj']!r}")
     need(_is_num(d["lfc"]) and d["lfc"] >= 0, f"dge.lfc must be a number >= 0, got {d['lfc']!r}")
     if d["contrasts"] is None:
@@ -418,9 +438,19 @@ def _check_dge(cfg: dict[str, Any], problems: list[str]) -> None:
         if not isinstance(c, Mapping):
             problems.append(f"{where} must be a mapping with name, numerator and denominator")
             continue
-        for k in ("name", "numerator", "denominator"):
+        v = c.get("name")
+        need(isinstance(v, str) and bool(v.strip()), f"{where}.name must be a non-empty string, got {v!r}")
+        for k in ("numerator", "denominator"):
             v = c.get(k)
-            need(isinstance(v, str) and bool(v.strip()), f"{where}.{k} must be a non-empty string, got {v!r}")
+            vals = v if isinstance(v, list) else [v]
+            need(bool(vals) and all(isinstance(x, (str, int, float)) and not isinstance(x, bool) and str(x).strip()
+                                    for x in vals),
+                 f"{where}.{k} must be a value or a list of values, got {v!r}")
+        if c.get("numerator") == "rest":
+            problems.append(f"{where}.numerator cannot be 'rest' (use it for the denominator)")
+        for k in ("column", "within"):
+            v = c.get(k)
+            need(v is None or (isinstance(v, str) and bool(v.strip())), f"{where}.{k} must be a column name, got {v!r}")
         name = c.get("name")
         if isinstance(name, str) and name.strip():
             need(_CONTRAST_NAME_RE.fullmatch(name) is not None,
@@ -435,7 +465,7 @@ def _check_dge(cfg: dict[str, Any], problems: list[str]) -> None:
             c["covariates"] = []
         elif not (isinstance(cov, list) and all(isinstance(x, str) and x.strip() for x in cov)):
             problems.append(f"{where}.covariates must be a list of column names, got {cov!r}")
-        unknown = sorted(set(c) - {"name", "numerator", "denominator", "covariates"})
+        unknown = sorted(set(c) - {"name", "column", "numerator", "denominator", "within", "covariates"})
         if unknown:
             problems.append(f"{where}: unknown key(s) {unknown}")
 
@@ -553,12 +583,7 @@ def _check_contrasts(cfg: dict[str, Any], header: list[str], records: list[dict[
     if not header or not isinstance(contrasts, list) or not contrasts:
         return
     cond = d["condition_col"]
-    if not isinstance(cond, str) or not cond.strip():
-        return
-    if cond not in header:
-        problems.append(f"dge.condition_col {cond!r} is not a samples.csv column (columns: {header})")
-        return
-    levels = sorted({r.get(cond, "") for r in records if r.get(cond, "")})
+    pseudobulk = d.get("method") != "findmarkers"
     scol = d["sample_col"]
     if isinstance(scol, str) and scol.strip() and scol != "sample_id" and scol not in header:
         problems.append(f"dge.sample_col {scol!r} is not a samples.csv column (columns: {header})")
@@ -566,15 +591,28 @@ def _check_contrasts(cfg: dict[str, Any], header: list[str], records: list[dict[
         if not isinstance(c, Mapping):
             continue
         where = f"dge.contrasts[{i}]"
+        col = c.get("column") or cond
+        if not isinstance(col, str) or not col.strip():
+            continue
+        if col not in header:
+            # Cell-level columns (cell_type_broad, seurat_clusters, h5ad obs columns) only exist after the
+            # earlier stages, so they are checked by S4. Pseudobulk compares samples: its column must be here.
+            if pseudobulk:
+                problems.append(f"{where}: column {col!r} is not a samples.csv column (columns: {header}); "
+                                "pseudobulk compares samples, method findmarkers also accepts cell-level columns")
+            continue
+        levels = sorted({r.get(col, "") for r in records if r.get(col, "")})
         for k in ("numerator", "denominator"):
             v = c.get(k)
-            if isinstance(v, str) and v.strip() and v not in levels:
-                problems.append(f"{where}.{k} {v!r} is not a value of samples.csv column {cond!r} (values: {levels})")
+            for x in (v if isinstance(v, list) else [v]):
+                x = str(x) if x is not None else ""
+                if x.strip() and not (k == "denominator" and x == "rest") and x not in levels:
+                    problems.append(f"{where}.{k} {x!r} is not a value of samples.csv column {col!r} (values: {levels})")
         for cv in c.get("covariates") or []:
-            if isinstance(cv, str) and cv not in header:
+            if isinstance(cv, str) and cv not in header and pseudobulk:
                 problems.append(f"{where}.covariates: {cv!r} is not a samples.csv column (columns: {header})")
-            elif cv == cond:
-                problems.append(f"{where}.covariates: {cv!r} is the condition column itself")
+            elif cv == col:
+                problems.append(f"{where}.covariates: {cv!r} is the contrast column itself")
 
 
 def _check_portability(cfg: dict[str, Any], problems: list[str]) -> None:
