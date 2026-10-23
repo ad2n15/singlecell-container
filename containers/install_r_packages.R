@@ -7,11 +7,11 @@ cran <- c(
   "Seurat", "SeuratObject", "Matrix", "hdf5r", "jsonlite", "digest", "yaml", "optparse",
   "data.table", "R.utils", "future", "irlba", "igraph", "RhpcBLASctl", "qs2",
   # S2 core: integration, clustering, embedding
-  "harmony", "leidenbase", "uwot", "glmGamPoi",
+  "harmony", "leidenbase", "uwot",
   # tooling
   "remotes", "BiocManager", "testthat"
 )
-bioc <- c("DESeq2", "limma", "edgeR", "SummarizedExperiment", "scDblFinder", "BiocParallel")
+bioc <- c("DESeq2", "limma", "edgeR", "SummarizedExperiment", "scDblFinder", "BiocParallel", "glmGamPoi")
 github <- c("bnprks/BPCells/r", "immunogenomics/presto")
 
 install.packages(setdiff(cran, rownames(installed.packages())))

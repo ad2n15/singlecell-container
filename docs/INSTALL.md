@@ -104,6 +104,17 @@ Rscript containers/install_r_packages.R
 R CMD INSTALL rust/scfast-r
 ```
 
+On Iridis X, without a published image, build it on the login node (compute nodes have no
+internet), keeping Apptainer's temporary directory on the local disk (GPFS breaks fakeroot builds):
+
+```bash
+APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif containers/scpipe-build.def
+```
+
+Iridis has no `fusermount`, so run the image with `--unsquash` (it unpacks to `APPTAINER_TMPDIR`
+first, ~30 s): `apptainer exec --unsquash --nv scpipe.sif scpipe doctor`, and put `--unsquash` in
+`container.options` of the site file.
+
 On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into
 `/iridisfs/ddnb/images/` and set `container.image` in the site file (`conf/sites/iridisx.yaml`
 already passes `--nv`).
