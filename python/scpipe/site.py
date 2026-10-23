@@ -403,10 +403,11 @@ def stage_container_argv(cfg: Mapping[str, Any], run_dir: Path) -> list[str]:
 
 
 def default_image() -> str:
-    """The published image matching this scpipe version (.github/workflows/release.yml)."""
+    """The published image matching this scpipe version (.github/workflows/release.yml);
+    SCPIPE_IMAGE overrides it (e.g. ghcr.io/<fork owner>/scpipe:<tag> for a fork's release)."""
     from . import __version__
 
-    return f"ghcr.io/mukeshkbj/scpipe:{__version__}"
+    return os.environ.get("SCPIPE_IMAGE") or f"ghcr.io/mukeshkbj/scpipe:{__version__}"
 
 
 def render_batch_script(cfg: Mapping[str, Any], run_dir: Path, scheduler: str, *, until: str | None = None,
