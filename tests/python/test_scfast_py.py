@@ -163,8 +163,8 @@ def test_version_matches_cargo_workspace():
 
 def test_public_api():
     assert set(scfast.__all__) == {"__version__", "device_info", "pca", "knn", "snn", "leiden", "leiden_device", "preprocess",
-                                 "read_10x_h5", "umap"}
-    for name in ("pca", "knn", "snn", "leiden", "read_10x_h5", "umap"):
+                                 "read_10x_h5", "umap", "harmony"}
+    for name in ("pca", "knn", "snn", "leiden", "read_10x_h5", "umap", "harmony"):
         assert getattr(scfast, name).__doc__
 
 

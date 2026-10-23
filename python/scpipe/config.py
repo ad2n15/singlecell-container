@@ -158,7 +158,7 @@ LLM_DEFAULTS: dict[str, Any] = {
 from .llm.provider import PRESETS as LLM_PRESETS, PROVIDERS as LLM_PROVIDERS, auto_provider  # noqa: E402
 # Per-role settings (llm.default, llm.roles.<role>); also accepted flat under llm: as a shorthand for llm.default.
 LLM_ROLE_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
-                 "temperature", "json_mode", "default_usage")
+                 "temperature", "json_mode", "default_usage", "extra_body")
 GATE_MODES = ("auto", "review", "escalate")
 
 EXECUTION_MODES = ("direct", "slurm", "pbs", "lsf", "sge", "split")
@@ -509,6 +509,9 @@ def _check_llm(cfg: dict[str, Any], problems: list[str]) -> None:
         t = s.get("temperature")
         if t is not None and not (_is_num(t) and 0 <= t <= 2):
             problems.append(f"{where}.temperature must be a number from 0 to 2, got {t!r}")
+        eb = s.get("extra_body")
+        if eb is not None and not isinstance(eb, Mapping):
+            problems.append(f"{where}.extra_body must be a mapping of extra request fields, got {type(eb).__name__}")
 
     if flat:
         check_role("llm", flat, True)

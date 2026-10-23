@@ -325,7 +325,7 @@ scpipe resume  --run-dir <run_dir>
 |---|---|---|
 | `ANTHROPIC_API_KEY` | `anthropic` (Claude) | `claude-haiku-4-5` |
 | `OPENAI_API_KEY` | `openai` | `gpt-4.1-mini` |
-| `NVIDIA_API_KEY` | `nvidia` (NIM, build.nvidia.com) | `meta/llama-3.3-70b-instruct` |
+| `NVIDIA_API_KEY` | `nvidia` (NIM, build.nvidia.com) | `nvidia/nemotron-3-ultra-550b-a55b` |
 
 With several keys set, Claude is used first, then OpenAI, then NVIDIA. Choose explicitly with
 `scpipe run ... --llm nvidia [--llm-model <model>]` or `llm.default.provider` in the config;
@@ -333,6 +333,10 @@ With several keys set, Claude is used first, then OpenAI, then NVIDIA. Choose ex
 as `provider: openai_compatible` with a `base_url`. Roles can use different providers
 (`llm.roles.reviewer: {provider: openai}`). The choice is recorded as `llm_choice` in
 `config.resolved.yaml` and shown by `scpipe doctor`; with no key the gates run on rules.
+`max_tokens` per role caps each agent's answer (defaults: 2048 for workers, 1024 for the reviewer;
+raise it for a model that reasons before answering). `extra_body` adds fields to each request on
+OpenAI-style endpoints; NVIDIA Nemotron models get `chat_template_kwargs: {enable_thinking: false}`
+by default, so they answer directly instead of spending the budget on reasoning text.
 
 **Budget:** A
 ledger prices every call and refuses any call that would cross the per-run limit (£5) or the

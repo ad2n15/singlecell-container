@@ -126,6 +126,8 @@ class Agent:
         if gate:
             self.gate = gate
         self.replay = replay
+        if max_tokens is None:  # llm.roles.<role>.max_tokens (or llm.default) overrides the class default
+            max_tokens = (getattr(provider, "settings", None) or {}).get("max_tokens")
         if max_tokens is not None:
             self.max_tokens = int(max_tokens)
         if max_tool_calls is not None:

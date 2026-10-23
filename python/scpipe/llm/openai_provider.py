@@ -79,6 +79,8 @@ class OpenAICompatibleProvider(Provider):
                                 "messages": to_openai_messages(system, messages)}
         if "temperature" in self.settings:
             body["temperature"] = self.settings["temperature"]
+        # extra request fields the endpoint understands (e.g. chat_template_kwargs on NIM)
+        body.update(self.settings.get("extra_body") or {})
         if tools:
             body["tools"] = [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""),
                                                                "parameters": t.get("input_schema") or {"type": "object"}}}
@@ -112,7 +114,9 @@ class OpenAICompatibleProvider(Provider):
                         raise ProviderError(f"openai_compatible: response is not JSON: {e}") from e
                 try:
                     j = r.json()
-                    detail = str((j.get("error") or {}).get("message", "")) if isinstance(j, dict) else str(j)[:200]
+                    # OpenAI style {"error": {"message"}}; NIM answers {"detail"} (e.g. a retired model's 410)
+                    detail = (str((j.get("error") or {}).get("message", "") or j.get("detail", ""))[:200]
+                              if isinstance(j, dict) else str(j)[:200])
                 except ValueError:
                     detail = r.text[:200]
                 last = f"HTTP {r.status_code}: {detail}"

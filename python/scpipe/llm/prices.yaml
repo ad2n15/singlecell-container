@@ -18,6 +18,11 @@ models:
   # are the typical per-token cost of the same open models on paid OpenAI-compatible hosts, so the
   # budget guard stays meaningful. Self-hosted NIM: set your own figures (or 0).
   meta/llama-3.3-70b-instruct:      {input: 0.60, output: 0.60, cached: 0.60}
+  # Estimates for current NIM models (no paid list price at the time of adding), sized like
+  # comparable open MoE models on paid hosts.
+  nvidia/nemotron-3-ultra-550b-a55b: {input: 0.90, output: 2.70, cached: 0.90}
+  nvidia/nemotron-3.5-lightning-30b-a3b: {input: 0.10, output: 0.40, cached: 0.10}
+  minimaxai/minimax-m3.1-flash:     {input: 0.30, output: 1.20, cached: 0.30}
   meta/llama-3.1-405b-instruct:     {input: 3.00, output: 3.00, cached: 3.00}
   nvidia/llama-3.3-nemotron-super-49b-v1: {input: 0.40, output: 0.40, cached: 0.40}
   mock-model:         {input: 1.00, output: 5.00, cached: 0.10}

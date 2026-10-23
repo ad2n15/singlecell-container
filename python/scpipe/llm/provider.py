@@ -57,12 +57,17 @@ PRESETS: dict[str, dict[str, Any]] = {
     "openai": {"adapter": "openai_compatible", "api_key_env": "OPENAI_API_KEY", "model": "gpt-4.1-mini",
                "base_url": "https://api.openai.com/v1"},
     # NVIDIA NIM (build.nvidia.com): OpenAI-compatible; json_object, since json_schema is not on every NIM model.
-    "nvidia": {"adapter": "openai_compatible", "api_key_env": "NVIDIA_API_KEY", "model": "meta/llama-3.3-70b-instruct",
+    # (meta/llama-3.3-70b-instruct, the earlier default, reached end of life on NIM on 2026-08-26.)
+    "nvidia": {"adapter": "openai_compatible", "api_key_env": "NVIDIA_API_KEY",
+               "model": "nvidia/nemotron-3-ultra-550b-a55b",
                "base_url": "https://integrate.api.nvidia.com/v1", "json_mode": "object"},
 }
 AUTO_ORDER = ("anthropic", "openai", "nvidia")
 FLAT_KEYS = ("provider", "model", "api_key_env", "base_url", "max_tokens", "timeout_s", "max_retries",
-             "temperature", "json_mode", "default_usage")
+             "temperature", "json_mode", "default_usage", "extra_body")
+# Nemotron models reason inside their answer unless told not to, which spends the agent's token
+# budget before the JSON and slows every call; their chat template takes this switch.
+NEMOTRON_NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
 
 
 class ProviderError(RuntimeError):
@@ -206,6 +211,8 @@ def apply_preset(settings: Mapping[str, Any], env: Mapping[str, str] | None = No
         if k != "adapter":
             s.setdefault(k, v)
     s.setdefault("model", DEFAULT_MODEL)
+    if prov == "nvidia" and "nemotron" in str(s["model"]).lower():
+        s.setdefault("extra_body", NEMOTRON_NO_THINKING)
     return s
 
 
