@@ -21,7 +21,7 @@ Seurat stays the API. Objects stay Seurat objects. scfast writes standard `DimRe
 
 ### Out of scope (for now)
 
-UMAP (uwot and rapids are already fast), marker testing (presto is already fast), SCTransform, anchor integration, WNN, spatial. Harmony stays in R or rapids. These can follow once the core is proven.
+UMAP (uwot and rapids are already fast), marker testing (presto is already fast), SCTransform, anchor integration, WNN, spatial. Harmony runs in scfast (`integrate::harmony`, CPU; harmony 2.x algorithm), with R harmony / rapids as fallbacks. These can follow once the core is proven.
 
 ## 2. Architecture
 
@@ -208,7 +208,7 @@ Rule of thumb: **GPU for heavy, regular arithmetic on data that can stay on the 
 | Doublets (scDblFinder) | CPU | R | Out of scope |
 | Normalise, log1p, HVG statistics | CPU | Rust, one streaming pass | Works on all genes; only the HVG subset (roughly 5–25% of the data) is worth uploading |
 | **Implicitly scaled PCA** | **GPU** | Rust CUDA (cuSPARSE + cuBLAS); CPU fallback | The largest GPU win: sparse and dense matrix products |
-| Harmony | GPU | rapids for now | Dense maths on PCs; not in Rust yet |
+| Harmony | CPU (GPU next) | scfast `integrate::harmony` | harmony 2.x algorithm; 6-40x faster than R harmony |
 | **kNN** | **GPU** | Rust CUDA (GEMM + top-k); CPU fallback | Brute-force kNN is matrix multiplication, and it's exact |
 | SNN graph | CPU first, GPU later | Rust | Light either way; moves to GPU only to avoid a copy once kNN is there |
 | **Leiden** | **CPU** | single-clustering | Irregular graph work on a small graph (about 20 edges per cell). GPU (cuGraph) only for multi-million cells |

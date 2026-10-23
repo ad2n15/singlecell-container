@@ -223,6 +223,39 @@ def _probe_panic(kind: str, /) -> None:
     """Panic inside the kernel wrapper: "panic", "unimplemented" (like a stub kernel) or
     "rayon" (on a rayon worker thread). Test helper: must raise, never abort."""
 
+def harmony_dense(
+    emb: npt.NDArray[np.float32] | npt.NDArray[np.float64],
+    batches: npt.NDArray[np.uint32],
+    n_batches: int,
+    theta: float,
+    lambda_: float | None,
+    sigma: float,
+    nclust: int | None,
+    max_iter: int,
+    max_iter_cluster: int,
+    epsilon_cluster: float,
+    epsilon_harmony: float,
+    block_size: float,
+    tau: float,
+    alpha: float,
+    batch_prop_cutoff: float,
+    kmeans_nstart: int,
+    kmeans_iter: int,
+    seed: int,
+    device: str = "cpu",
+    init_centroids: npt.NDArray[np.float32] | None = None,
+) -> tuple[npt.NDArray[np.float32] | npt.NDArray[np.float64], dict[str, Any]]:
+    """Harmony (harmony 2.x algorithm) on a C-contiguous (n, d) float32 / float64 embedding
+    with 0-based batch codes below n_batches (every batch non-empty).
+
+    lambda_ None is the automatic ridge penalty (alpha E); nclust None is
+    min(round(n / 30), 100); epsilon_harmony -inf disables early stopping. device "cuda"
+    raises RuntimeError("GPU: ..."): there is no CUDA backend yet.
+
+    Returns (corrected embedding (n, d) in the input dtype, {"objective", "objective_kmeans",
+    "kmeans_rounds", "iters", "converged", "nclust", "device"}).
+    """
+
 def umap(
     indices: npt.NDArray[np.int32],
     distances: npt.NDArray[np.float32],

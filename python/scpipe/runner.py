@@ -1160,6 +1160,9 @@ def _parser() -> argparse.ArgumentParser:
                    help="LLM for the review agents (default: the config, else the first key set of "
                         "ANTHROPIC_API_KEY, OPENAI_API_KEY, NVIDIA_API_KEY; none = rules-only gates)")
     r.add_argument("--llm-model", default=None, metavar="MODEL", help="model name for --llm (default: the provider's)")
+    r.add_argument("--integrate", default=None, metavar="BATCH_COLUMN",
+                   help="batch-correct with Harmony (scfast's Rust Harmony when available) on this sample column, "
+                        "e.g. sample_id or a --meta column")
     r.add_argument("--run-dir", default=None, help="overrides run_dir in the config")
     r.add_argument("--until", default=None, metavar="STAGE", help="stop after this stage")
     r.add_argument("--detach", action="store_true", help="run inside tmux (or nohup) and return")
@@ -1247,7 +1250,7 @@ def _run_config_path(a: argparse.Namespace) -> tuple[str, str | None]:
     else:
         out_dir = Path(out).expanduser().resolve()
     inmod.check_out_dir(out_dir)
-    overrides = {"project": a.name} if a.name else {}
+    overrides: dict[str, Any] = {"project": a.name} if a.name else {}
     path = inmod.synthesize_config(out_dir, rows=rows, sheet=sheet, config_path=config_path, meta=meta,
                                    overrides=overrides)
     return str(path), None
@@ -1261,7 +1264,8 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
     try:
         if a.cmd == "run":
             llm_override = {"provider": a.llm, "model": a.llm_model} if (a.llm or a.llm_model) else None
-            cfg = cfgmod.load_config(*_run_config_path(a), llm_override=llm_override)
+            overrides = {"integration": {"method": "harmony", "batch_key": a.integrate}} if a.integrate else None
+            cfg = cfgmod.load_config(*_run_config_path(a), llm_override=llm_override, overrides=overrides)
             for w in cfg.get("_warnings", []):
                 print(f"scpipe: warning: {w}", file=out)
             _stage_index(_registry(stages), a.until)
@@ -1278,6 +1282,8 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                     args += ["--llm", a.llm]
                 if a.llm_model:
                     args += ["--llm-model", a.llm_model]
+                if a.integrate:
+                    args += ["--integrate", a.integrate]
                 if a.until:
                     args += ["--until", a.until]
                 if a.no_gates:

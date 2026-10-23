@@ -13,6 +13,8 @@
 //!   `Knn` (n x k, small).
 //! - Leiden input: the dgCMatrix arrays are converted to the owned `usize`/`u32`/`f32`
 //!   `SparseGraph` that the clusterer takes (one copy of the graph, as planned in section 4).
+//! - Harmony input: the R embedding matrix (column-major f64) is borrowed in place; the
+//!   kernel makes its own d x cells working copy.
 //! - Outputs are always new R vectors (f32 -> f64, row-major -> column-major).
 //!
 //! Errors: scfast-core `Error`s and Rust panics (including `unimplemented!()` in stub
@@ -20,6 +22,7 @@
 //! R error. Nothing unwinds into R.
 
 use extendr_api::prelude::*;
+use scfast_core::integrate::{self, HarmonyParams, Layout};
 use scfast_core::{cluster, knn, pca, preprocess, snn, umap, CsrView, Device, Knn, RowMajor, SparseGraph};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Once;
@@ -419,6 +422,109 @@ fn rs_is_symmetric(p: Robj, i: Robj, x: Robj, n: i32, tol: f64) -> RResult<bool>
     Ok(true)
 }
 
+// ------------------------------------------------------------------ Harmony
+
+/// Harmony (harmony 2.x algorithm) on a double matrix (cells x dims) with integer batch
+/// codes 1..n_batches (one per cell, every level used). `lambda` < 0 is the automatic
+/// ridge penalty (alpha E, harmony's `lambda = NULL`), `nclust` < 0 is
+/// `min(round(n / 30), 100)`, `epsilon_harmony` = -Inf disables early stopping and
+/// `init_centroids` is NULL or an nclust x dims matrix. Returns the corrected matrix and
+/// the convergence record.
+/// @keywords internal
+#[extendr]
+#[allow(clippy::too_many_arguments)]
+fn rs_harmony(
+    mat: Robj,
+    n: i32,
+    d: i32,
+    batches: Robj,
+    n_batches: i32,
+    theta: f64,
+    lambda: f64,
+    sigma: f64,
+    nclust: i32,
+    max_iter: i32,
+    max_iter_cluster: i32,
+    epsilon_cluster: f64,
+    epsilon_harmony: f64,
+    block_size: f64,
+    tau: f64,
+    alpha: f64,
+    batch_prop_cutoff: f64,
+    kmeans_nstart: i32,
+    kmeans_iter: i32,
+    seed: f64,
+    device: &str,
+    init_centroids: Robj,
+) -> RResult<Robj> {
+    let dev = parse_device(device)?;
+    let n = non_negative(n, "number of cells")?;
+    let d = non_negative(d, "number of dimensions")?;
+    let x = real_slice(&mat, "embedding matrix")?;
+    if x.len() != n * d {
+        return err(format!("embedding matrix has {} values, expected {n} x {d}", x.len()));
+    }
+    let n_batches = non_negative(n_batches, "number of batches")?;
+    let codes = int_slice(&batches, "batch codes")?;
+    let mut b = Vec::with_capacity(codes.len());
+    for (i, &c) in codes.iter().enumerate() {
+        if c < 1 || c as usize > n_batches {
+            return err(format!("batch code {c} of cell {} is not in 1..{n_batches} (NA batch labels are not allowed)", i + 1));
+        }
+        b.push((c - 1) as u32);
+    }
+    let init_centroids = if init_centroids.is_null() {
+        None
+    } else {
+        let c = real_slice(&init_centroids, "init_centroids")?;
+        let k = if d == 0 { 0 } else { c.len() / d };
+        if k * d != c.len() || k == 0 {
+            return err(format!("init_centroids has {} values, not a multiple of {d} dimensions", c.len()));
+        }
+        // column-major k x d (R) -> row-major
+        let mut rm = vec![0f32; k * d];
+        for j in 0..d {
+            for i in 0..k {
+                rm[i * d + j] = c[j * k + i] as f32;
+            }
+        }
+        Some(RowMajor::from_vec(k, d, rm).map_err(|e| extendr_api::Error::Other(format!("scfast: {e}")))?)
+    };
+    let params = HarmonyParams {
+        theta: vec![theta],
+        lambda: if lambda < 0.0 { None } else { Some(lambda) },
+        sigma,
+        nclust: if nclust < 0 { None } else { Some(nclust as usize) },
+        max_iter: non_negative(max_iter, "max_iter")?,
+        max_iter_cluster: non_negative(max_iter_cluster, "max_iter_cluster")?,
+        epsilon_cluster,
+        epsilon_harmony,
+        block_size,
+        tau,
+        alpha,
+        batch_prop_cutoff,
+        kmeans_nstart: non_negative(kmeans_nstart, "kmeans_nstart")?,
+        kmeans_iter: non_negative(kmeans_iter, "kmeans_iter")?,
+        seed: seed_u64(seed)?,
+        init_centroids,
+    };
+    let res = run_kernel("harmony", || integrate::harmony_dense(x, n, d, Layout::ColMajor, &b, n_batches, &params, dev))?;
+    let (z, info) = res.split_z();
+    let mut out = RMatrix::<f64>::new(n, d);
+    out.data_mut().copy_from_slice(&z);
+    Ok(list!(
+        embeddings = out,
+        objective = info.objective,
+        objective_kmeans = info.objective_kmeans,
+        kmeans_rounds = info.kmeans_rounds.iter().map(|&v| v as i32).collect::<Vec<i32>>(),
+        iters = info.iters as i32,
+        converged = info.converged,
+        nclust = info.n_clusters as i32,
+        device = dev.name()
+    )
+    .into())
+}
+
 // ------------------------------------------------------------------ diagnostics
 
 /// Build information: crate version, rayon thread count, compiled backends and the CUDA
@@ -608,4 +714,5 @@ extendr_module! {
     fn rs_preprocess_csc;
     fn rs_loess_direct;
     fn rs_umap;
+    fn rs_harmony;
 }

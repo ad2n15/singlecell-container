@@ -131,6 +131,14 @@ def _check_harmony_cpu() -> None:
         ) from e
 
 
+def _scfast_has_harmony() -> bool:
+    try:
+        import scfast
+    except ImportError:
+        return False
+    return hasattr(scfast, "harmony")
+
+
 def _harmony_cpu(adata, batch_key: str, seed: int) -> np.ndarray:
     """Harmony on X_pca via harmonypy directly.
 
@@ -224,8 +232,11 @@ def run(
     if batch_key is not None:
         if batch_key not in adata.obs.columns:
             raise ValueError(f"batch_key {batch_key!r} is not an obs column")
-        if used != "gpu" or engine == "rust":
-            _check_harmony_cpu()  # the rust path runs Harmony with harmonypy on the CPU, whatever the device
+        if engine == "rust" and _scfast_has_harmony():
+            pass  # scfast's Rust Harmony (CPU)
+        elif used != "gpu" or engine == "rust":
+            _check_harmony_cpu()  # Harmony with harmonypy on the CPU
+    harmony_impl = None
 
     n_comps = int(min(n_pcs, min(adata.n_vars, adata.n_obs) - 1))
     if n_comps < 2:
@@ -253,7 +264,13 @@ def run(
         adata.obsm["X_pca"] = np.asarray(pcs, dtype=np.float32)
         if batch_key is not None:
             with timed("harmony"):
-                adata.obsm["X_harmony"] = _harmony_cpu(adata, batch_key, seed)
+                if _scfast_has_harmony():  # Rust Harmony (harmony 2.x algorithm and defaults)
+                    adata.obsm["X_harmony"] = scfast.harmony(adata.obsm["X_pca"],
+                                                             adata.obs[batch_key].astype(str).to_numpy(), seed=seed)
+                    harmony_impl = "scfast"
+                else:
+                    adata.obsm["X_harmony"] = _harmony_cpu(adata, batch_key, seed)
+                    harmony_impl = "harmonypy"
         emb = np.ascontiguousarray(adata.obsm[rep], dtype=np.float32)
         k = int(min(n_neighbors, adata.n_obs))
         with timed("neighbors"):
@@ -291,6 +308,7 @@ def run(
         if batch_key is not None:
             with timed("harmony"):
                 rsc.pp.harmony_integrate(adata, key=batch_key, basis="X_pca", adjusted_basis="X_harmony")
+            harmony_impl = "rapids"
         with timed("neighbors"):
             rsc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=rep, random_state=seed)
         with timed("leiden"):
@@ -310,6 +328,7 @@ def run(
         if batch_key is not None:
             with timed("harmony"):
                 adata.obsm["X_harmony"] = _harmony_cpu(adata, batch_key, seed)
+            harmony_impl = "harmonypy"
         with timed("neighbors"):
             sc.pp.neighbors(adata, n_neighbors=n_neighbors, use_rep=rep, random_state=seed)
         with timed("leiden"):
@@ -366,6 +385,7 @@ def run(
         "n_pcs": n_comps,
         "n_clusters": int(res.obs[CLUSTER_KEY].nunique()),
         "harmony": batch_key is not None,
+        "harmony_impl": harmony_impl,
         "timings_s": timings,
         "scfast_device": scfast_device if engine == "rust" else None,
         "total_s": round(sum(timings.values()), 4),

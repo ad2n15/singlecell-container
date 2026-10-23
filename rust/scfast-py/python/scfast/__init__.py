@@ -8,6 +8,7 @@ The steps from raw counts to cluster labels (docs/RUST_ENGINE.md section 5)::
     knn_idx, knn_dist   = scfast.knn(pcs, k=20)                         # self first, Euclidean
     snn                 = scfast.snn(knn_idx, prune=1/15)               # scipy CSR, Jaccard
     labels              = scfast.leiden(snn, resolution=0.5, seed=0, n_iterations=2)
+    pcs_corrected       = scfast.harmony(pcs, batch_labels)                   # optional batch integration
 
 Every call releases the GIL while the Rust kernel runs. Errors from the kernels arrive as
 ``ValueError`` (bad input or parameter) or ``RuntimeError`` (internal failure); a kernel
@@ -70,7 +71,7 @@ _preload_cuda_libs()
 from . import _scfast  # noqa: E402
 from ._scfast import __version__  # noqa: E402
 
-__all__ = ["__version__", "device_info", "knn", "leiden", "leiden_device", "pca", "preprocess", "read_10x_h5", "snn", "umap"]
+__all__ = ["__version__", "device_info", "harmony", "knn", "leiden", "leiden_device", "pca", "preprocess", "read_10x_h5", "snn", "umap"]
 
 _I32_MAX = int(np.iinfo(np.int32).max)
 _U64_MAX = int(np.iinfo(np.uint64).max)
@@ -848,6 +849,129 @@ def _find_ab(spread: float, min_dist: float) -> tuple[float, float]:
     y = np.where(x < min_dist, 1.0, np.exp(-(x - min_dist) / spread))
     (a, b), _ = curve_fit(lambda x, a, b: 1.0 / (1.0 + a * x ** (2 * b)), x, y)
     return float(a), float(b)
+
+
+def harmony(
+    emb: Any,
+    batch_labels: Any,
+    *,
+    theta: float = 2.0,
+    lambda_: float | None = None,
+    sigma: float = 0.1,
+    nclust: int | None = None,
+    max_iter: int = 10,
+    seed: int = 0,
+    device: Literal["auto", "cpu", "cuda"] | str = "auto",
+    init_centroids: Any = None,
+    early_stop: bool = True,
+    max_iter_cluster: int = 4,
+    epsilon_cluster: float = 1e-3,
+    epsilon_harmony: float = 1e-2,
+    block_size: float = 0.05,
+    tau: float = 0.0,
+    alpha: float = 0.2,
+    batch_prop_cutoff: float = 1e-5,
+    kmeans_nstart: int = 1,
+    kmeans_iter: int = 10,
+    return_info: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, Any]]:
+    """Harmony batch integration of an embedding, replacing ``harmony::RunHarmony`` /
+    ``harmonypy.run_harmony``.
+
+    The algorithm of the harmony R package 2.x (as in the scpipe image, 2.0.5): soft k-means
+    with a batch-diversity penalty on the cosine-normalised cells, then a per-cluster ridge
+    regression of the batch effect (the intercept is not penalised), repeated until the
+    objective settles. Defaults are those of ``RunHarmony()`` and ``harmony_options()``.
+    Computes in float64; the result is bitwise reproducible for a given ``seed`` and any
+    number of threads, but not equal to R's output (harmony draws from R's RNG).
+
+    Parameters
+    ----------
+    emb
+        Dense (cells, dims) array, e.g. ``obsm["X_pca"]``. float32 and float64 are used as
+        they are (the result has the same dtype); other real dtypes become float32.
+    batch_labels
+        One label per cell (any hashable values numpy can sort, e.g. strings or ints, or a
+        pandas Categorical); factorised with ``np.unique``. One batch variable.
+    theta
+        Diversity penalty (0 disables it). ``RunHarmony(theta = 2)``.
+    lambda_
+        Ridge penalty; ``None`` (harmony 2.x default ``lambda = NULL``) estimates it per
+        cluster and batch as ``alpha`` times the expected number of cells. harmony 1.x
+        defaulted to 1.
+    sigma
+        Soft k-means width.
+    nclust
+        Number of clusters; ``None`` is ``min(round(cells / 30), 100)``.
+    max_iter
+        Maximum rounds of clustering + correction.
+    seed
+        Seeds the k-means initialisation and the block order.
+    device
+        ``"auto"`` or ``"cpu"`` (both run on the CPU: there is no GPU Harmony yet);
+        ``"cuda"`` raises ``RuntimeError``.
+    init_centroids
+        Optional (nclust, dims) starting centroids instead of k-means (e.g. ``t(harmonyObj$Y)``
+        from R, for a like-for-like comparison); they are L2-normalised.
+    early_stop
+        ``False`` runs all ``max_iter`` rounds (``RunHarmony(early_stop = FALSE)``).
+    max_iter_cluster, epsilon_cluster, epsilon_harmony, block_size, tau, alpha, batch_prop_cutoff
+        ``harmony_options()``.
+    kmeans_nstart, kmeans_iter
+        Seeded k-means starts and Lloyd steps for the initial centroids (harmony 2.x: 1 and 10).
+    return_info
+        Also return a dict with ``objective`` (per round, starting with the initial value),
+        ``objective_kmeans`` (per clustering pass), ``kmeans_rounds``, ``iters``,
+        ``converged``, ``nclust`` and ``device``.
+
+    Returns
+    -------
+    numpy array (cells, dims)
+        The corrected embedding, in the input cell order (``obsm["X_pca_harmony"]``); with
+        ``return_info``, a tuple ``(embedding, info)``.
+    """
+    import scipy.sparse as sp
+
+    if sp.issparse(emb):
+        raise TypeError("emb must be a dense array (e.g. PCA embeddings), got a scipy sparse matrix")
+    a = np.asarray(emb)
+    if a.ndim != 2:
+        raise ValueError(f"emb must be 2-D (cells x dims), got {a.ndim}-D with shape {a.shape}")
+    if a.dtype.kind not in "biuf":
+        raise TypeError(f"emb must hold real numbers, got dtype {a.dtype}")
+    n, d = a.shape
+    if n == 0 or d == 0:
+        raise ValueError(f"emb is empty (shape {a.shape})")
+    a = np.ascontiguousarray(a, dtype=a.dtype if a.dtype in _VALUE_DTYPES else np.float32)
+    a = np.ascontiguousarray(a, dtype=a.dtype.newbyteorder("="))
+    labels = np.asarray(batch_labels)
+    if labels.ndim != 1 or labels.shape[0] != n:
+        raise ValueError(f"batch_labels must be 1-D with one label per cell ({n}), got shape {labels.shape}")
+    if labels.dtype.kind == "f" and np.isnan(labels).any():
+        raise ValueError("batch_labels contains NaN")
+    if labels.dtype == object and any(v is None for v in labels):
+        raise ValueError("batch_labels contains None")
+    _, codes = np.unique(labels, return_inverse=True)
+    codes = np.ascontiguousarray(codes.reshape(-1), dtype=np.uint32)
+    n_batches = int(codes.max()) + 1
+    requested, resolved = _resolve_device(device)
+    if requested == "auto":
+        resolved = "cpu"  # no CUDA Harmony yet; "auto" means the CPU until there is one
+    init = None
+    if init_centroids is not None:
+        init = np.ascontiguousarray(np.asarray(init_centroids), dtype=np.float32)
+        if init.ndim != 2 or init.shape[1] != d:
+            raise ValueError(f"init_centroids must be (nclust, {d}), got shape {init.shape}")
+    eps_h = _float("epsilon_harmony", epsilon_harmony) if early_stop else -math.inf
+    out, info = _scfast.harmony_dense(
+        a, codes, n_batches, _float("theta", theta), None if lambda_ is None else _float("lambda_", lambda_),
+        _float("sigma", sigma), None if nclust is None else _int("nclust", nclust, 1), _int("max_iter", max_iter, 1),
+        _int("max_iter_cluster", max_iter_cluster, 1), _float("epsilon_cluster", epsilon_cluster), eps_h,
+        _float("block_size", block_size), _float("tau", tau), _float("alpha", alpha),
+        _float("batch_prop_cutoff", batch_prop_cutoff), _int("kmeans_nstart", kmeans_nstart, 1),
+        _int("kmeans_iter", kmeans_iter), _seed(seed), resolved, init,
+    )
+    return (out, dict(info)) if return_info else out
 
 
 def umap(

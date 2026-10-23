@@ -201,7 +201,15 @@ Drops excluded cells, then:
 1. **Normalise:** `normalization: lognorm` (default, Seurat LogNormalize) or `sct` (SCTransform, CPU only).
 2. **Highly variable genes:** `n_hvg` (default 2,000, Seurat vst).
 3. **Scale + PCA:** `pcs: auto` or a number (randomised SVD with implicit scaling on the scfast path).
-4. **Integration:** `integration.method: none` (default) or `harmony` on `integration.batch_key`.
+4. **Integration (batch correction):** `integration.method: none` (default) or `harmony` on
+   `integration.batch_key` (any sample-sheet column; `scpipe run ... --integrate sample_id`).
+   Harmony runs in **scfast's Rust implementation** wherever scfastR provides it: the harmony 2.x
+   algorithm and defaults, with the same batch mixing and neighbour structure as R harmony (kNN
+   overlap 0.97–0.98, the same as R harmony against itself with another seed) at a fraction of the
+   time (200k cells × 30 PCs × 10 batches: 0.44 s vs 24 s for R harmony and 0.73 s for harmonypy,
+   32 cores; 1M cells: 1.5 s). `integration.engine: r` forces R harmony; parameters under
+   `integration.harmony` (`theta`, `lambda`, `sigma`, `nclust`, `max_iter`). On the GPU exchange
+   path Harmony is rapids-singlecell's.
 5. **Neighbours:** kNN with `n_neighbors` (default 20) and Seurat's shared-nearest-neighbour graph.
 6. **Clustering:** Leiden at `clustering.resolution` (default 0.5).
 7. **UMAP.**
@@ -413,7 +421,9 @@ apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-scpipe/scpipe.sif 
 | `engine` | `auto` | `auto`, `scfast` (Rust), `seurat` |
 | `engine_gpu` | `auto` | `auto`, `scfast` (Rust CUDA), `rapids` (exchange) |
 | `device` | `auto` | `auto` (GPU if it fits), `cpu`, `gpu` |
-| `integration.method` / `batch_key` | `none` / `sample_id` | `none`, `harmony` |
+| `integration.method` / `batch_key` | `none` / `sample_id` | `none`, `harmony`; `--integrate COLUMN` on the command line |
+| `integration.engine` | `auto` | `auto` (scfast Rust Harmony when available), `scfast`, `r` |
+| `integration.harmony.*` | `theta: 2, lambda: null, sigma: 0.1, nclust: null, max_iter: 10` | harmony 2.x parameters (`lambda: null` = automatic) |
 | `pcs` | `auto` | number of PCs, or auto |
 | `n_neighbors` | `20` | kNN size |
 | `clustering.resolution` | `0.5` | Leiden resolution |
@@ -435,7 +445,8 @@ apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-scpipe/scpipe.sif 
 
 `rust/` is a Cargo workspace:
 
-- `scfast-core`: preprocessing (log-normalise + Seurat vst HVGs in one pass), doublets, PCA by
+- `scfast-core`: preprocessing (log-normalise + Seurat vst HVGs in one pass), Harmony batch
+  correction (`integrate`, CPU), doublets, PCA by
   randomised SVD with implicit scaling (no dense scaled matrix), exact or k-d-tree kNN, Seurat
   SNN, Leiden, UMAP. Optional features `cuda` (CUDA PCA/kNN through cudarc, loaded at run time)
   and `cugraph` (GPU Leiden through cuGraph's C API, loaded at run time).

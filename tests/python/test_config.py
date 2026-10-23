@@ -41,7 +41,8 @@ def test_defaults_and_paths(tmp_path, monkeypatch):
     assert cfg["seed"] == 42 and cfg["n_hvg"] == 2000 and cfg["device"] == "auto"
     assert cfg["resources"] == {"threads": 8, "max_memory_gb": 64, "gpu_mem_cap_gb": 20, "nice": 10}
     assert cfg["doublets"]["method"] == "scrublet" and cfg["qc"]["review_action"] == "keep"
-    assert cfg["integration"] == {"method": "none", "batch_key": "sample_id"}
+    assert cfg["integration"] == {"method": "none", "batch_key": "sample_id", "engine": "auto",
+                                  "harmony": {"theta": 2, "lambda": None, "sigma": 0.1, "nclust": None, "max_iter": 10}}
     assert cfg["pcs"] == "auto" and cfg["n_neighbors"] == 20 and cfg["clustering"]["resolution"] == 0.5
     assert cfg["object_format"] == "rds" and cfg["normalization"] == "lognorm"
     # Relative paths resolve against the config file's directory, not the cwd.
@@ -338,3 +339,23 @@ def test_engine_gpu_conflicts(tmp_path):
     p = make_project(tmp_path / "seurat", {"engine": "seurat", "engine_gpu": "scfast"})
     with pytest.raises(C.ConfigError, match="engine_gpu: scfast needs engine: auto or scfast"):
         C.load_config(p / "config.yaml")
+
+
+def test_integration_engine_and_harmony_params(tmp_path):
+    proj = make_project(tmp_path, {"integration": {"method": "harmony", "batch_key": "batch", "engine": "scfast",
+                                                   "harmony": {"theta": 1.5, "max_iter": 20}}})
+    cfg = C.load_config(proj / "config.yaml")
+    assert cfg["integration"]["engine"] == "scfast" and cfg["integration"]["harmony"]["theta"] == 1.5
+    bad = make_project(tmp_path / "bad", {"integration": {"method": "harmony", "batch_key": "batch", "engine": "python",
+                                                         "harmony": {"sigma": 0, "nclust": 0, "foo": 1}}})
+    with pytest.raises(C.ConfigError) as e:
+        C.load_config(bad / "config.yaml")
+    msg = str(e.value)
+    assert "integration.engine" in msg and "integration.harmony.sigma" in msg
+    assert "integration.harmony.nclust" in msg and "unknown key(s) ['foo']" in msg
+
+
+def test_cli_integrate_override(tmp_path):
+    proj = make_project(tmp_path, {})
+    cfg = C.load_config(proj / "config.yaml", overrides={"integration": {"method": "harmony", "batch_key": "batch"}})
+    assert cfg["integration"]["method"] == "harmony" and cfg["integration"]["engine"] == "auto"

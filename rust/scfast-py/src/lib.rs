@@ -28,6 +28,7 @@ use pyo3::types::PyDict;
 use rayon::prelude::*;
 
 use scfast_core::cluster::{self as core_cluster, ClusterParams, LeidenDevice};
+use scfast_core::integrate::{self as core_integrate, HarmonyParams, HarmonyResult, Layout};
 use scfast_core::knn::{self as core_knn, KnnMethod, KnnParams};
 use scfast_core::pca::{self as core_pca, PcaParams, PcaResult};
 use scfast_core::preprocess::{self as core_preprocess, PreprocessParams, PreprocessResult};
@@ -816,6 +817,109 @@ fn probe_panic(py: Python<'_>, kind: &str) -> PyResult<()> {
     })
 }
 
+// ------------------------------------------------------------------ Harmony
+
+/// A C-contiguous (n, d) float32 or float64 embedding.
+enum DenseArray<'py> {
+    F32(PyReadonlyArray2<'py, f32>),
+    F64(PyReadonlyArray2<'py, f64>),
+}
+
+/// Low-level Harmony on a C-contiguous float32 / float64 (n, d) embedding with 0-based
+/// uint32 batch codes. Returns (corrected embedding, same dtype; info dict). See
+/// scfast.harmony.
+#[pyfunction]
+#[pyo3(name = "harmony_dense", signature = (
+    emb, batches, n_batches, theta, lambda_, sigma, nclust, max_iter, max_iter_cluster, epsilon_cluster,
+    epsilon_harmony, block_size, tau, alpha, batch_prop_cutoff, kmeans_nstart, kmeans_iter, seed,
+    device = "cpu", init_centroids = None
+))]
+#[allow(clippy::too_many_arguments)]
+fn harmony_dense<'py>(
+    py: Python<'py>,
+    emb: &Bound<'py, PyAny>,
+    batches: PyReadonlyArray1<'py, u32>,
+    n_batches: usize,
+    theta: f64,
+    lambda_: Option<f64>,
+    sigma: f64,
+    nclust: Option<usize>,
+    max_iter: usize,
+    max_iter_cluster: usize,
+    epsilon_cluster: f64,
+    epsilon_harmony: f64,
+    block_size: f64,
+    tau: f64,
+    alpha: f64,
+    batch_prop_cutoff: f64,
+    kmeans_nstart: usize,
+    kmeans_iter: usize,
+    seed: u64,
+    device: &str,
+    init_centroids: Option<PyReadonlyArray2<'py, f32>>,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyDict>)> {
+    let device = parse_device(device)?;
+    let arr = if let Ok(a) = emb.extract::<PyReadonlyArray2<f32>>() {
+        DenseArray::F32(a)
+    } else if let Ok(a) = emb.extract::<PyReadonlyArray2<f64>>() {
+        DenseArray::F64(a)
+    } else {
+        return Err(PyTypeError::new_err(format!("emb must be a 2-D numpy array of float32 or float64; got {}", describe(emb))));
+    };
+    let init_centroids = match &init_centroids {
+        Some(c) => {
+            let (k, d) = (c.shape()[0], c.shape()[1]);
+            Some(RowMajor::from_vec(k, d, contiguous(c, "init_centroids")?.to_vec()).map_err(core_err)?)
+        }
+        None => None,
+    };
+    let params = HarmonyParams {
+        theta: vec![theta],
+        lambda: lambda_,
+        sigma,
+        nclust,
+        max_iter,
+        max_iter_cluster,
+        epsilon_cluster,
+        epsilon_harmony,
+        block_size,
+        tau,
+        alpha,
+        batch_prop_cutoff,
+        kmeans_nstart,
+        kmeans_iter,
+        seed,
+        init_centroids,
+    };
+    let b = contiguous(&batches, "batches")?;
+    let (out, info): (Bound<'py, PyAny>, HarmonyResult<()>) = match &arr {
+        DenseArray::F32(a) => {
+            let (n, d) = (a.shape()[0], a.shape()[1]);
+            let z = contiguous(a, "emb")?;
+            let r = run_kernel(py, "harmony", || core_integrate::harmony_dense(z, n, d, Layout::RowMajor, b, n_batches, &params, device))?;
+            let (z_corr, r) = r.split_z();
+            let data: Vec<f32> = z_corr.iter().map(|&v| v as f32).collect();
+            (vec2_to_py(py, n, d, data)?.into_any(), r)
+        }
+        DenseArray::F64(a) => {
+            let (n, d) = (a.shape()[0], a.shape()[1]);
+            let z = contiguous(a, "emb")?;
+            let r = run_kernel(py, "harmony", || core_integrate::harmony_dense(z, n, d, Layout::RowMajor, b, n_batches, &params, device))?;
+            let (data, r) = r.split_z();
+            (vec2_to_py(py, n, d, data)?.into_any(), r)
+        }
+    };
+    let dict = PyDict::new(py);
+    dict.set_item("objective", info.objective)?;
+    dict.set_item("objective_kmeans", info.objective_kmeans)?;
+    dict.set_item("kmeans_rounds", info.kmeans_rounds)?;
+    dict.set_item("iters", info.iters)?;
+    dict.set_item("converged", info.converged)?;
+    dict.set_item("nclust", info.n_clusters)?;
+    dict.set_item("device", device.name())?;
+    Ok((out, dict))
+}
+
 // ------------------------------------------------------------------ UMAP
 
 /// UMAP layout from (n, k) kNN indices / distances (self in column 0) and an (n, 2) init.
@@ -944,7 +1048,7 @@ mod native {
     use pyo3::prelude::*;
 
     #[pymodule_export]
-    use super::{csr_view_info, device_info_py, device_py, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn, vst_from_sums};
+    use super::{csr_view_info, device_info_py, device_py, harmony_dense, inflate_chunks, knn_dense, leiden_coo_device, leiden_csr, leiden_device, pca_csr, pca_csr_device, preprocess_csr, probe_detach, probe_error, probe_panic, snn_from_indices, umap_knn, vst_from_sums};
 
     #[pymodule_init]
     fn init(m: &Bound<'_, PyModule>) -> PyResult<()> {

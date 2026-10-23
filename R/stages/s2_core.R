@@ -210,11 +210,45 @@ s2_leiden_leidenbase <- function(snn, resolution, seed, n_iter = 10L) {
 # Harmony (R)
 # --------------------------------------------------------------------------
 
-.s2_run_harmony_r <- function(obj, batch_key, dims, seed) {
+.s2_run_harmony_r <- function(obj, batch_key, dims, seed, hp = list()) {
   set.seed(seed)
   # harmony >= 1.0: RunHarmony.Seurat(object, group.by.vars, reduction.use, dims.use, reduction.save, ...)
-  harmony::RunHarmony(obj, group.by.vars = batch_key, reduction.use = "pca", dims.use = dims,
-                      reduction.save = "harmony", verbose = FALSE)
+  args <- list(obj, group.by.vars = batch_key, reduction.use = "pca", dims.use = dims,
+               reduction.save = "harmony", verbose = FALSE)
+  for (k in c("theta", "lambda", "sigma", "nclust")) if (!is.null(hp[[k]])) args[[k]] <- hp[[k]]
+  if (!is.null(hp$max_iter)) args$max_iter <- hp$max_iter
+  do.call(harmony::RunHarmony, args)
+}
+
+# scfast's Harmony (scfastR::RunHarmonyFast, Rust): same algorithm and defaults as harmony 2.x,
+# 6-40x faster; used wherever scfastR provides it unless integration.engine is r.
+.s2_has_fast_harmony <- function() {
+  scp_has_pkg("scfastR") && exists("RunHarmonyFast", envir = asNamespace("scfastR"), inherits = FALSE)
+}
+
+.s2_harmony_impl <- function(cfg) {
+  eng <- cfg$integration$engine %||% "auto"
+  if (eng == "scfast" && !.s2_has_fast_harmony())
+    scp_stop("integration.engine is scfast but the installed scfastR has no RunHarmonyFast; reinstall scfastR (rust/scfast-r) or use engine auto")
+  if (eng == "r" && !scp_has_pkg("harmony"))
+    scp_stop("integration.engine is r but the R 'harmony' package is not installed")
+  if (eng %in% c("auto", "scfast") && .s2_has_fast_harmony()) "scfast" else if (scp_has_pkg("harmony")) "r" else "none"
+}
+
+.s2_run_harmony <- function(obj, batch_key, dims, seed, cfg, device = "cpu") {
+  hp <- cfg$integration$harmony %||% list()
+  if (.s2_harmony_impl(cfg) == "scfast") {
+    args <- list(obj, group.by.vars = batch_key, reduction = "pca", dims.use = dims,
+                 reduction.save = "harmony", seed = seed, device = "cpu")
+    for (k in c("theta", "lambda", "sigma", "nclust")) if (!is.null(hp[[k]])) args[[k]] <- hp[[k]]
+    if (!is.null(hp$max_iter)) args$max.iter <- hp$max_iter
+    obj <- do.call(scfastR::RunHarmonyFast, args)
+    attr(obj, "s2_harmony_impl") <- paste0("scfast Harmony (Rust, CPU; scfastR ", scp_pkg_version("scfastR"), ")")
+    return(obj)
+  }
+  obj <- .s2_run_harmony_r(obj, batch_key, dims, seed, hp)
+  attr(obj, "s2_harmony_impl") <- paste0("harmony (R ", scp_pkg_version("harmony"), ")")
+  obj
 }
 
 # --------------------------------------------------------------------------
@@ -294,7 +328,7 @@ run_s2 <- function(cfg, repo) {
     # Same engine decision as below; the harmony fallback (exchange_cpu) keeps the Seurat
     # preprocessing because that path runs with engine seurat.
     eng0 <- tryCatch(s2_resolve_engine(cfg, plan, assay), error = function(e) "seurat")
-    harmony_fallback <- identical(cfg$integration$method, "harmony") && !scp_has_pkg("harmony")
+    harmony_fallback <- identical(cfg$integration$method, "harmony") && .s2_harmony_impl(cfg) == "none"
     if (eng0 == "scfast" && !harmony_fallback &&
         exists("PreprocessFast", envir = asNamespace("scfastR"), inherits = FALSE)) {
       pre_impl <- "scfastR::PreprocessFast (fused normalise + vst + scaling statistics)"
@@ -325,7 +359,7 @@ run_s2 <- function(cfg, repo) {
   }
   path <- if (plan$device == "gpu") "gpu" else "cpu"
   path_reason <- plan$reason
-  if (path == "cpu" && integ == "harmony" && !scp_has_pkg("harmony")) {
+  if (path == "cpu" && integ == "harmony" && .s2_harmony_impl(cfg) == "none") {
     if (identical(cfg$device, "auto") && s2_python_has(repo, "harmonypy")) {
       path <- "exchange_cpu"
       path_reason <- paste0(plan$reason, "; R harmony not installed, so the exchange path runs Harmony with harmonypy on the CPU")
@@ -346,8 +380,8 @@ run_s2 <- function(cfg, repo) {
   } else if (path == "gpu" && engine == "scfast") {
     # docs/scfast-integration.md "Pipeline wiring": scfastR built with CUDA and a device visible
     # (or engine_gpu: scfast): same in-process code as cpu_scfast with device = "cuda"; UMAP on CPU.
-    if (integ == "harmony" && !scp_has_pkg("harmony"))
-      scp_stop("integration.method is harmony but the R 'harmony' package is not installed; ",
+    if (integ == "harmony" && .s2_harmony_impl(cfg) == "none")
+      scp_stop("integration.method is harmony but neither scfastR's RunHarmonyFast nor the R 'harmony' package is installed; ",
                "install harmony (R), set engine_gpu: rapids (harmonypy through the exchange), or set integration.method: none")
     path <- "gpu_scfast"
     path_reason <- paste0(plan$reason, "; engine scfast on CUDA (in-process, no exchange files; UMAP on CPU)")
@@ -394,9 +428,10 @@ run_s2 <- function(cfg, repo) {
     dims <- seq_len(pcs_used)
     rep_red <- "pca"
     if (integ == "harmony") {
-      obj <- tm("harmony", .s2_run_harmony_r(obj, batch_key, dims, seed))
+      obj <- tm("harmony", .s2_run_harmony(obj, batch_key, dims, seed, cfg))
       rep_red <- "harmony"
-      integration_impl <- paste0("harmony (R ", scp_pkg_version("harmony"), ")")
+      integration_impl <- attr(obj, "s2_harmony_impl")
+      attr(obj, "s2_harmony_impl") <- NULL
       dims <- seq_len(min(pcs_used, ncol(SeuratObject::Embeddings(obj, "harmony"))))
     }
     if (use_fast) {
@@ -487,7 +522,8 @@ run_s2 <- function(cfg, repo) {
     pcs_used <- if (!is.null(gpu_summary$n_pcs)) as.integer(gpu_summary$n_pcs) else pcs_used
     umap_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
     leiden_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
-    if (integ == "harmony") integration_impl <- paste0("harmony via scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
+    if (integ == "harmony") integration_impl <- paste0("harmony via scpipe.gpu_core (", gpu_summary$harmony_impl %||% "harmonypy/rapids",
+                                                       ", ", gpu_summary$device %||% gpu_dev, ")")
     exchange_files <- list(slim = slim, results = results,
                            slim_sha256 = digest::digest(file = slim, algo = "sha256"),
                            results_sha256 = digest::digest(file = results, algo = "sha256"))

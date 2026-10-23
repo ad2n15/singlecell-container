@@ -91,7 +91,11 @@ DEFAULTS: dict[str, Any] = {
     # when scfastR was built with cuda and a device is visible, else rapids through the exchange.
     "engine_gpu": "auto",
     "device": "auto",
-    "integration": {"method": "none", "batch_key": "sample_id"},
+    # integration.engine (harmony): auto = scfast's Rust Harmony when scfastR/scfast provide it, else
+    # R harmony / harmonypy / rapids; scfast or r force one. integration.harmony: harmony 2.x
+    # parameters (null = the method's default; lambda null = automatic per-batch ridge).
+    "integration": {"method": "none", "batch_key": "sample_id", "engine": "auto",
+                    "harmony": {"theta": 2, "lambda": None, "sigma": 0.1, "nclust": None, "max_iter": 10}},
     "pcs": "auto",
     "n_neighbors": 20,
     "clustering": {"resolution": 0.5},
@@ -172,6 +176,7 @@ ALLOWED = {
     "engine": ("auto", "scfast", "seurat"),
     "engine_gpu": ("auto", "scfast", "rapids"),
     "integration.method": ("none", "harmony"),
+    "integration.engine": ("auto", "scfast", "r"),
     "annotation.celltypist": ("auto", "off"),
     "dge.method": ("deseq2", "limma_voom"),
 }
@@ -352,6 +357,19 @@ def _check_values(cfg: dict[str, Any], problems: list[str]) -> None:
     need(_is_num(res) and res > 0, f"clustering.resolution must be a positive number, got {res!r}")
     bk = cfg["integration"]["batch_key"]
     need(isinstance(bk, str) and bool(bk.strip()), f"integration.batch_key must be a non-empty string, got {bk!r}")
+    hp = cfg["integration"].get("harmony")
+    if not isinstance(hp, Mapping):
+        problems.append(f"integration.harmony must be a mapping (theta, lambda, sigma, nclust, max_iter), got {hp!r}")
+    else:
+        unknown = sorted(set(hp) - {"theta", "lambda", "sigma", "nclust", "max_iter"})
+        need(not unknown, f"integration.harmony: unknown key(s) {unknown} (allowed: theta, lambda, sigma, nclust, max_iter)")
+        for k in ("theta", "lambda", "sigma"):
+            v = hp.get(k)
+            need(v is None or (_is_num(v) and v >= 0 and (k != "sigma" or v > 0)),
+                 f"integration.harmony.{k} must be a {'positive' if k == 'sigma' else 'non-negative'} number or null, got {v!r}")
+        for k in ("nclust", "max_iter"):
+            v = hp.get(k)
+            need(v is None or (_is_int(v) and v >= 1), f"integration.harmony.{k} must be an integer >= 1 or null, got {v!r}")
     if cfg["engine"] == "scfast" and cfg["device"] == "gpu" and cfg["engine_gpu"] != "scfast":
         problems.append("engine: scfast has no GPU backend; use device: cpu or auto with engine: scfast "
                         "(or engine: seurat / auto for device: gpu; engine_gpu: scfast forces scfast on CUDA)")
@@ -748,8 +766,12 @@ def _resolve_llm(cfg: dict[str, Any], override: Mapping[str, Any] | None, warnin
 
 
 def load_config(config_path: str | Path, run_dir: str | Path | None = None,
-                llm_override: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                llm_override: Mapping[str, Any] | None = None,
+                overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Load and validate a run configuration; returns the resolved config dict.
+
+    ``overrides`` (command-line options such as ``--integrate``) are merged into the file's
+    settings, one level deep for sections (``{"integration": {"method": "harmony"}}``).
 
     Raises :class:`ConfigError` listing every problem. Non-fatal remarks are
     returned under ``cfg["_warnings"]`` (not written to the resolved file).
@@ -770,6 +792,9 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None,
         raw = {}
     if not isinstance(raw, Mapping):
         raise ConfigError(f"config file {config_path} must hold a mapping, got {type(raw).__name__}")
+    raw = dict(raw)
+    for k, v in (overrides or {}).items():
+        raw[k] = {**raw[k], **v} if isinstance(v, Mapping) and isinstance(raw.get(k), Mapping) else v
     base = config_path.parent
     raw, site_source = apply_site(raw, base, problems, warnings)
     cfg = _merge_defaults(raw, problems, warnings)

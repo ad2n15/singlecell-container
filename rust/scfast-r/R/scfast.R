@@ -5,8 +5,10 @@
 #   FindNeighborsFast() replaces FindNeighbors()            -> Graphs "<assay>_nn", "<assay>_snn"
 #   FindClustersFast()  replaces FindClusters(algorithm=4)  -> seurat_clusters, Idents()
 #   RunUMAPFast()       replaces RunUMAP()                  -> DimReduc "umap"
+#   RunHarmonyFast()    replaces harmony::RunHarmony()      -> DimReduc "harmony"
 #
-# Low-level, Seurat-free: scfast_pca(), scfast_knn(), scfast_snn(), scfast_leiden().
+# Low-level, Seurat-free: scfast_pca(), scfast_knn(), scfast_snn(), scfast_leiden(),
+# scfast_harmony().
 # The native calls (rs_*) are in R/extendr-wrappers.R; this file does argument checking,
 # naming and the Seurat bookkeeping.
 
@@ -757,6 +759,191 @@ FindClustersFast <- function(object, graph.name = NULL, resolution = 0.5, random
   lv <- levels(SeuratObject::Idents(object))
   SeuratObject::Idents(object) <- factor(SeuratObject::Idents(object), levels = lv[order(as.numeric(lv))])
   object[["seurat_clusters"]] <- SeuratObject::Idents(object)
+  object <- SeuratObject::LogSeuratCommand(object = object)
+  object
+}
+
+# ------------------------------------------------------------------ Harmony
+
+# Advanced Harmony settings: harmony_options() defaults, overridden by a list (or the
+# result of harmony::harmony_options()) with any of these names.
+.harmony_options <- function(.options) {
+  opts <- list(alpha = 0.2, tau = 0, block.size = 0.05, max.iter.cluster = 4,
+               epsilon.cluster = 1e-3, epsilon.harmony = 1e-2, batch.prop.cutoff = 1e-5)
+  if (is.null(.options)) return(opts)
+  if (!is.list(.options)) stop("'.options' must be NULL or a list such as harmony::harmony_options()", call. = FALSE)
+  unknown <- setdiff(names(.options), names(opts))
+  if (length(unknown)) stop(sprintf("unknown '.options': %s", paste(unknown, collapse = ", ")), call. = FALSE)
+  opts[names(.options)] <- .options
+  for (nm in names(opts)) {
+    v <- opts[[nm]]
+    if (!is.numeric(v) || length(v) != 1L || is.na(v)) stop(sprintf("'.options$%s' must be a single number", nm), call. = FALSE)
+  }
+  opts
+}
+
+#' Harmony batch integration of an embedding matrix
+#'
+#' Runs Harmony (Korsunsky et al. 2019) in the scfast engine: the algorithm of the harmony
+#' R package 2.x (`RunHarmony()`; soft k-means with a batch-diversity penalty on the
+#' cosine-normalised cells, then a per-cluster ridge regression of the batch effect),
+#' with the same defaults. Computes in double precision, in parallel; the result is
+#' identical for a given `seed` on any number of threads, but not equal to harmony's own
+#' (which draws from R's random number generator), see `init.centroids`.
+#'
+#' @param emb Numeric matrix, cells x dimensions (e.g. PCA embeddings).
+#' @param batches One batch label per row of `emb` (a vector or factor; unused factor
+#'   levels are dropped, `NA` is an error). One batch variable.
+#' @param theta Diversity penalty (0 disables it).
+#' @param lambda Ridge penalty; `NULL` (the harmony 2.x default) estimates it per cluster
+#'   and batch as `alpha` times the expected number of cells. harmony 1.x defaulted to 1.
+#' @param sigma Width of the soft k-means clusters.
+#' @param nclust Number of clusters; `NULL` is `min(round(cells / 30), 100)`.
+#' @param max.iter Maximum rounds of clustering + correction (`RunHarmony(max_iter)`).
+#' @param seed Seed for the k-means initialisation and the block order.
+#' @param device `"auto"` or `"cpu"` (there is no GPU Harmony yet, so both run on the CPU);
+#'   `"cuda"` is an error.
+#' @param early.stop `FALSE` runs all `max.iter` rounds (`RunHarmony(early_stop)`).
+#' @param .options `NULL`, `harmony::harmony_options()` or a list with any of `alpha`,
+#'   `tau`, `block.size`, `max.iter.cluster`, `epsilon.cluster`, `epsilon.harmony`,
+#'   `batch.prop.cutoff`.
+#' @param init.centroids Optional nclust x dimensions matrix of starting centroids in
+#'   place of k-means (e.g. `t(harmonyObj$Y)` of a harmony object after
+#'   `init_cluster_cpp()`, for a like-for-like comparison with the R package).
+#' @param kmeans.nstart,kmeans.iter Seeded k-means starts and Lloyd steps for the initial
+#'   centroids (harmony 2.x: 1 and 10).
+#' @return A list with `embeddings` (the corrected matrix, cells x dimensions, named as
+#'   `emb`), `objective` (per round, starting with the initial value), `objective_kmeans`
+#'   (per clustering pass), `kmeans_rounds`, `iters`, `converged`, `nclust` and `device`.
+#' @export
+scfast_harmony <- function(emb, batches, theta = 2, lambda = NULL, sigma = 0.1, nclust = NULL,
+                           max.iter = 10, seed = 0, device = "auto", early.stop = TRUE,
+                           .options = NULL, init.centroids = NULL, kmeans.nstart = 1, kmeans.iter = 10) {
+  if (is.data.frame(emb)) emb <- as.matrix(emb)
+  if (!is.matrix(emb) || !is.numeric(emb)) {
+    stop("'emb' must be a numeric matrix (cells x dimensions)", call. = FALSE)
+  }
+  if (storage.mode(emb) != "double") storage.mode(emb) <- "double"
+  if (is.data.frame(batches)) {
+    if (ncol(batches) != 1L) stop("'batches' must be one batch variable", call. = FALSE)
+    batches <- batches[[1L]]
+  }
+  if (length(batches) != nrow(emb)) {
+    stop(sprintf("'batches' has %d labels for %d cells", length(batches), nrow(emb)), call. = FALSE)
+  }
+  if (anyNA(batches)) stop("'batches' contains NA", call. = FALSE)
+  batches <- droplevels(as.factor(batches))
+  for (nm in c("theta", "sigma")) {
+    v <- get(nm)
+    if (!is.numeric(v) || length(v) != 1L || !is.finite(v)) stop(sprintf("'%s' must be a single number", nm), call. = FALSE)
+  }
+  if (!is.null(lambda)) .check_positive_number(lambda, "lambda")
+  if (!is.null(nclust)) nclust <- .check_count(nclust, "nclust")
+  max.iter <- .check_count(max.iter, "max.iter")
+  seed <- .check_seed(seed)
+  .check_flag(early.stop, "early.stop")
+  kmeans.nstart <- .check_count(kmeans.nstart, "kmeans.nstart")
+  kmeans.iter <- .check_count(kmeans.iter, "kmeans.iter", min = 0)
+  opts <- .harmony_options(.options)
+  if (!is.null(init.centroids)) {
+    if (!is.matrix(init.centroids) || !is.numeric(init.centroids) || ncol(init.centroids) != ncol(emb)) {
+      stop(sprintf("'init.centroids' must be a numeric matrix with %d columns", ncol(emb)), call. = FALSE)
+    }
+    if (!is.null(nclust) && nrow(init.centroids) != nclust) {
+      stop("'init.centroids' must have 'nclust' rows", call. = FALSE)
+    }
+    storage.mode(init.centroids) <- "double"
+  }
+  device <- .check_device(device)
+  # No CUDA Harmony yet: "auto" means the CPU; an explicit CUDA device reaches the kernel's error.
+  dev <- if (identical(attr(device, "requested"), "auto")) "cpu" else as.character(device)
+  res <- .rust(rs_harmony(emb, nrow(emb), ncol(emb), as.integer(batches), nlevels(batches),
+                          as.numeric(theta), as.numeric(lambda %||% -1), as.numeric(sigma),
+                          as.integer(nclust %||% -1L), max.iter, as.integer(opts$max.iter.cluster),
+                          as.numeric(opts$epsilon.cluster),
+                          if (early.stop) as.numeric(opts$epsilon.harmony) else -Inf,
+                          as.numeric(opts$block.size), as.numeric(opts$tau), as.numeric(opts$alpha),
+                          as.numeric(opts$batch.prop.cutoff), kmeans.nstart, kmeans.iter, seed, dev,
+                          init.centroids))
+  dimnames(res$embeddings) <- dimnames(emb)
+  res
+}
+
+#' Harmony integration of a Seurat reduction
+#'
+#' Replaces `harmony::RunHarmony()` on a Seurat object: corrects the `dims.use` columns
+#' of `reduction` for the batch variable `group.by.vars` with [scfast_harmony()] and
+#' stores the result as a `DimReduc` (key `"harmony_"` for the default name, the assay of
+#' `reduction`, `stdev` the column standard deviations, as `RunHarmony()`). Unlike
+#' `RunHarmony()`, no feature loadings are projected (`project.dim`), since that needs a
+#' `scale.data` layer that the scfast pipeline never builds.
+#'
+#' @param object A Seurat object with the reduction (e.g. after [RunPCAFast()]).
+#' @param group.by.vars Name of the meta data column with the batch labels (one variable).
+#' @param reduction Reduction to correct (`RunHarmony(reduction.use)`).
+#' @param dims.use Columns of the reduction to use; `NULL` is all.
+#' @param reduction.save Name of the new reduction; its key is `Key(reduction.save)`.
+#' @param theta,lambda,sigma,nclust,max.iter,seed,device,early.stop,.options See
+#'   [scfast_harmony()]; defaults as `RunHarmony()` (harmony 2.x: `lambda = NULL`).
+#' @param verbose Print a summary line.
+#' @return The Seurat object with the reduction added; `Misc(object[[reduction.save]])$scfast`
+#'   records the parameters, `iters`, `converged`, the objective and the run time.
+#' @export
+RunHarmonyFast <- function(object, group.by.vars, reduction = "pca", dims.use = NULL,
+                           reduction.save = "harmony", theta = 2, lambda = NULL, sigma = 0.1,
+                           nclust = NULL, max.iter = 10, seed = 0, device = "auto",
+                           verbose = FALSE, early.stop = TRUE, .options = NULL) {
+  .check_seurat(object)
+  .check_string(reduction, "reduction")
+  .check_string(reduction.save, "reduction.save")
+  .check_flag(verbose, "verbose")
+  if (!is.character(group.by.vars) || length(group.by.vars) != 1L || is.na(group.by.vars)) {
+    stop("'group.by.vars' must be the name of one meta data column", call. = FALSE)
+  }
+  if (!reduction %in% SeuratObject::Reductions(object)) {
+    stop(sprintf("reduction '%s' not found; run RunPCAFast() or RunPCA() first", reduction), call. = FALSE)
+  }
+  if (!group.by.vars %in% colnames(object[[]])) {
+    stop(sprintf("'%s' is not a meta data column", group.by.vars), call. = FALSE)
+  }
+  reduc <- object[[reduction]]
+  emb <- SeuratObject::Embeddings(reduc)
+  dims.use <- dims.use %||% seq_len(ncol(emb))
+  if (!.is_whole(dims.use) || any(dims.use < 1) || anyDuplicated(dims.use)) {
+    stop("'dims.use' must be distinct positive whole numbers", call. = FALSE)
+  }
+  if (max(dims.use) > ncol(emb)) stop("More dimensions specified in dims.use than have been computed", call. = FALSE)
+  if (length(dims.use) < 2L) stop("only specified one dimension in dims.use", call. = FALSE)
+  batches <- object[[group.by.vars]][rownames(emb), 1L]
+  run <- .timed(scfast_harmony(emb[, dims.use, drop = FALSE], batches, theta = theta, lambda = lambda,
+                               sigma = sigma, nclust = nclust, max.iter = max.iter, seed = seed,
+                               device = device, early.stop = early.stop, .options = .options))
+  res <- run$value
+  key <- SeuratObject::Key(reduction.save, quiet = TRUE)
+  emb.h <- res$embeddings
+  colnames(emb.h) <- paste0(key, seq_len(ncol(emb.h)))
+  red <- SeuratObject::CreateDimReducObject(
+    embeddings = emb.h,
+    stdev = as.numeric(apply(emb.h, 2, stats::sd)),
+    assay = SeuratObject::DefaultAssay(reduc),
+    key = key,
+    misc = list(scfast = list(
+      kernel = "harmony", engine = scfast_info()$version, reduction = reduction,
+      dims.use = dims.use, group.by.vars = group.by.vars,
+      params = c(list(theta = theta, lambda = lambda, sigma = sigma, nclust = res$nclust,
+                      max.iter = max.iter, seed = seed, early.stop = early.stop),
+                 .harmony_options(.options)),
+      iters = res$iters, converged = res$converged, objective = res$objective,
+      objective_kmeans = res$objective_kmeans, kmeans_rounds = res$kmeans_rounds,
+      seconds = run$seconds, device = res$device
+    ))
+  )
+  if (verbose) {
+    message(sprintf("scfast Harmony: %d cells x %d dims, %d batches, %d clusters, %d rounds (%s) in %.2f s on %s",
+                    nrow(emb.h), ncol(emb.h), length(unique(batches)), res$nclust, res$iters,
+                    if (res$converged) "converged" else "max.iter reached", run$seconds, res$device))
+  }
+  object[[reduction.save]] <- red
   object <- SeuratObject::LogSeuratCommand(object = object)
   object
 }

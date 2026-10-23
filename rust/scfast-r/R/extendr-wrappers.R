@@ -92,3 +92,12 @@ rs_loess_direct <- function(x, y, span) .Call(wrap__rs_loess_direct, x, y, span)
 #' n x 2 starting layout and the curve parameters `a`, `b`. Returns the n x 2 embedding.
 #' @keywords internal
 rs_umap <- function(idx, dist, init, n, k, a, b, n_epochs, negative_sample_rate, learning_rate, seed) .Call(wrap__rs_umap, idx, dist, init, n, k, a, b, n_epochs, negative_sample_rate, learning_rate, seed)
+
+#' Harmony (harmony 2.x algorithm) on a double matrix (cells x dims) with integer batch
+#' codes 1..n_batches (one per cell, every level used). `lambda` < 0 is the automatic
+#' ridge penalty (alpha E, harmony's `lambda = NULL`), `nclust` < 0 is
+#' `min(round(n / 30), 100)`, `epsilon_harmony` = -Inf disables early stopping and
+#' `init_centroids` is NULL or an nclust x dims matrix. Returns the corrected matrix and
+#' the convergence record.
+#' @keywords internal
+rs_harmony <- function(mat, n, d, batches, n_batches, theta, lambda, sigma, nclust, max_iter, max_iter_cluster, epsilon_cluster, epsilon_harmony, block_size, tau, alpha, batch_prop_cutoff, kmeans_nstart, kmeans_iter, seed, device, init_centroids) .Call(wrap__rs_harmony, mat, n, d, batches, n_batches, theta, lambda, sigma, nclust, max_iter, max_iter_cluster, epsilon_cluster, epsilon_harmony, block_size, tau, alpha, batch_prop_cutoff, kmeans_nstart, kmeans_iter, seed, device, init_centroids)

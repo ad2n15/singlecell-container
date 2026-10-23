@@ -3,12 +3,13 @@
 //! Kernels, each callable on its own so Seurat (via scfast-r) and Python (via scfast-py)
 //! can swap in one step at a time:
 //!
-//! | Module      | Replaces                         | Function                     |
-//! |-------------|----------------------------------|------------------------------|
-//! | [`pca`]     | `ScaleData` + `RunPCA`           | [`pca::implicit_scaled_pca`] |
-//! | [`knn`]     | kNN part of `FindNeighbors`      | [`knn::knn`]                 |
-//! | [`snn`]     | SNN part of `FindNeighbors`      | [`snn::snn_from_knn`]        |
-//! | [`cluster`] | `FindClusters(algorithm = 4)`    | [`cluster::leiden`]          |
+//! | Module        | Replaces                      | Function                     |
+//! |---------------|-------------------------------|------------------------------|
+//! | [`pca`]       | `ScaleData` + `RunPCA`        | [`pca::implicit_scaled_pca`] |
+//! | [`knn`]       | kNN part of `FindNeighbors`   | [`knn::knn`]                 |
+//! | [`snn`]       | SNN part of `FindNeighbors`   | [`snn::snn_from_knn`]        |
+//! | [`cluster`]   | `FindClusters(algorithm = 4)` | [`cluster::leiden`]          |
+//! | [`integrate`] | `RunHarmony` (harmony 2.x)    | [`integrate::harmony()`]     |
 //!
 //! Everything here is the CPU reference implementation; the CUDA backend (Phase 6) is
 //! tested against it. GPU Leiden ([`cugraph`], feature `cugraph`, Phase 7) goes through
@@ -21,6 +22,7 @@ pub mod cuda;
 pub mod cugraph;
 pub mod device;
 pub mod error;
+pub mod integrate;
 pub mod knn;
 pub mod pca;
 pub mod preprocess;
