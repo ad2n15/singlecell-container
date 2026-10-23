@@ -23,7 +23,7 @@ scpipe status --run-dir /scratch/$USER/scpipe/my_study
 scpipe dashboard --run-dir /scratch/$USER/scpipe/my_study --watch 30   # optional: keep regenerating
 
 # 4. if a gate stops the run for your approval (exit code 3), it prints what to do:
-scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage G2 [--from-file edited.json] [--by you]
+scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage context-review [--from-file edited.json] [--by you]
 scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
 
 # 5. open the result
@@ -31,22 +31,55 @@ scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
 <run-dir>/S5/explorer.html    # interactive UMAP
 ```
 
-Stages run in this order: `S0 S1a S1b S1c G1 S2 S3 G2 G3 S4 G4 S5`. Every stage is
-checkpointed in `state.json` with a fingerprint of its inputs and settings, so `scpipe run`
-again with the same config skips what is done, and a config change reruns only the stages that
-use the changed settings and those after them.
+Stages run in the order below. Every stage is checkpointed in `state.json` with a fingerprint of
+its inputs and settings, so `scpipe run` again with the same config skips what is done, and a
+config change reruns only the stages that use the changed settings and those after them.
 
-| Stage | What it does |
-|---|---|
-| S0 | Reads every sample (10x h5, 10x mtx folder, h5ad, Seurat rds/qs2, loom, csv/tsv), harmonises genes, merges |
-| S1a, S1b, S1c | Per-cell QC metrics, doublets, pre-clustering, then rules-based QC decisions (`keep` / `exclude` / `review`) |
-| G1 | QC agent reviews the rules' decisions (gate) |
-| S2 | Filter, normalise, variable genes, PCA, optional Harmony, neighbours, Leiden, UMAP; CPU (Seurat) or GPU (rapids-singlecell) |
-| S3 | Markers, signature scores, CellTypist (if installed), consensus annotation in code |
-| G2, G3 | Context agent (tissue, disease candidates) and annotation agent (gates) |
-| S4 | Pseudobulk DGE per contrast and cell type, Open Targets evidence for the DE genes |
-| G4 | Interpretation agent writes labelled hypotheses, the reviewer checks every cited ID (gate) |
-| S5 | `report.html` and `explorer.html` |
+The terminal, `scpipe status` and the dashboard show each stage's name; on the command line
+(`--until`, `scpipe approve --stage`) the name, the title or the short ID all work, in any case
+(`--until clustering`, `--until S2`). Folders and logs keep the short IDs (`S2/`, `logs/S2.log`).
+
+| ID | Name | What it does |
+|---|---|---|
+| S0 | `ingest` | Reads every sample (10x h5, 10x mtx folder, h5ad, Seurat rds/qs2, loom, csv/tsv), harmonises genes, merges |
+| S1a | `qc-metrics` | Per-cell QC metrics |
+| S1b | `doublets` | Doublet scores and calls, pre-clustering |
+| S1c | `qc-filter` | Rules-based QC decisions (`keep` / `exclude` / `review`) |
+| G1 | `qc-review` | QC agent reviews the rules' decisions (gate) |
+| S2 | `clustering` | Filter, normalise, variable genes, PCA, optional Harmony, neighbours, Leiden, UMAP; CPU (Seurat) or GPU (rapids-singlecell) |
+| S3 | `evidence` | Markers, signature scores, CellTypist (if installed), consensus annotation in code |
+| G2 | `context-review` | Context agent: tissue and disease candidates (gate) |
+| G3 | `annotation-review` | Annotation agent (gate) |
+| S4 | `dge` | Pseudobulk DGE per contrast and cell type, Open Targets evidence for the DE genes |
+| G4 | `interpretation-review` | Interpretation agent writes labelled hypotheses, the reviewer checks every cited ID (gate) |
+| S5 | `report` | `report.html` and `explorer.html` |
+
+### Progress
+
+In a terminal, `scpipe run` and `scpipe resume` show a live display: finished stages with their
+time and memory, the current stage and its latest step (from the stage's log), a bar, the elapsed
+time and an estimate of the time left. The estimate appears once ingest has counted the cells;
+it starts from built-in timings and adapts to your machine (recent runs are kept in
+`~/.scpipe/stage_times.json`). In logs, pipes, `--detach` and scheduler jobs the output is one
+line per stage instead. `--progress live|plain` forces either.
+
+### Guided setup: `scpipe run -i`
+
+`scpipe run <data> -i` asks a few questions before the run; Enter keeps each suggested value:
+
+1. mode: **automatic** (defaults, adaptive QC, the review agents decide at each gate) or **guided**;
+2. QC hard limits: minimum genes (200) and UMIs (400) per cell, maximum mitochondrial % (25);
+   `off` disables a limit;
+3. adaptive QC: the number of MADs (3), or `off` for hard limits only;
+4. doublets: Scrublet, scDblFinder or none, and whether called doublets are removed;
+5. clustering: PCs (`auto`), Leiden resolution (0.5), highly variable genes (2000);
+6. batch correction with Harmony (only with more than one sample);
+7. the LLM for the review agents, from the API keys that are set;
+8. the review gates: agents decide, stop at every gate, or the defaults.
+
+It then shows a summary and asks to start. The answers are saved as
+`<run-dir>/config/wizard.yaml` (plus `wizard_qc_policy.yaml`), and the command that repeats the
+run without questions is printed. `-i` needs a terminal and is used without `--config`.
 
 ## 2. Configuration
 
@@ -205,7 +238,7 @@ depends on `gates.<G>`:
 When a run stops at a gate it exits with code 3, writes `gates/<G>/report.html`, and prints:
 
 ```
-scpipe approve --run-dir D --stage G2 [--from-file edited.json] [--by NAME]
+scpipe approve --run-dir D --stage context-review [--from-file edited.json] [--by NAME]
 scpipe resume  --run-dir D
 ```
 

@@ -182,9 +182,11 @@ class ModuleGate:
 def load_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]):
     """Gate object for ``gate`` (an id like ``G1``, a module, or an object already shaped like one)."""
     if isinstance(gate, str):
-        name = GATE_MODULES.get(gate.upper())
+        from ..stage_names import gate_id, slug
+
+        name = GATE_MODULES.get(gate_id(gate).upper())
         if name is None:
-            raise GateError(f"unknown gate {gate!r} (gates: {list(GATE_MODULES)})")
+            raise GateError(f"unknown gate {gate!r} (gates: {', '.join(f'{slug(g)} ({g})' for g in GATE_MODULES)})")
         gate = importlib.import_module(name)
     if hasattr(gate, "make_gate"):
         return gate.make_gate(Path(run_dir), cfg)
@@ -274,7 +276,9 @@ def _upgrade_report(gate_dir: Path, sections: Sequence[tuple[str, str]] = (), no
 
 
 def approve_command(run_dir: Path, gate_id: str) -> str:
-    return f"scpipe approve --run-dir {run_dir} --stage {gate_id}"
+    from ..stage_names import slug
+
+    return f"scpipe approve --run-dir {run_dir} --stage {slug(gate_id)}"
 
 
 def run_gate(gate: Any, run_dir: str | Path, cfg: Mapping[str, Any]) -> GateResult:

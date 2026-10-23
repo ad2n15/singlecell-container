@@ -137,8 +137,8 @@ resume_until() {
     rc=${PIPESTATUS[0]}
     [[ $rc -eq 0 ]] && return 0
     if [[ $rc -eq 3 ]]; then
-      gate="$(grep -o -- '--stage G[0-9]' "$WORK/resume_$stage.out" | head -1 | awk '{print $2}')"
-      [[ -n "$gate" ]] || { echo "exit 3 but no '--stage Gx' hint in the output"; show_logs; return 1; }
+      gate="$(grep -oE -- '--stage [a-z-]+-review|--stage G[0-9]' "$WORK/resume_$stage.out" | head -1 | awk '{print $2}')"
+      [[ -n "$gate" ]] || { echo "exit 3 but no '--stage <gate>' hint in the output"; show_logs; return 1; }
       echo ">>> gate $gate waits for a human: scpipe approve --by run_full"
       scpipe approve --run-dir "$RUN" --stage "$gate" --by run_full || { echo "scpipe approve failed"; show_logs; return 1; }
       continue

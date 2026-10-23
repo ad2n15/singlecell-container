@@ -31,11 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-STAGE_TITLES = {
-    "S0": "Ingest", "S1a": "QC metrics", "S1b": "Doublets", "S1c": "QC rules", "G1": "QC gate",
-    "S2": "Core processing", "S3": "Evidence", "G2": "Context gate", "G3": "Annotation gate",
-    "S4": "Pseudobulk DGE", "G4": "Interpretation gate", "S5": "Report",
-}
+from .stage_names import title as stage_title
+
 DEFAULT_ORDER = ["S0", "S1a", "S1b", "S1c", "G1", "S2", "S3", "G2", "G3", "S4", "G4", "S5"]
 COLORS = {"done": "#2e8b57", "running": "#1f77b4", "waiting": "#e6a700", "failed": "#c0392b",
           "pending": "#b8b8b8", "skipped": "#8c8c8c"}
@@ -114,7 +111,7 @@ def collect(run_dir: Path) -> dict[str, Any]:
         if start and (t0 is None or start < t0):
             t0 = start
         row = {
-            "id": sid, "title": STAGE_TITLES.get(sid, sid), "gate": sid.startswith("G"), "status": st,
+            "id": sid, "title": stage_title(sid), "gate": sid.startswith("G"), "status": st,
             "lang": rec.get("lang", ""), "wall": rec.get("wall_s"), "rss": rec.get("peak_rss_bytes"),
             "exit": rec.get("exit_code"), "note": rec.get("note") or rec.get("skip_reason") or "",
             "start": start, "end": end, "started_utc": rec.get("started_utc"), "ended_utc": rec.get("ended_utc"),

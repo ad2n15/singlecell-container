@@ -90,7 +90,9 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from . import config as cfgmod
+from . import progress as progmod
 from . import site as sitemod
+from . import stage_names
 from .config import ConfigError, canonical_json, get_key
 
 __all__ = [
@@ -285,12 +287,15 @@ def _registry(stages: Sequence[Stage] | None) -> list[Stage]:
 
 
 def _stage_index(stages: Sequence[Stage], stage_id: str | None) -> int:
+    """Index of a stage given by ID (``S2``), name (``clustering``) or title, in any case."""
     if stage_id is None:
         return len(stages) - 1
+    sid = stage_names.resolve(stage_id, [s.id for s in stages])
     for i, s in enumerate(stages):
-        if s.id.lower() == stage_id.lower():
+        if s.id == sid:
             return i
-    raise ConfigError(f"unknown stage {stage_id!r} (stages: {[s.id for s in stages]})")
+    names = ", ".join(stage_names.slug(s.id) for s in stages)
+    raise ConfigError(f"unknown stage {stage_id!r} (stages: {names}; the IDs S0, S1a, ... work too)")
 
 
 # --------------------------------------------------------------------------
@@ -520,23 +525,8 @@ def _nice_prefix(cfg: Mapping[str, Any]) -> list[str]:
     return []
 
 
-def _fmt_bytes(b: int | None) -> str:
-    if b is None:
-        return "-"
-    for unit, div in (("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
-        if b >= div:
-            return f"{b / div:.2f} {unit}"
-    return f"{b} B"
-
-
-def _fmt_s(s: float | None) -> str:
-    if s is None:
-        return "-"
-    if s < 60:
-        return f"{s:.1f}s"
-    m, sec = divmod(int(round(s)), 60)
-    h, m = divmod(m, 60)
-    return f"{h}h{m:02d}m{sec:02d}s" if h else f"{m}m{sec:02d}s"
+_fmt_bytes = progmod.fmt_bytes
+_fmt_s = progmod.fmt_s
 
 
 def tail(path: Path, n: int = LOG_TAIL) -> list[str]:
@@ -577,10 +567,12 @@ sys.exit(code if code >= 0 else 128 - code)
 """
 
 
-def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path) -> tuple[int, int, float]:
+def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path,
+                 on_poll: Callable[[], None] | None = None) -> tuple[int, int, float]:
     """Run argv with output to log_path; return (exit_code, peak_rss_bytes, wall_s).
 
     ``argv`` may start with a ``nice -n N`` prefix; the launcher goes after it.
+    ``on_poll`` is called about twice a second while the stage runs (progress display).
     """
     t0 = time.monotonic()
     nice: list[str] = []
@@ -600,7 +592,15 @@ def _run_process(argv: list[str], env: dict[str, str], cwd: Path, log_path: Path
             log.write(f"# scpipe: could not start: {e}\n")
             return 127, 0, time.monotonic() - t0
         try:
-            _, status, ru = os.wait4(proc.pid, 0)
+            delay = 0.02
+            while True:
+                pid, status, ru = os.wait4(proc.pid, os.WNOHANG)
+                if pid:
+                    break
+                if on_poll is not None:
+                    on_poll()
+                time.sleep(delay)
+                delay = min(delay * 2, 0.5)
         except (KeyboardInterrupt, _Terminated):
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
@@ -695,6 +695,7 @@ def run_pipeline(
     stages: Sequence[Stage] | None = None,
     out=None,
     no_gates: bool = False,
+    progress: str = "auto",
 ) -> int:
     """Run the stages for an already prepared run directory. Returns 0 on success, 1 on failure.
 
@@ -708,8 +709,9 @@ def run_pipeline(
     ctx = RunContext(run_dir, cfg, Path(cfg.get("repo_root") or cfgmod.REPO_ROOT))
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
-    def say(msg: str) -> None:
-        print(msg, file=out, flush=True)
+    estimator = progmod.Estimator(run_dir, cfg)
+    rep = progmod.make_reporter(progress, out, last + 1, estimator)
+    resume_cmd = f"scpipe resume --run-dir {run_dir}"
 
     prev_handlers = {}
 
@@ -737,17 +739,19 @@ def run_pipeline(
                 and (state["stages"].get(stages[i].id) or {}).get("status") == "skipped"]
             for i in pending_gates:
                 reasons[stages[i].id] = "skipped by an earlier --no-gates run"
-            say(f"scpipe: run {cfg.get('run_id')} in {run_dir}")
-            for i in range(start):
+            rep.run_start(cfg.get("run_id"), run_dir, [s.id for s in stages[:last + 1]])
+            for i in range(min(start, last + 1)):
                 if i in pending_gates:
                     continue
                 if no_gates and is_gate(stages[i]):
-                    say(f"  [{stages[i].id:>4}] skip (gate; --no-gates)")
+                    rep.skip(i, stages[i].id, "gate; --no-gates")
                 else:
-                    say(f"  [{stages[i].id:>4}] skip (done, inputs unchanged)")
+                    rep.skip(i, stages[i].id, "done, inputs unchanged")
             if start > last and not pending_gates:
                 save_state(run_dir, state)
-                say(f"scpipe: nothing to do up to {stages[last].id}; all stages are done and unchanged")
+                rep.close()
+                rep.message(f"scpipe: nothing to do up to {stages[last].id} ({stage_names.title(stages[last].id)}); "
+                            "all stages are done and unchanged")
                 return 0
             for i in range(start, len(stages)):
                 rec = state["stages"][stages[i].id]
@@ -762,7 +766,7 @@ def run_pipeline(
                     state["stages"][st.id] = {"status": "skipped", "lang": st.lang, "note": "skipped: --no-gates",
                                               "skipped_utc": _utc()}
                     save_state(run_dir, state)
-                    say(f"  [{st.id:>4}] skip (gate; --no-gates)")
+                    rep.skip(i, st.id, "gate; --no-gates")
                     continue
                 reason = reasons.get(st.id) or f"upstream {stages[start].id} was rerun"
                 fp, parts = _fingerprint(stages, i, ctx, state)
@@ -776,18 +780,26 @@ def run_pipeline(
                 save_state(run_dir, state)
                 log_path = run_dir / "logs" / f"{st.id}.log"
                 log_path.write_text("")
-                say(f"  [{st.id:>4}] run  ({reason})")
+                rep.start(i, st.id, reason)
+                follower = progmod.LogFollower(log_path)
+
+                def poll(follower=follower) -> None:
+                    step = follower.latest_step()
+                    if step:
+                        rep.step(step)
+
                 if missing_in:
                     code, peak, wall = 1, 0, 0.0
                     log_path.write_text(f"# scpipe: missing input(s): {', '.join(missing_in)}\n")
                 else:
                     try:
-                        code, peak, wall = _run_process(argv, stage_env(cfg, run_dir, st.id), run_dir, log_path)
+                        code, peak, wall = _run_process(argv, stage_env(cfg, run_dir, st.id), run_dir, log_path,
+                                                        on_poll=poll)
                     except (KeyboardInterrupt, _Terminated) as e:
                         rec.update(status="failed", ended_utc=_utc(), exit_code=-getattr(e, "signum", signal.SIGINT),
                                    note="interrupted")
                         save_state(run_dir, state)
-                        say(f"  [{st.id:>4}] interrupted; resume with: scpipe resume --run-dir {run_dir}")
+                        rep.interrupted(i, st.id, resume_cmd)
                         return 130
                 rec.update(ended_utc=_utc(), wall_s=round(wall, 3), peak_rss_bytes=peak, exit_code=code)
                 if code == 0:
@@ -801,19 +813,13 @@ def run_pipeline(
                     rec["status"] = "waiting"
                     rec["note"] = "waiting for human approval"
                     save_state(run_dir, state)
-                    say(f"  [{st.id:>4}] WAITING for approval after {_fmt_s(wall)}; "
-                        f"report: {run_dir / 'gates' / st.id / 'report.html'}")
-                    say(f"scpipe: review the gate, then: scpipe approve --run-dir {run_dir} --stage {st.id} "
-                        f"[--from-file edited.json] [--by NAME]\n        and continue with: scpipe resume --run-dir {run_dir}")
+                    rep.waiting(i, st.id, wall, run_dir / "gates" / st.id / "report.html",
+                                f"scpipe approve --run-dir {run_dir} --stage {stage_names.slug(st.id)}", resume_cmd)
                     return GATE_WAITING
                 if code != 0:
                     rec["status"] = "failed"
                     save_state(run_dir, state)
-                    say(f"  [{st.id:>4}] FAILED (exit code {code}) after {_fmt_s(wall)}. "
-                        f"Last {LOG_TAIL} lines of {log_path}:")
-                    for line in tail(log_path):
-                        say(f"         | {line}")
-                    say(f"scpipe: fix the problem, then: scpipe resume --run-dir {run_dir}")
+                    rep.failed(i, st.id, code, wall, log_path, tail(log_path), resume_cmd)
                     return 1
                 rec["outputs"] = {
                     spec: file_checksum(p) for spec in st.outputs if (p := _existing(run_dir, spec)) is not None
@@ -821,10 +827,13 @@ def run_pipeline(
                 rec["status"] = "done"
                 rec.pop("note", None)
                 save_state(run_dir, state)
-                say(f"  [{st.id:>4}] done in {_fmt_s(wall)}, peak RSS {_fmt_bytes(peak)}")
-            say(f"scpipe: finished up to {stages[last].id}")
+                estimator.record(st.id, wall)
+                rep.done(i, st.id, wall, peak)
+            rep.close()
+            rep.message(f"scpipe: finished up to {stages[last].id} ({stage_names.title(stages[last].id)})")
             return 0
     finally:
+        rep.close()
         for sig, h in prev_handlers.items():
             signal.signal(sig, h)
 
@@ -845,14 +854,14 @@ def status_text(run_dir: str | Path, stages: Sequence[Stage] | None = None) -> s
         if sid not in order:
             order.append(sid)
     lines = [f"run_id:  {state.get('run_id')}", f"run_dir: {run_dir}", f"updated: {state.get('updated_utc')}", ""]
-    header = ("STAGE", "LANG", "STATUS", "STARTED (UTC)", "WALL", "PEAK RSS", "EXIT")
+    header = ("STAGE", "NAME", "LANG", "STATUS", "STARTED (UTC)", "WALL", "PEAK RSS", "EXIT")
     rows = []
     for sid in order:
         r = state["stages"].get(sid, {})
         status = r.get("status", "pending")
         if status == "running" and not _runner_alive(run_dir):
             status = "running?"  # runner gone: killed or crashed
-        rows.append((sid, r.get("lang", ""), status, (r.get("started_utc") or "-").replace("T", " ").rstrip("Z"),
+        rows.append((sid, stage_names.title(sid), r.get("lang", ""), status, (r.get("started_utc") or "-").replace("T", " ").rstrip("Z"),
                      _fmt_s(r.get("wall_s")), _fmt_bytes(r.get("peak_rss_bytes")),
                      "-" if r.get("exit_code") is None else str(r.get("exit_code"))))
     widths = [max(len(h), *(len(row[i]) for row in rows)) for i, h in enumerate(header)]
@@ -866,11 +875,13 @@ def status_text(run_dir: str | Path, stages: Sequence[Stage] | None = None) -> s
     for sid in order:
         r = state["stages"].get(sid, {})
         if r.get("status") in ("failed", "running"):
-            lines.append(f"\nlast lines of logs/{sid}.log ({r['status']}):")
+            lines.append(f"\nlast lines of logs/{sid}.log, {stage_names.label(sid)} ({r['status']}):")
             lines += [f"  | {x}" for x in tail(run_dir / "logs" / f"{sid}.log", 10)]
         elif r.get("status") == "waiting":
-            lines.append(f"\n{sid} is waiting for a human decision: see {run_dir / 'gates' / sid / 'report.html'}, then\n"
-                         f"  scpipe approve --run-dir {run_dir} --stage {sid} [--from-file edited.json] [--by NAME]\n"
+            lines.append(f"\n{stage_names.label(sid)} is waiting for a human decision: see "
+                         f"{run_dir / 'gates' / sid / 'report.html'}, then\n"
+                         f"  scpipe approve --run-dir {run_dir} --stage {stage_names.slug(sid)} "
+                         f"[--from-file edited.json] [--by NAME]\n"
                          f"  scpipe resume --run-dir {run_dir}")
     if _runner_alive(run_dir):
         lines.append("\na runner is active in this run directory")
@@ -1141,7 +1152,7 @@ def _launch_detached(argv: list[str], run_dir: Path, run_id: str, out) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="scpipe", description="scpipe pipeline runner (S0-S2)")
+    p = argparse.ArgumentParser(prog="scpipe", description="scpipe single-cell pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="validate the config and run the stages",
                        description="Run the pipeline on data files (scpipe run a.h5 b.rds c.h5ad), a folder, a "
@@ -1164,12 +1175,16 @@ def _parser() -> argparse.ArgumentParser:
                    help="batch-correct with Harmony (scfast's Rust Harmony when available) on this sample column, "
                         "e.g. sample_id or a --meta column")
     r.add_argument("--run-dir", default=None, help="overrides run_dir in the config")
-    r.add_argument("--until", default=None, metavar="STAGE", help="stop after this stage")
+    r.add_argument("--until", default=None, metavar="STAGE",
+                   help="stop after this stage: a name such as clustering or qc-review, or an ID such as S2")
+    r.add_argument("-i", "--interactive", action="store_true",
+                   help="answer a few questions (mode, QC cut-offs, doublets, clustering, LLM, review gates) "
+                        "before the run; Enter keeps each default")
     r.add_argument("--detach", action="store_true", help="run inside tmux (or nohup) and return")
     r.add_argument("--env-file", default=None, help=argparse.SUPPRESS)
     s = sub.add_parser("resume", help="continue from the first incomplete stage")
     s.add_argument("--run-dir", required=True)
-    s.add_argument("--until", default=None, metavar="STAGE")
+    s.add_argument("--until", default=None, metavar="STAGE", help="stop after this stage (name or ID)")
     s.add_argument("--detach", action="store_true")
     s.add_argument("--env-file", default=None, help=argparse.SUPPRESS)
     for sp in (r, s):
@@ -1177,6 +1192,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="override execution from the config/site file (direct runs here; slurm/pbs/lsf/sge "
                              "submit one job; split submits the heavy stages and runs the gates here)")
         sp.add_argument("--no-gates", action="store_true", help="record gate stages as skipped instead of running them")
+        sp.add_argument("--progress", default="auto", choices=("auto", "live", "plain"),
+                        help="live progress display in a terminal (auto), always (live), or one line per stage (plain)")
     i = sub.add_parser("init-site", help="detect scheduler, GPU, container runtime and internet; draft a site file")
     i.add_argument("--write", default=None, metavar="PATH")
     i.add_argument("--name", default=None)
@@ -1196,7 +1213,8 @@ def _parser() -> argparse.ArgumentParser:
     d.add_argument("--json", action="store_true")
     ap = sub.add_parser("approve", help="record a human decision at a gate (G1-G4), then `scpipe resume`")
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--stage", required=True, metavar="GATE", help="G1, G2, G3 or G4")
+    ap.add_argument("--stage", required=True, metavar="GATE",
+                    help="qc-review, context-review, annotation-review or interpretation-review (or G1-G4)")
     ap.add_argument("--from-file", default=None, metavar="JSON",
                     help="an edited decision (the proposal.json content, or {\"decision\": {...}}); default: the proposal as is")
     ap.add_argument("--by", default=None, metavar="NAME", help="who approves (default: $SCPIPE_APPROVER or the login name)")
@@ -1256,7 +1274,56 @@ def _run_config_path(a: argparse.Namespace) -> tuple[str, str | None]:
     return str(path), None
 
 
-def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None, out=None) -> int:
+def _check_interactive(a: argparse.Namespace, ask) -> None:
+    if a.config:
+        raise ConfigError("-i asks for the settings itself: give the data files without --config")
+    if a.detach and ask is None and not sys.stdin.isatty():
+        raise ConfigError("-i needs a terminal to ask its questions")
+    if ask is None and not sys.stdin.isatty():
+        raise ConfigError("-i needs a terminal to ask its questions (stdin is not a terminal)")
+
+
+def _interactive(a: argparse.Namespace, cfg: dict[str, Any], cfg_args: tuple[str, str | None],
+                 overrides: dict[str, Any] | None, llm_override: dict[str, Any] | None, ask, out) -> dict[str, Any] | None:
+    """Run the wizard; write its answers into the run's config folder; return the reloaded config (None: cancelled)."""
+    from . import wizard
+
+    try:
+        res = wizard.run_wizard(cfg, ask=ask or wizard.terminal_ask, say=lambda m: print(m, file=out, flush=True),
+                                n_samples=len(cfg.get("samples_resolved") or []), ask_llm=not (a.llm or a.llm_model),
+                                ask_batch=not a.integrate)
+    except (EOFError, KeyboardInterrupt):
+        print("", file=out)
+        return None
+    if res is None:
+        return None
+    cdir = Path(cfg["run_dir"]) / "config"
+    cdir.mkdir(parents=True, exist_ok=True)
+    policy_path = cdir / "wizard_qc_policy.yaml"
+    policy_path.write_text(yaml.safe_dump(res.policy, sort_keys=False), encoding="utf-8")
+    merged: dict[str, Any] = dict(overrides or {})
+    for k, v in res.overrides.items():
+        merged[k] = {**merged[k], **v} if isinstance(v, Mapping) and isinstance(merged.get(k), Mapping) else v
+    merged["qc_policy"] = str(policy_path)
+    if res.llm is not None:
+        llm_override = {"provider": res.llm}
+    (cdir / "wizard.yaml").write_text(
+        "# Settings chosen with scpipe run -i; repeat the run without questions with the command printed below.\n"
+        + yaml.safe_dump(merged, sort_keys=False), encoding="utf-8")
+    again = ["scpipe", "run", *a.inputs, *(["--samples", a.samples] if a.samples else []),
+             "--config", str(cdir / "wizard.yaml"), "--out", str(cfg["run_dir"])]
+    for flag, val in (("--name", a.name), ("--llm", (llm_override or {}).get("provider")),
+                      ("--llm-model", a.llm_model)):
+        if val:
+            again += [flag, val]
+    for m in a.meta or []:
+        again += ["--meta", m]
+    print(f"\nscpipe: settings saved to {cdir / 'wizard.yaml'}; to repeat this run without questions:\n"
+          f"  {shlex.join(again)}\n", file=out, flush=True)
+    return cfgmod.load_config(*cfg_args, llm_override=llm_override, overrides=merged)
+
+
+def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None, out=None, ask=None) -> int:
     out = out or sys.stdout
     a = _parser().parse_args(argv)
     if getattr(a, "env_file", None):
@@ -1265,7 +1332,16 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
         if a.cmd == "run":
             llm_override = {"provider": a.llm, "model": a.llm_model} if (a.llm or a.llm_model) else None
             overrides = {"integration": {"method": "harmony", "batch_key": a.integrate}} if a.integrate else None
-            cfg = cfgmod.load_config(*_run_config_path(a), llm_override=llm_override, overrides=overrides)
+            if a.interactive:
+                _check_interactive(a, ask)
+            cfg_args = _run_config_path(a)
+            cfg = cfgmod.load_config(*cfg_args, llm_override=llm_override, overrides=overrides)
+            if a.interactive:
+                got = _interactive(a, cfg, cfg_args, overrides, llm_override, ask, out)
+                if got is None:
+                    print("scpipe: nothing started", file=out)
+                    return 0
+                cfg = got
             for w in cfg.get("_warnings", []):
                 print(f"scpipe: warning: {w}", file=out)
             _stage_index(_registry(stages), a.until)
@@ -1289,7 +1365,8 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                 if a.no_gates:
                     args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
-            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates)
+            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates,
+                                progress=a.progress)
         if a.cmd == "resume":
             rd = Path(a.run_dir).expanduser().resolve()
             resolved = cfgmod.load_resolved(rd)
@@ -1302,7 +1379,8 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                 if a.no_gates:
                     args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
-            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates)
+            return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates,
+                                progress=a.progress)
         if a.cmd == "init-site":
             from . import site as sitemod
 
@@ -1347,7 +1425,7 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
             except gatesmod.GateError as e:
                 raise RunnerError(str(e)) from e
             ch = dec.get("changes_vs_proposal") or []
-            print(f"scpipe: {dec['gate']} approved by {dec['decided_by']} at {dec['decided_utc']}"
+            print(f"scpipe: {stage_names.label(dec['gate'])} approved by {dec['decided_by']} at {dec['decided_utc']}"
                   + (f" with {len(ch)} change(s) vs the proposal:" if ch else " (proposal unchanged)"), file=out)
             for c in ch:
                 print(f"  - {c}", file=out)

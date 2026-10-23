@@ -192,7 +192,7 @@ def test_g1_review_mode_waits_even_when_approved(tmp_path):
     assert res.waiting and res.decision is None and res.review["verdict"] == "approve"
     assert gate_files(rd) == ["bundle.json", "pending.json", "proposal.json", "report.html", "review.json"]
     pending = json.loads((rd / "gates" / "G1" / "pending.json").read_text())
-    assert pending["approve"] == f"scpipe approve --run-dir {rd} --stage G1" and pending["mode"] == "review"
+    assert pending["approve"] == f"scpipe approve --run-dir {rd} --stage qc-review" and pending["mode"] == "review"
     assert (rd / "S1" / "qc_decisions.tsv.gz").read_bytes() == before  # nothing applied while waiting
     assert "waiting for a human" in (rd / "gates" / "G1" / "report.html").read_text()
 
@@ -391,7 +391,7 @@ def test_runner_stops_at_g1_and_resumes_after_approve(tmp_path):
     out = io.StringIO()
     assert R.main(["run", "--config", str(proj / "config.yaml")], stages=stages, out=out) == 3, out.getvalue()
     text = out.getvalue()
-    assert "[  G1] WAITING" in text and f"scpipe approve --run-dir {rd} --stage G1" in text
+    assert "G1   QC review — WAITING" in text and f"scpipe approve --run-dir {rd} --stage qc-review" in text
     st = json.loads((rd / "state.json").read_text())
     assert st["stages"]["S1c"]["status"] == "done" and st["stages"]["G1"]["status"] == "waiting" and st["stages"]["G1"]["exit_code"] == 3
     assert st["stages"]["S2"]["status"] == "pending" and not (rd / "S2").exists()
@@ -415,7 +415,7 @@ def test_runner_stops_at_g1_and_resumes_after_approve(tmp_path):
     assert st["stages"]["S2"]["fingerprint_parts"]["inputs"]["S1/qc_decisions.tsv.gz"] == st["stages"]["G1"]["outputs"]["S1/qc_decisions.tsv.gz"]
     out = io.StringIO()
     assert R.main(["run", "--config", str(proj / "config.yaml")], stages=stages, out=out) == 0
-    assert out.getvalue().count("] skip") == 3 and "nothing to do" in out.getvalue()
+    assert out.getvalue().count("— skipped (") == 3 and "nothing to do" in out.getvalue()
     # a bad approve is refused with exit 2
     f = tmp_path / "bad.json"
     f.write_text(json.dumps({"thresholds": {"hard_limits": {"max_mito_pct": 99}}, "review_cells": []}))

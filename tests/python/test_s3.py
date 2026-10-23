@@ -268,12 +268,12 @@ def test_rerun_skips_s3_and_annotation_change_reruns_only_s3(run_dir):
     cfg_file = Path(yaml.safe_load((run_dir / "config" / "config.resolved.yaml").read_text())["config_file"])
     r = _run_until_s3(cfg_file, run_dir)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "[  S3] skip" in r.stdout, r.stdout
+    assert "S3   Markers and cell-type evidence — skipped" in r.stdout, r.stdout
     # a changed annotation setting reruns S3 only (the edited copy sits next to the original so the
     # relative sample paths stay valid)
     edited = cfg_file.with_name("cpu_edited_s3.yaml")
     edited.write_text(cfg_file.read_text() + "\nannotation:\n  min_confidence: 0.7\n")
     r = _run_until_s3(edited, run_dir)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "[  S2] skip" in r.stdout and "[  S3] run" in r.stdout, r.stdout
+    assert "S2   Normalise, PCA, batch correction, clustering — skipped" in r.stdout and "S3   Markers and cell-type evidence — running" in r.stdout, r.stdout
     assert json.loads((run_dir / "S3" / "evidence_bundle.json").read_text())["annotation"]["min_confidence"] == 0.7

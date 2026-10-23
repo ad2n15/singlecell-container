@@ -315,7 +315,7 @@ Each gate writes `gates/Gx/bundle.json`, `proposal.json`, `review.json`, `decisi
 `report.html` (plus `pending.json` while waiting). A stopped run waits for:
 
 ```bash
-scpipe approve --run-dir <run_dir> --stage G2 --by <your name>   # or --from-file decision.json
+scpipe approve --run-dir <run_dir> --stage context-review --by <your name>   # or --from-file decision.json
 scpipe resume  --run-dir <run_dir>
 ```
 
@@ -357,7 +357,7 @@ scpipe doctor  --config config.yaml                 # preflight: packages, GPU, 
 scpipe run     --config config.yaml --detach        # run in tmux; survives a dropped SSH session
 scpipe status  --run-dir <run_dir>                  # stage states, timings, peak memory
 scpipe dashboard --run-dir <run_dir> --watch 30     # live dashboard.html
-scpipe approve --run-dir <run_dir> --stage G2 --by me
+scpipe approve --run-dir <run_dir> --stage context-review --by me
 scpipe resume  --run-dir <run_dir>                  # continue after a gate, disconnect or kill
 scpipe init-site --write conf/sites/mysite.yaml     # draft a site file for a new machine
 ```

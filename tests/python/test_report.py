@@ -280,10 +280,10 @@ def test_render_gate_report(run_dir):
     html = build.render_gate_report(run_dir / "gates" / "G1")
     p = parse(html)
     assert not p.errors and not p.stack
-    assert "Gate G1" in html and "QC decisions" in html
+    assert "Gate G1" in html and "QC review" in html
     assert "max_mito_pct" in html                        # decision JSON shown in full
     assert "Mito tail looks fine." in html and "Within policy." in html
-    assert "scpipe approve --run-dir" in html and "--stage G1" in html
+    assert "scpipe approve --run-dir" in html and "--stage qc-review" in html
     assert "GBP 0.0123" in html                          # LLM cost so far
     assert not p.external
     # a gate waiting for a human

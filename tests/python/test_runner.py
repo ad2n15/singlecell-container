@@ -146,7 +146,7 @@ def test_first_run_then_skip(project):
 
     code, out = run(project)
     assert code == 0 and calls(rd) == []
-    assert "nothing to do" in out and out.count("] skip") == 5
+    assert "nothing to do" in out and out.count("— skipped (") == 5
 
 
 def test_change_resolution_reruns_only_s2(project):
@@ -368,10 +368,17 @@ def test_status_output(project):
     header = next(l for l in lines if l.startswith("STAGE"))
     for col in ("LANG", "STATUS", "STARTED (UTC)", "WALL", "PEAK RSS", "EXIT"):
         assert col in header
-    rows = {l.split()[0]: l.split() for l in lines if l.split() and l.split()[0] in ALL}
-    assert rows["S0"][2] == "done" and rows["S1c"][2] == "failed" and rows["S2"][2] == "pending"
-    assert rows["S1c"][-1] == "3"
-    assert rows["S0"][-2] in ("MB", "KB")
+    # columns by header position (stage names contain spaces)
+    cols = ["STAGE", "NAME", "LANG", "STATUS", "STARTED (UTC)", "WALL", "PEAK RSS", "EXIT"]
+    starts = [header.index(c) for c in cols] + [None]
+    rows = {}
+    for l in lines:
+        if l.split() and l.split()[0] in ALL:
+            rows[l.split()[0]] = {c: l[starts[k]:starts[k + 1]].strip() for k, c in enumerate(cols)}
+    assert rows["S0"]["STATUS"] == "done" and rows["S1c"]["STATUS"] == "failed" and rows["S2"]["STATUS"] == "pending"
+    assert rows["S0"]["NAME"] == "Ingest" and rows["S2"]["NAME"].startswith("Normalise")
+    assert rows["S1c"]["EXIT"] == "3"
+    assert rows["S0"]["PEAK RSS"].split()[-1] in ("MB", "KB")
     peak = state(rd)["stages"]["S0"]["peak_rss_bytes"]
     assert 1024**2 < peak < 100 * 1024**2  # the dummy stage, not the runner's own memory
     assert "last lines of logs/S1c.log" in text and "boom line 29" in text

@@ -12,7 +12,7 @@
 <section id="howto">
 <h2>Approving or editing this decision</h2>
 <p>If the run stopped here, review the decision above, optionally edit a copy of <code>decision.json</code>, then:</p>
-<pre>scpipe approve --run-dir {{ run.run_dir }} --stage {{ gate.gate }} [--from-file edited.json] [--by YOUR_NAME]
+<pre>scpipe approve --run-dir {{ run.run_dir }} --stage {{ gate.slug or gate.gate }} [--from-file edited.json] [--by YOUR_NAME]
 scpipe resume  --run-dir {{ run.run_dir }}</pre>
 <p class="muted">Rules decide, agents advise, reviewers check, humans approve, everything is logged (docs/agents-spec.md).</p>
 </section>

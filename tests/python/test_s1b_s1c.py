@@ -442,4 +442,4 @@ def test_runner_with_real_python_stages(tmp_path):
     out = io.StringIO()
     assert R.main(["run", "--config", str(proj / "config.yaml")], stages=stages, out=out) == 0
     text = out.getvalue()
-    assert text.count("] skip") == 4 and "[  S2] run" in text
+    assert text.count("— skipped (") == 4 and "S2   Normalise, PCA, batch correction, clustering — running" in text

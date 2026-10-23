@@ -64,7 +64,7 @@ export ANTHROPIC_API_KEY=...                       # or any provider; omit for r
 scpipe doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
 scpipe run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
 scpipe status --run-dir /scratch/$USER/scpipe/my_study     # or open <run_dir>/dashboard.html
-scpipe approve --run-dir ... --stage G2 --by me   # when a gate stops for you
+scpipe approve --run-dir ... --stage context-review --by me   # when a gate stops for you
 scpipe resume  --run-dir ...                      # continue after a gate, disconnect or kill
 ```
 

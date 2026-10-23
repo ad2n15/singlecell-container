@@ -32,13 +32,12 @@ from pathlib import Path
 from typing import Any, Sequence, Iterable, Mapping
 
 from . import plots
+from ..stage_names import slug as stage_slug, title as stage_title
 
 __all__ = ["collect", "render_report", "build_report", "build_explorer", "render_gate_report", "build_all"]
 
 TEMPLATES = Path(__file__).parent / "templates"
 GATES = ("G1", "G2", "G3", "G4")
-GATE_TITLES = {"G1": "QC decisions", "G2": "Tissue and disease context", "G3": "Cluster annotation",
-               "G4": "DGE interpretation"}
 SECTIONS = ("summary", "resources", "qc", "clusters", "markers", "dge", "opentargets", "gates", "llm", "software")
 
 
@@ -379,7 +378,7 @@ def _gate(gdir: Path, gate: str) -> dict[str, Any]:
     pending = _json(gdir / "pending.json")  # written by the gates package while a human decision is awaited
     present = present or pending is not None
     return {
-        "gate": gate, "title": GATE_TITLES.get(gate, gate), "present": present, "dir": str(gdir),
+        "gate": gate, "title": stage_title(gate), "slug": stage_slug(gate), "present": present, "dir": str(gdir),
         "has_report": (gdir / "report.html").exists(), "report_href": f"../gates/{gdir.name}/report.html",
         "pending": pending is not None and not dec,
         "mode": dec.get("mode"), "decided_by": dec.get("decided_by"), "decided_utc": dec.get("decided_utc"),

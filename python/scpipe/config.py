@@ -798,6 +798,9 @@ def load_config(config_path: str | Path, run_dir: str | Path | None = None,
     raw = dict(raw)
     for k, v in (overrides or {}).items():
         raw[k] = {**raw[k], **v} if isinstance(v, Mapping) and isinstance(raw.get(k), Mapping) else v
+    if isinstance(raw.get("gates"), Mapping):  # gates: {qc-review: auto} means gates: {G1: auto}
+        from .stage_names import gate_id
+        raw["gates"] = {gate_id(str(g)): m for g, m in raw["gates"].items()}
     base = config_path.parent
     raw, site_source = apply_site(raw, base, problems, warnings)
     cfg = _merge_defaults(raw, problems, warnings)
