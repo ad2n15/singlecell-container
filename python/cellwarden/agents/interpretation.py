@@ -117,7 +117,21 @@ class InterpretationAgent(Agent):
                 raise ValueError("rationale must be a string")
             proposal = G4.normalize_proposal({"contrasts": contrasts})
             ok, violations = G4.policy_check(proposal, bundle)
-            return {"accepted": ok, "violations": violations, "proposal": proposal, "rationale": rationale}
+            out = {"accepted": ok, "violations": violations, "proposal": proposal, "rationale": rationale}
+            if not ok:
+                # name the valid IDs of the genes cited, so the retry can fix unknown evidence_ids
+                valid = {}
+                for c in proposal.get("contrasts") or []:
+                    for h in c.get("hypotheses") or []:
+                        gene = str(h.get("gene"))
+                        bad = [e for e in h.get("evidence_ids") or [] if e not in (evidence_by_gene.get(gene) or {})]
+                        if bad and gene not in valid:
+                            valid[gene] = list((evidence_by_gene.get(gene) or {}))[:8]
+                if valid:
+                    out["valid_evidence_ids"] = valid
+                    out["hint"] = ("cite only these evidence_ids (from get_target_evidence); an empty list means "
+                                   "the gene has no Open Targets evidence, so its hypothesis cites none")
+            return out
 
         hyp_schema = {"type": "object", "properties": {
             "gene": {"type": "string"}, "direction": {"type": "string", "enum": list(G4.DIRECTIONS)},
