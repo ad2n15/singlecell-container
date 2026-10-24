@@ -1078,8 +1078,12 @@ def doctor(config_path: str | None = None, run_dir: str | None = None) -> dict[s
     # Portability and LLM checks (docs/agents-spec.md section 8): site file,
     # execution mode, container, API key + tool-use test, budget, Open Targets.
     try:
-
-        report["checks"].extend(sitemod.doctor_checks(cfg))
+        site_cfg = cfg
+        if site_cfg is None:
+            # no config: choose the LLM from the keys that are set, as `scpipe run` does, so the key is tested
+            site_cfg = {}
+            cfgmod._resolve_llm(site_cfg, None, [])
+        report["checks"].extend(sitemod.doctor_checks(site_cfg))
     except Exception as e:  # never let an extra check break doctor
         add("site", "portability checks", True, f"skipped: {e}", required=False)
     report["ok"] = all(c["ok"] for c in report["checks"] if c["required"])

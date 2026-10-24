@@ -709,7 +709,10 @@ def doctor_checks(cfg: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         add("llm", "provider", False, f"{provider}: not implemented yet (use anthropic or openai_compatible)", required=False)
     else:
         dflt = llm_cfg.get("default") or {}
-        add("llm", "provider", True, f"{provider}, model {dflt.get('model')}"
+        mod_ = _llm_provider_module()
+        model = dflt.get("model") or ((mod_.role_settings(llm_cfg, "doctor").get("model"))
+                                      if mod_ is not None and hasattr(mod_, "role_settings") else None)
+        add("llm", "provider", True, f"{provider}, model {model}"
             + (f" ({cfg['llm_choice']})" if (cfg or {}).get("llm_choice") else ""), required=False)
         key_env = dflt.get("api_key_env") or DEFAULT_KEY_ENV.get(provider, "ANTHROPIC_API_KEY")
         have_key = bool(os.environ.get(key_env))

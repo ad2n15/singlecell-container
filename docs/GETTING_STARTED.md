@@ -16,16 +16,17 @@ This page covers the everyday path: install, check, run, find the results. The d
 **Contents**
 1. [What you need](#1-what-you-need)
 2. [Install](#2-install)
-3. [Quick test (5 minutes)](#3-quick-test-5-minutes)
-4. [Run your own data](#4-run-your-own-data)
-5. [Guided setup (`-i`)](#5-guided-setup--i)
-6. [Review gates and LLM agents](#6-review-gates-and-llm-agents)
-7. [Differential expression](#7-differential-expression)
-8. [Big datasets: compute nodes and GPUs](#8-big-datasets-compute-nodes-and-gpus)
-9. [Results](#9-results)
-10. [Everyday commands](#10-everyday-commands)
-11. [Troubleshooting](#11-troubleshooting)
-12. [FAQ](#12-faq)
+3. [Connect an AI backend (optional)](#3-connect-an-ai-backend-optional)
+4. [Quick test (5 minutes)](#4-quick-test-5-minutes)
+5. [Run your own data](#5-run-your-own-data)
+6. [Guided setup (`-i`)](#6-guided-setup--i)
+7. [Review gates and LLM agents](#7-review-gates-and-llm-agents)
+8. [Differential expression](#8-differential-expression)
+9. [Big datasets: compute nodes and GPUs](#9-big-datasets-compute-nodes-and-gpus)
+10. [Results](#10-results)
+11. [Everyday commands](#11-everyday-commands)
+12. [Troubleshooting](#12-troubleshooting)
+13. [FAQ](#13-faq)
 
 ---
 
@@ -38,7 +39,7 @@ This page covers the everyday path: install, check, run, find the results. The d
 | **Disk** | The image is 6.6 GB as a `.sif` file, or 12 GB / ~133k files unpacked as a sandbox. Each run needs a few hundred MB to a few GB, depending on the number of cells. |
 | **Memory** | PBMC 3k (2,700 cells) peaks at about 1.4 GB. Memory grows with the number of cells; for 100k+ cells start with 64 GB, and check the peak memory shown per stage. |
 | **CPU / GPU** | 8 cores is a good default. A GPU (e.g. NVIDIA L4) is optional; the CPU path is complete. |
-| **Internet** | Needed for the LLM review agents and the Open Targets evidence. Not needed for the stages in between (most of the computing). On Iridis, compute nodes have **no** internet: see [section 8](#8-big-datasets-compute-nodes-and-gpus). |
+| **Internet** | Needed for the LLM review agents and the Open Targets evidence. Not needed for the stages in between (most of the computing). On Iridis, compute nodes have **no** internet: see [section 9](#9-big-datasets-compute-nodes-and-gpus). |
 | **LLM key (optional)** | One of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`. Without a key the gates use rules only and stop for you each time. |
 | **Data** | 10x `.h5` or `matrix.mtx` folders, `.h5ad`, Seurat `.rds` / `.qs2`, `.loom`, or csv/tsv count tables. **Human** data. Raw 10x matrices are reduced to cells automatically. |
 
@@ -122,7 +123,7 @@ scpipe() { apptainer exec --cleanenv --env-file "${SCPIPE_ENV:-/dev/null}" -B /i
 ```
 
 `scpipe run ...` then works like a local command. `SCPIPE_ENV=.env` passes your API keys
-(section 6). `-B` binds the filesystems your data lives on.
+(section 3). `-B` binds the filesystems your data lives on.
 
 ### Option C: Iridis X, shared copy (nothing to install)
 
@@ -164,7 +165,84 @@ provider (with a test call), the budget and Open Targets. Every **required** lin
 
 ---
 
-## 3. Quick test (5 minutes)
+## 3. Connect an AI backend (optional)
+
+The review agents at the four gates (section 7) call a large language model. Connect one by
+setting **one** API key, or by pointing scpipe at a model server you run yourself. Without a
+backend everything still runs: the gates decide by rules and stop for your approval.
+
+| Provider | Key variable | Get a key | Default model |
+|---|---|---|---|
+| Claude (Anthropic) | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com) → API keys | `claude-haiku-4-5` |
+| OpenAI | `OPENAI_API_KEY` | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | `gpt-4.1-mini` |
+| NVIDIA NIM | `NVIDIA_API_KEY` | [build.nvidia.com](https://build.nvidia.com) → *Get API Key* (free development credits) | `nvidia/nemotron-3-ultra-550b-a55b` |
+
+**Step 1: put the key in a `.env` file**, in your project folder:
+
+```bash
+cat > .env <<'EOF'
+NVIDIA_API_KEY=nvapi-xxxxxxxxxxxxxxxxxxxxxxxx
+EOF
+chmod 600 .env
+```
+
+- **Format:** one `NAME=value` per line, with no quotes, no spaces around `=` and no `export`.
+  Lines starting with `#` are comments.
+- **Keep it private:** `chmod 600` makes it readable only by you. Never commit it (add `.env` to
+  `.gitignore`).
+- **Where the key goes:** scpipe never writes the key anywhere. The run records only which
+  variable it used.
+
+**Step 2: pass the file to scpipe.** Containers don't see your shell's variables unless told:
+
+| How you run scpipe | Add |
+|---|---|
+| Docker (section 2A) | `--env-file .env` in the `docker run` command or the `scpipe-docker` alias |
+| Apptainer `.sif` or sandbox (2B, 2C) | `--env-file .env` after `apptainer exec --cleanenv` |
+| The `scpipe` shell function (2B) | `SCPIPE_ENV=.env scpipe run ...` |
+| A native install (no container) | `set -a; source .env; set +a` before `scpipe run` |
+
+**Step 3: check it.** `scpipe doctor`, run the same way, makes a small test call:
+
+```
+llm:
+  [  ok] provider               nvidia, model nvidia/nemotron-3-ultra-550b-a55b (nvidia (auto: $NVIDIA_API_KEY is set))
+  [  ok] api key                $NVIDIA_API_KEY is set (provider nvidia)
+  [  ok] endpoint               https://integrate.api.nvidia.com/v1: HTTP 404 (host reachable)
+  [  ok] tool-use test          ok: stop_reason=tool_use, tool_calls=1
+  [  ok] budget                 GBP 3.57 of 30.00 spent across runs (/home/you/.scpipe/ledger.json)
+```
+
+`provider ... none: no API key set` means the key didn't reach scpipe; see step 2.
+
+**Choosing a provider and model:**
+- **Several keys:** scpipe uses Claude first, then OpenAI, then NVIDIA.
+- **Pick one per run:** `--llm nvidia` (or `anthropic`, `openai`, `none`).
+- **Another model:** `--llm-model <name>`. It must support tool (function) calling.
+- **In a config file:** `llm: {default: {provider: nvidia, model: ...}}`.
+- **Per gate:** for example, use a different model for the reviewer:
+  `llm: {roles: {reviewer: {model: ...}}}`.
+
+**A model server you run yourself** (vLLM, Ollama, a local NIM). No data leaves your site, and
+no key is needed unless the server asks for one:
+
+```yaml
+llm:
+  default:
+    provider: openai_compatible
+    base_url: http://localhost:8000/v1     # Ollama: http://localhost:11434/v1
+    model: <the model name the server serves>
+    # api_key_env: MY_SERVER_KEY           # only if the server needs a key (put it in .env)
+```
+
+**Cost and network:**
+- **Budget:** every call is priced and logged, with a budget of £5 per run and £30 in total
+  (section 7).
+- **Internet:** the agents need it. On Iridis, run the gate steps on the login node (section 9).
+
+---
+
+## 4. Quick test (5 minutes)
 
 This runs the classic 10x PBMC 3k dataset. Use the copy in the repository, or download it:
 
@@ -179,8 +257,8 @@ curl -sL https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_
 scpipe run filtered_gene_bc_matrices/hg19 --name pbmc3k --llm none --no-gates --until evidence --out pbmc3k_test
 ```
 
-**Full pipeline with the agents.** Run this on a node with internet, after setting a key
-(section 6):
+**Full pipeline with the agents.** Run this on a node with internet, after connecting an AI backend
+(section 3):
 
 ```bash
 scpipe run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
@@ -210,7 +288,7 @@ srun --partition=amd --cpus-per-task=8 --mem=16G --time=01:00:00 apptainer exec 
 
 ---
 
-## 4. Run your own data
+## 5. Run your own data
 
 **Give the files directly.** The format is detected, and each file or folder is one sample, named
 after it:
@@ -247,7 +325,7 @@ Changing a setting reruns only the stages that use it, and the ones after them.
 
 ---
 
-## 5. Guided setup (`-i`)
+## 6. Guided setup (`-i`)
 
 Add `-i` and scpipe asks a few questions first. Enter keeps the suggested value:
 
@@ -263,7 +341,7 @@ scpipe run data/*.h5 -i --out results/my_study
 4. **Doublets:** Scrublet, scDblFinder or none.
 5. **Clustering:** PCs (`auto`), Leiden resolution (0.5), variable genes (2000).
 6. **DE:** the method, the test, and either markers per cell type, two groups, or **choose after
-   annotation** (section 7).
+   annotation** (section 8).
 7. **Batch correction** with Harmony (only with more than one sample).
 8. **LLM**, from the keys it finds.
 9. **Review gates:** agents decide, or stop at every gate.
@@ -273,7 +351,7 @@ that repeats the run without questions. `-i` needs a terminal, and is used **wit
 
 ---
 
-## 6. Review gates and LLM agents
+## 7. Review gates and LLM agents
 
 | Gate | Name on the command line | What is reviewed | Default |
 |---|---|---|---|
@@ -282,17 +360,8 @@ that repeats the run without questions. `-i` needs a terminal, and is used **wit
 | G3 | `annotation-review` | cell-type labels of the clusters | agents decide |
 | G4 | `interpretation-review` | interpretation of the DE genes | stops for you |
 
-**API keys.** Put them in a `.env` file next to your data. Keep it private: it is never written
-into the run.
-
-```bash
-NVIDIA_API_KEY=nvapi-...
-# or ANTHROPIC_API_KEY=... / OPENAI_API_KEY=...
-```
-
-Pass the file with `apptainer exec --env-file .env ...` (or `SCPIPE_ENV=.env` with the function
-in section 2). With several keys, scpipe uses Claude first, then OpenAI, then NVIDIA. Choose one
-with `--llm nvidia`, and a model with `--llm-model <name>`.
+The agents need an AI backend: an API key, or a local model server ([section 3](#3-connect-an-ai-backend-optional)).
+Without one, every gate decides by rules and stops for you.
 
 **Letting the agents decide at every gate.** Use `-i` and choose "Agents decide", or use a config
 with:
@@ -318,7 +387,7 @@ The report is at `results/my_study/gates/G2/report.html`. To change the proposal
 
 ---
 
-## 7. Differential expression
+## 8. Differential expression
 
 The default is Seurat **FindMarkers** with the **MAST** test. The two common setups:
 
@@ -369,7 +438,7 @@ record: associated diseases, drugs in the clinic (phase, indication, mechanism) 
 
 ---
 
-## 8. Big datasets: compute nodes and GPUs
+## 9. Big datasets: compute nodes and GPUs
 
 On Iridis the compute nodes have no internet, but the agents and Open Targets need it. Split the
 run into three steps that share the run folder; each step continues where the last one stopped:
@@ -397,7 +466,7 @@ scpipe resume --run-dir /scratch/$USER/my_study
 
 ---
 
-## 9. Results
+## 10. Results
 
 Everything is in the run folder (`--out`):
 
@@ -416,7 +485,7 @@ Everything is in the run folder (`--out`):
 
 ---
 
-## 10. Everyday commands
+## 11. Everyday commands
 
 | Task | Command |
 |---|---|
@@ -435,24 +504,25 @@ Everything is in the run folder (`--out`):
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | You see | Cause and fix |
 |---|---|
 | `fusermount: No such file or directory` when starting a `.sif` | The site has no FUSE. Use the sandbox folder (section 2), or add `--unsquash`. `--unsquash` unpacks into RAM, so jobs need ~96 GB. |
 | `bash: executable file not found` in a sandbox | It was unpacked straight onto GPFS and lost its execute permissions. Unpack on `/tmp` and copy with `rsync -a` (section 2B). |
+| `doctor` says `no API key set`, or every gate runs rules-only | The key didn't reach the container: add `--env-file .env` (section 3, step 2). Check the file has `NAME=value` lines without quotes or `export`. |
 | A gate stops with `fallback: true` | The LLM call failed. See `logs/G<n>.log`: e.g. `HTTP 410` means the model was retired (`--llm-model <current model>`), `401` means a wrong key, and no internet happens on compute nodes. |
 | A gate stops with `reviewer: escalate` | The reviewer agent disagreed, or found a problem. Read `gates/G<n>/report.html`, then approve or edit. |
 | `the worker made no valid proposal: ... must be null or match EFO_/MONDO_` | The agent gave an invalid ID; the policy check refused it. Approve the gate by hand, or rerun it. |
-| `-i needs a terminal` | `-i` was used in a batch job or a pipe. Run it on the login node, then submit the heavy part (section 8). |
+| `-i needs a terminal` | `-i` was used in a batch job or a pipe. Run it on the login node, then submit the heavy part (section 9). |
 | The run waits before DE (`waits for the comparisons`) | You chose "after annotation" and the run has no terminal. `scpipe resume` in a terminal asks. |
 | A stage `FAILED` | The last 20 lines of the log are printed. The full log is `logs/<stage>.log`. Fix the cause, then `scpipe resume`. |
 | `disk quota exceeded` (home or scratch) | On Iridis the limit is the **number of files**. Keep runs, images and caches on a project folder or `/iridisfs`, not in home. |
-| DE is slow | `dge.test: wilcox`, or `dge.max_cells_per_side: 2000` (section 7). |
+| DE is slow | `dge.test: wilcox`, or `dge.max_cells_per_side: 2000` (section 8). |
 
 ---
 
-## 12. FAQ
+## 13. FAQ
 
 **What do the LLM agents see?** Aggregated evidence only: QC summaries, cluster statistics,
 marker lists and DE summaries, never the expression matrix. Free-text sample metadata is passed
