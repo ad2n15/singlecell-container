@@ -88,4 +88,4 @@ Same laptop, mouse brain 100k, all three engines through the bench harness
 
 ## What changed overnight
 
-See `progress.md` for the step-by-step log with evidence.
+The runs behind these numbers are in the result folders next to this file.

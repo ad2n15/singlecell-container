@@ -12,7 +12,7 @@ Run everything from the repository root.
 
 ## Quick start
 
-PBMC 3k, using the 10x folder that `seurat_pbmc3k.R` downloads to `~/seurat-workspace`:
+PBMC 3k, using the 10x folder that `examples/tutorials/seurat_pbmc3k.R` downloads to `~/seurat-workspace`:
 
 ```bash
 bash bench/run_bench.sh --input ~/seurat-workspace/filtered_gene_bc_matrices/hg19 \
@@ -43,8 +43,8 @@ then generates a synthetic dataset and runs the harness. It has not been built i
 the first build may need small fixes.
 
 ```bash
-CELLS=100000 THREADS=8 MEM=48g bash docker/run.sh                # full pipeline
-CELLS=100000 THREADS=8 MEM=48g SKIP_UMAP=1 bash docker/run.sh    # without UMAP
+CELLS=100000 THREADS=8 MEM=48g bash bench/docker/run.sh                # full pipeline
+CELLS=100000 THREADS=8 MEM=48g SKIP_UMAP=1 bash bench/docker/run.sh    # without UMAP
 ```
 
 Variables: `CELLS`, `GENES`, `TYPES`, `THREADS`, `REPS`, `ENGINES`
@@ -64,7 +64,7 @@ with `--max-genes` and `--max-mt`.
 
 ```bash
 python bench/pipeline_steps.py --input sample_filtered_feature_bc_matrix.h5 --out results/run --engine scfast-cpu
-INPUT=~/Downloads/sample_filtered_feature_bc_matrix.h5 MEM=16g bash docker/run.sh pipeline   # in the container
+INPUT=~/Downloads/sample_filtered_feature_bc_matrix.h5 MEM=16g bash bench/docker/run.sh pipeline   # in the container
 ```
 
 Use the `filtered_feature_bc_matrix.h5` (cells only). A `.cloupe` file is a Loupe Browser
@@ -95,7 +95,7 @@ their own; each has `--help` and a usage example at the top.
 
 ## What every engine does
 
-`prep.py` applies the QC from `seurat_pbmc3k.R` once, in Seurat's order: keep genes detected
+`prep.py` applies the QC from `examples/tutorials/seurat_pbmc3k.R` once, in Seurat's order: keep genes detected
 in at least 3 cells, then cells with more than 200 and fewer than 2,500 genes and under 5%
 mitochondrial counts (`MT-` prefix). Each threshold has its own flag (`--min-cells`,
 `--min-genes`, `--max-genes`, `--max-mt`, `--mt-prefix`). It then writes one Cell Ranger
@@ -119,7 +119,7 @@ Each runner then repeats these steps, timing each one:
 | `to_cpu` | – | rapids only |
 
 Shared parameters (runner defaults, not exposed by `run_bench.sh`): 2,000 HVGs, 30 PCs computed
-and the leading 10 used for neighbours and UMAP (`--dims`, as `seurat_pbmc3k.R` does with `dims = 1:10`;
+and the leading 10 used for neighbours and UMAP (`--dims`, as `examples/tutorials/seurat_pbmc3k.R` does with `dims = 1:10`;
 the PCs beyond the signal are a flat noise bulk whose order is arbitrary, so neighbours computed on all
 30 are not comparable between engines), k = 20 neighbours including the cell itself (Seurat's `k.param`), resolution 0.5, seed 0,
 2 Leiden iterations, scaled values clipped at 10.

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Build the image and run a mode in it. Results from `bench` appear in bench/results/ on the host.
-#   bash docker/run.sh test                       # whole test suite
-#   STAGES="rust pytest" bash docker/run.sh test  # only some stages
-#   CELLS=100000 THREADS=8 MEM=48g bash docker/run.sh bench
-#   INPUT=~/Downloads/<file>.h5 bash docker/run.sh pipeline   # every step's outputs for your data
-#   bash docker/run.sh all                        # tests, then the benchmark
-#   bash docker/run.sh shell
+#   bash bench/docker/run.sh test                       # whole test suite
+#   STAGES="rust pytest" bash bench/docker/run.sh test  # only some stages
+#   CELLS=100000 THREADS=8 MEM=48g bash bench/docker/run.sh bench
+#   INPUT=~/Downloads/<file>.h5 bash bench/docker/run.sh pipeline   # every step's outputs for your data
+#   bash bench/docker/run.sh all                        # tests, then the benchmark
+#   bash bench/docker/run.sh shell
 # MEM and CPUS cap the container (Seurat needs tens of GB at 100k cells).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 mode="${1:-test}"
-docker build -f docker/Dockerfile -t scfast .
+docker build -f bench/docker/Dockerfile -t scfast .
 mkdir -p bench/results
 tty=(); [[ -t 0 ]] && tty=(-it)
 mount=()

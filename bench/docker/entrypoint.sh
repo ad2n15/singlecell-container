@@ -4,7 +4,7 @@
 #   bench  synthetic benchmark: CELLS=100000 GENES=5000 TYPES=10 THREADS=$(nproc) REPS=3
 #          ENGINES=seurat,scanpy,scfast-cpu NAME=run_$CELLS SKIP_UMAP=0 TIMEOUT=7200
 #   pipeline  every step's tables and plots for your own data: INPUT_FILE=/input/<file>.h5
-#          (docker/run.sh mounts it), ENGINE=scfast-cpu|scanpy, NAME=pipeline_<file>,
+#          (bench/docker/run.sh mounts it), ENGINE=scfast-cpu|scanpy, NAME=pipeline_<file>,
 #          optional MAX_GENES MAX_MT SKIP_UMAP=1 UMAP_EPOCHS=100 UMAP_INIT=pca
 #   all    test, then bench
 #   shell  interactive bash
@@ -30,7 +30,7 @@ run_bench() {
 }
 
 run_pipeline() {
-  [[ -n "${INPUT_FILE:-}" && -e "$INPUT_FILE" ]] || { echo "set INPUT (docker/run.sh) to a 10x .h5, .h5ad or matrix folder" >&2; exit 2; }
+  [[ -n "${INPUT_FILE:-}" && -e "$INPUT_FILE" ]] || { echo "set INPUT (bench/docker/run.sh) to a 10x .h5, .h5ad or matrix folder" >&2; exit 2; }
   name="${NAME:-pipeline_$(basename "${INPUT_FILE%.*}" | cut -c1-40)}"
   args=(--input "$INPUT_FILE" --out "bench/results/$name" --engine "${ENGINE:-scfast-cpu}")
   [[ -n "${MAX_GENES:-}" ]] && args+=(--max-genes "$MAX_GENES")

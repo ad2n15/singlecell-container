@@ -1,150 +1,114 @@
-# singlecell — `cellwarden`, an agentic Seurat pipeline
+# CellWarden
 
-A production single-cell RNA-seq pipeline with **Seurat (R)** as the backbone, **GPU steps
-through a validated Seurat ⇄ AnnData exchange format**, and **LLM agents that advise at four
-review gates** while rules, a separate reviewer agent and humans keep the final say. It runs on
-one internet-connected node (first target: the University of Southampton Iridis X L4 login node)
-and moves to any HPC, workstation or cloud VM with one site file.
+**A single-cell RNA-seq pipeline whose decisions are guarded: rules decide, LLM agents advise,
+a reviewer agent checks, and you approve. Everything is logged.**
 
-> Rules decide, agents advise, reviewers check, humans approve, everything is logged.
+[![Release](https://img.shields.io/github/v/release/cellwarden/cellwarden)](https://github.com/cellwarden/cellwarden/releases)
+[![Docker pulls](https://img.shields.io/docker/pulls/cellwarden/cellwarden)](https://hub.docker.com/r/cellwarden/cellwarden)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-blue)](LICENSE)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/cellwarden/cellwarden/blob/main/examples/colab/cellwarden_quickstart.ipynb)
 
-**New here? Start with [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**: requirements,
-install, a 5-minute test, running your own data, review gates, differential expression, compute
-nodes and troubleshooting.
+Give it count files (10x, h5ad, Seurat, loom, csv). CellWarden then runs a complete Seurat-based
+analysis:
+- QC with doublet removal, normalisation, batch correction (Harmony), clustering, UMAP;
+- cell-type annotation against 72 human cell types;
+- differential expression (FindMarkers / MAST or pseudobulk DESeq2);
+- drug and disease evidence for the DE genes from Open Targets;
+- one self-contained HTML report.
+
+At four **review gates** (QC, tissue context, annotation, DE interpretation), LLM agents propose
+decisions within policy limits. A separate reviewer agent checks them, and the run continues or
+stops for you.
+
+**See it on real data:** [PBMC 3k report](https://cellwarden.github.io/cellwarden/examples/pbmc3k/report.html) ·
+[interactive UMAP](https://cellwarden.github.io/cellwarden/examples/pbmc3k/explorer.html) ·
+[run dashboard](https://cellwarden.github.io/cellwarden/examples/pbmc3k/dashboard.html)
 
 ```
-S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU or GPU)
-→ S3 evidence + consensus annotation → G2 context gate → G3 annotation gate
-→ S4 DE (FindMarkers/MAST or pseudobulk) + Open Targets → G4 interpretation gate → S5 report + explorer
+ingest → QC metrics · doublets · QC rules → [QC review] → normalise · PCA · Harmony · clustering · UMAP
+→ markers + cell-type evidence → [context review] → [annotation review]
+→ differential expression + Open Targets → [interpretation review] → report + explorer
 ```
 
-## What it does
+## Install
+
+One image has everything: R 4.6 with Seurat 5 and Bioconductor, the Rust engine **scfast**,
+RAPIDS for NVIDIA GPUs, and CellTypist. There's nothing to compile, and a GPU is optional.
+
+```bash
+docker pull cellwarden/cellwarden:latest                        # workstation, cloud, macOS / Windows (Docker Desktop)
+apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest   # HPC (mirror: docker://ghcr.io/cellwarden/cellwarden:latest)
+```
+
+No install at all: [open the Colab notebook](https://colab.research.google.com/github/cellwarden/cellwarden/blob/main/examples/colab/cellwarden_quickstart.ipynb).
+
+## Run it
+
+```bash
+cellwarden doctor                                   # checks the install and your LLM key
+cellwarden run data/*.h5 -i --out results/study     # -i: a few questions first, Enter keeps the defaults
+```
+
+In a terminal you see each stage finish and a live progress bar with the time left. With `-i`,
+CellWarden can pause before differential expression and let you pick the groups from the real
+cell types. When a gate wants your decision:
+
+```bash
+cellwarden approve --run-dir results/study --stage context-review --by "Your Name"
+cellwarden resume  --run-dir results/study
+```
+
+Then open `results/study/S5/report.html`.
+
+**Step by step**, covering Docker and Apptainer commands, connecting an LLM (Claude, OpenAI,
+NVIDIA or your own server), HPC clusters and troubleshooting:
+**[docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**.
+
+## What makes it different
 
 | | |
 |---|---|
-| **Any dataset** | 10x `.h5` / mtx, `.h5ad`, loom, csv/tsv, Seurat `.rds`/`.qs2`; format auto-detected; samples merged with a gene union; human-organism check |
-| **QC by rules, advised by an agent** | Hard limits, per-sample adaptive bounds, doublets, protected populations (platelets, erythrocytes…) and review triggers from `qc_policy.yaml`. The QC agent can only tighten thresholds within the policy; every cell carries its reason codes |
-| **Rust engine** | `scfast` (Rust) does preprocessing, doublets, PCA, neighbours, SNN and Leiden in process, so no Seurat ⇄ AnnData exchange is needed and Scanpy is not used; `engine: auto|scfast|seurat`. A CUDA backend (`engine_gpu: scfast`) is built but awaits validation on the L4 |
-| **CPU ⇄ GPU** | Seurat on CPU; rapids-singlecell on an NVIDIA GPU (24 GB L4 is enough for ~1M cells) through an exchange format whose counts checksum is identical in R and Python, so results are only ever merged into the object they came from |
-| **Annotation** | Consensus of lineage signatures, CellTypist and markers against 72 human cell types with Cell Ontology IDs; the annotation agent touches only low-confidence or conflicting clusters |
-| **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
-| **DE + Open Targets** | Seurat FindMarkers (MAST by default, any FindMarkers test) or pseudobulk DESeq2 / limma-voom; comparisons on any column (condition, donor, sex, cell type, cluster); markers of each cell type when none is set, or chosen after annotation; up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
-| **Run dashboard** | `<run_dir>/dashboard.html`, rewritten after every stage: pipeline strip, timeline with gate waits, per-stage and per-gate cards with timings, memory, cells, QC counts, engine, clusters, decisions and links to the gate reports |
-| **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `cellwarden approve` for humans; full audit log and replay |
-| **Any LLM, £30 cap** | Claude Haiku 4.5 by default; OpenAI-compatible servers (vLLM, Ollama) supported; a ledger refuses any call that would cross the per-run or total budget and falls back to rules |
-| **Any HPC** | `direct`, SLURM/PBS/LSF/SGE or `split` execution; `cellwarden init-site` and `doctor`; Apptainer and Docker recipes; resource caps and `nice` for shared login nodes; checkpoints and `resume` |
+| **Guarded decisions** | QC thresholds, tissue context, cell-type labels and DE interpretations go through gates. Rules give the baseline; an agent may only change it within `qc_policy.yaml` and the gate's policy, a reviewer agent checks, and you approve when it matters. Every proposal, review and decision is a JSON file with a report. |
+| **Fast** | The Rust engine scfast does preprocessing, PCA, neighbours, Leiden and Harmony in process: Harmony on 200k cells takes 0.4 s (R harmony: 24 s). The GPU path uses RAPIDS. |
+| **Any data, any machine** | 10x h5 / mtx, h5ad, Seurat rds / qs2, loom and csv are detected automatically. Runs on a laptop, workstation, cloud VM or HPC (Slurm, PBS, LSF, SGE), with checkpoints and `resume`. |
+| **Your LLM, capped cost** | Claude, OpenAI, NVIDIA NIM or a local OpenAI-compatible server (vLLM, Ollama). A budget refuses calls beyond £5 per run / £30 in total. Agents see aggregated evidence, never the count matrix ([SECURITY.md](SECURITY.md)). |
+| **Readable results** | One self-contained report (QC, clusters, markers, annotation, DE, Open Targets drugs and diseases, gate decisions, LLM cost, software versions), an interactive UMAP explorer, and a live run dashboard. |
 
-## Quick start
+## Documentation
 
-The step-by-step version is [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
-
-**One image with everything** (R + Seurat 5, the Rust engine built for CUDA, RAPIDS, CellTypist;
-nothing to compile, GPU optional), on Docker Hub with a mirror on GitHub:
-
-```bash
-docker pull cellwarden/cellwarden:latest                                   # workstation / cloud
-apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest            # HPC (mirror: docker://ghcr.io/cellwarden/cellwarden:latest)
-```
-
-On Iridis X the image is also unpacked at `/iridisfs/ddnb/images/cellwarden_sandbox`. The
-[releases](https://github.com/cellwarden/cellwarden/releases) carry the `scfast` and
-`cellwarden` wheels for the Python side (`pip install scfast-*.whl cellwarden-*.whl`, see INSTALL.md); the R stages
-then run in the image when the site file names it (`container.image`; `cellwarden init-site` prints
-the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
-
-**Run it** on your data files directly (formats are detected; one sample per file or folder):
-
-```bash
-export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY or NVIDIA_API_KEY; omit for rules-only gates
-cellwarden run donorA.h5 donorB.rds donorC.h5ad --meta condition=control
-```
-
-Or copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
-`samples.csv` and `qc_policy.yaml`, then:
-
-```bash
-export ANTHROPIC_API_KEY=...                       # or any provider; omit for rules-only gates
-cellwarden doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
-cellwarden run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
-cellwarden status --run-dir /scratch/$USER/cellwarden/my_study     # or open <run_dir>/dashboard.html
-cellwarden approve --run-dir ... --stage context-review --by me   # when a gate stops for you
-cellwarden resume  --run-dir ...                      # continue after a gate, disconnect or kill
-```
-
-Open `S5/report.html` (one self-contained page) and `S5/explorer.html` (interactive UMAP) in the
-run directory. The full walkthrough is in [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md).
-
-## Architecture
-
-The as-built architecture, with diagrams of the stages, the CPU/GPU exchange and the gate
-protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents behind it:
-
-| Document | What it is |
+| | |
 |---|---|
-| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | **Users start here**: requirements, install, quick test, how-tos, troubleshooting, FAQ |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the pieces fit: stages, runner, exchange, gates, LLM, portability, verification |
-| [`docs/DESIGN.md`](docs/DESIGN.md) | The design spec (goals, login-node safeguards, memory plan, risks, open questions) |
-| [`docs/exchange-spec.md`](docs/exchange-spec.md) | The Seurat ⇄ AnnData contract and checksum |
-| [`docs/stages-spec.md`](docs/stages-spec.md) | S0–S2, the runner, the QC rules engine, config schema |
-| [`docs/agents-spec.md`](docs/agents-spec.md) | Gates, agents, LLM adapter and budget, S3–S5, portability |
-| [`docs/INSTALL.md`](docs/INSTALL.md) | Install and run on the Iridis X L4 node, Linux and Windows (WSL2) |
-| [`docs/scfast-integration.md`](docs/scfast-integration.md) | How the Rust engine is wired into S1/S2 and `gpu_core` |
-| [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Install, configure, run, review gates, sites and schedulers |
-| [`tests/README.md`](tests/README.md) | Fixtures, unit and integration tests, benchmarks |
-| [`bench/hpc/README.md`](bench/hpc/README.md) | Scale runs on the L4 (50k–500k): Seurat vs scfast CPU vs scfast CUDA vs rapids, with the adoption verdict |
-| [`bench/README.md`](bench/README.md) | Benchmark harness: times Seurat, Scanpy, rapids and scfast step by step and checks parity with Seurat |
-| [`docs/RUST_ENGINE.md`](docs/RUST_ENGINE.md) | `scfast`, an experimental Rust engine (PCA, kNN, SNN, Leiden) with Python and R bindings |
+| [Getting started](docs/GETTING_STARTED.md) | Requirements, install, quick test, how-tos, troubleshooting, FAQ |
+| [User guide](docs/USER_GUIDE.md) | Configuration, gates, sites and schedulers, containers |
+| [Pipeline reference](docs/PIPELINE.md) | Every stage and setting |
+| [Install details](docs/INSTALL.md) | Native installs, building the image, GPUs |
+| [Architecture](docs/ARCHITECTURE.md) | How the pieces fit together |
+| [Rust engine](docs/RUST_ENGINE.md) | scfast, with Python and R bindings |
+| [Benchmarks](bench/results/FINAL.md) | Speed and parity with Seurat |
+| [Example site: Iridis X](docs/sites/iridis.md) | Running on a Slurm cluster without internet on compute nodes |
 
-## Repository layout
+## Status and limitations
 
-```
-R/exchange/       exchange format (R)          python/cellwarden/   runner, config, qc, exchange, gpu_core,
-R/stages/         S0 S1a S2 S3 S4 S5-export                     stages/, llm/, agents/, gates/, annotation/,
-config/examples/  config, samples, qc_policy                    opentargets/, report/, site.py
-conf/sites/       iridisx, workstation, docker  tests/           R + Python unit tests, fixtures, integration, benchmark
-conf/templates/   slurm pbs lsf sge             containers/      Apptainer .def and Dockerfile
-docs/             architecture, design, specs, user guide
-```
+Version 0.3.0 is the first public release. Please [tell us how it went](https://github.com/cellwarden/cellwarden/issues/new?template=tested.yml).
+- **Human data only:** the annotation references and Open Targets are human.
+- **Image size:** the image is large (6.8 GB) because it carries R, Bioconductor and RAPIDS.
+- **Tested:** the CPU path end to end (PBMC 3k, synthetic multi-sample data); 570 Python tests,
+  1,219 R expectations, and a full pipeline test with a mock LLM.
+- **Partly tested:** the GPU path, with the scfast CUDA backend benchmarked on L4 and H100
+  ([benchmarks](bench/results/FINAL.md)).
+- **LLM agents:** they make mistakes. That is why their proposals pass policy checks and a reviewer,
+  and why the gates for context and DE interpretation stop for you by default.
 
-## Status
+## Citing and credits
 
-All seven build steps are implemented and tested offline: ≈980 R expectations, ≈300 Python
-tests, the exchange round trip, the S0–S2 CPU-vs-GPU comparison and the full S0 → S5 run with a
-mock LLM all pass (see [`tests/README.md`](tests/README.md)). There is no hosted CI; tests run
-locally or on the HPC. The Rust engine path (`engine: scfast`) passes the full S0 → S5 run. Its CUDA/cuGraph backend
-compiles and passes CPU-side tests but has never run on a GPU: the acceptance tests and scale runs
-for the L4 are in [`docs/INSTALL.md`](docs/INSTALL.md) §1b and [`bench/hpc/`](bench/hpc).
+CellWarden was started by **Mukesh Agrawal, Ahmed Dawoud and David Williams** at the
+*Reinvent the Wheel* AI hackathon (October 2026). If you use it, please cite it ([CITATION.cff](CITATION.cff));
+see [AUTHORS](AUTHORS) and [NOTICE](NOTICE).
 
-Not yet exercised outside the HPC: a real GPU, the live Claude API and the live Open Targets API
-(unreachable from the development workspace). Before the first real run on Iridis: confirm with
-the HPC team that multi-hour GPU work on the L4 login node is allowed (otherwise use
-`execution: split`), put `run_dir` on scratch, and run `cellwarden doctor`. Development benchmarks
-are limited to 2k and 5k cells (`tests/benchmark/`).
+It builds on Seurat, harmony, presto, BPCells, DESeq2, limma, MAST, scDblFinder, CellTypist,
+scanpy, RAPIDS and Open Targets. Please cite them too when you use their results.
 
-## Tutorial scripts
+Contributions are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). Licence: [Apache-2.0](LICENSE).
 
-The repository began as side-by-side **Seurat** and **Scanpy** workflows on the 10x PBMC 3k
-dataset; both apply the same QC and end with the same 9 cell types.
-
-| File | What it does |
-|---|---|
-| `seurat_pbmc3k.R` | Seurat v5: QC, normalisation, PCA, UMAP, Louvain, markers (presto), annotation, plots → `plots/` |
-| `scanpy_pbmc3k.py` | Scanpy: the same workflow with Leiden → `plots_scanpy/` |
-
-| Seurat | Scanpy |
-| --- | --- |
-| ![Seurat UMAP](plots/04_dimplot_celltypes.png) | ![Scanpy UMAP](plots_scanpy/umap_03_celltypes.png) |
-
-```bash
-Rscript seurat_pbmc3k.R      # downloads PBMC 3k on first run
-python scanpy_pbmc3k.py      # reuses the same download
-```
-
-Setup for the scripts on macOS: `brew install --cask r`, then in R
-`install.packages(c("Seurat","harmony","remotes","BiocManager","patchwork","dplyr"), type="binary")`,
-`BiocManager::install("glmGamPoi")`, `remotes::install_github("immunogenomics/presto")`; for Python
-`uv venv .venv-scanpy && source .venv-scanpy/bin/activate && uv pip install "scanpy[leiden]" harmonypy`.
-
-## License
-
-Apache License 2.0. See [`LICENSE`](LICENSE).
+The [tutorial scripts](examples/tutorials/) that the project grew from compare plain Seurat and
+Scanpy workflows on PBMC 3k.

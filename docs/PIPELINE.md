@@ -386,12 +386,12 @@ depend on it. `dashboard.html` is rewritten after every state change.
 Targets on an internet-connected node).
 
 **Containers:** with `container.image` set (in the site file), every stage runs inside the
-CellWarden image, so the host needs only Python and `cellwarden`. On Iridis X:
+CellWarden image, so the host needs only Python and `cellwarden`. On a cluster without FUSE (such as Iridis X, [docs/sites/iridis.md](sites/iridis.md)):
 
 ```bash
 module load apptainer/1.4.0
 export APPTAINER_TMPDIR=/tmp/$USER-apptainer
-apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-cellwarden/cellwarden.sif cellwarden run --config config.yaml
+apptainer exec --unsquash --nv /path/to/cellwarden.sif cellwarden run --config config.yaml
 ```
 
 ---

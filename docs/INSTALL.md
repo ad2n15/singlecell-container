@@ -113,7 +113,7 @@ APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot cellwarden.sif 
 
 Iridis has no `fusermount`, so run the image with `--unsquash` (it unpacks to `APPTAINER_TMPDIR`
 first, ~30 s, in RAM on compute nodes, so jobs need ~96 GB): `apptainer exec --unsquash --nv
-cellwarden.sif CellWarden doctor`, and put `--unsquash` in `container.options` of the site file.
+cellwarden.sif cellwarden doctor`, and put `--unsquash` in `container.options` of the site file.
 
 Better on Iridis: unpack the image once into a sandbox directory (~130k files, 12 GB) and run that,
 with no `--unsquash` and no extra memory. Unpack on the local disk and copy with `rsync -a`
@@ -121,8 +121,8 @@ with no `--unsquash` and no extra memory. Unpack on the local disk and copy with
 
 ```bash
 apptainer build --sandbox /tmp/$USER-sbx cellwarden.sif
-rsync -a /tmp/$USER-sbx/ /iridisfs/ddnb/images/cellwarden_sandbox/ && rm -rf /tmp/$USER-sbx
-apptainer exec --nv /iridisfs/ddnb/images/cellwarden_sandbox cellwarden doctor
+rsync -a /tmp/$USER-sbx/ /path/to/shared/cellwarden_sandbox/ && rm -rf /tmp/$USER-sbx
+apptainer exec --nv /path/to/shared/cellwarden_sandbox cellwarden doctor
 ```
 
 After a code change, update the sandbox in place instead of rebuilding the image (login node,
@@ -130,11 +130,11 @@ After a code change, update the sandbox in place instead of rebuilding the image
 dependency lists change:
 
 ```bash
-containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox
+containers/update_sandbox.sh /path/to/shared/cellwarden_sandbox
 ```
 
-On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into
-`/iridisfs/ddnb/images/` and set `container.image` in the site file (`conf/sites/iridisx.yaml`
+On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into a
+shared folder and set `container.image` in the site file (`conf/sites/iridisx.yaml`
 already passes `--nv`).
 
 **Configure and check:**

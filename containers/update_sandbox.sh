@@ -5,8 +5,8 @@
 # Minutes instead of the ~1 h full build; rebuild the image (cellwarden-build.def) instead when the
 # base image, the Python dependency list or system libraries change.
 #
-#   containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox             # code + Rust
-#   containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox --code-only # no Rust rebuild
+#   containers/update_sandbox.sh /path/to/cellwarden_sandbox             # code + Rust
+#   containers/update_sandbox.sh /path/to/cellwarden_sandbox --code-only # no Rust rebuild
 #
 # Make the sandbox from a built image on a local disk, then copy it with rsync -a: on GPFS
 # (Iridis /iridisfs) files created by extraction inherit an ACL without execute permission.

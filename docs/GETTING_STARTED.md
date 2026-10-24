@@ -39,7 +39,7 @@ This page covers the everyday path: install, check, run, find the results. The d
 | **Disk** | The image is 6.6 GB as a `.sif` file, or 12 GB / ~133k files unpacked as a sandbox. Each run needs a few hundred MB to a few GB, depending on the number of cells. |
 | **Memory** | PBMC 3k (2,700 cells) peaks at about 1.4 GB. Memory grows with the number of cells; for 100k+ cells start with 64 GB, and check the peak memory shown per stage. |
 | **CPU / GPU** | 8 cores is a good default. A GPU (e.g. NVIDIA L4) is optional; the CPU path is complete. |
-| **Internet** | Needed for the LLM review agents and the Open Targets evidence. Not needed for the stages in between (most of the computing). On Iridis, compute nodes have **no** internet: see [section 9](#9-big-datasets-compute-nodes-and-gpus). |
+| **Internet** | Needed for the LLM review agents and the Open Targets evidence. Not needed for the stages in between (most of the computing). On many clusters, compute nodes have **no** internet: see [section 9](#9-big-datasets-compute-nodes-and-gpus). |
 | **LLM key (optional)** | One of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `NVIDIA_API_KEY`. Without a key the gates use rules only and stop for you each time. |
 | **Data** | 10x `.h5` or `matrix.mtx` folders, `.h5ad`, Seurat `.rds` / `.qs2`, `.loom`, or csv/tsv count tables. **Human** data. Raw 10x matrices are reduced to cells automatically. |
 
@@ -119,22 +119,17 @@ To save typing, define a shell function, for example in `~/.bashrc` (use your `.
 path):
 
 ```bash
-cellwarden() { apptainer exec --cleanenv --env-file "${CELLWARDEN_ENV:-/dev/null}" -B /iridisfs,/scratch /path/to/cellwarden.sif cellwarden "$@"; }
+cellwarden() { apptainer exec --cleanenv --env-file "${CELLWARDEN_ENV:-/dev/null}" -B /path/to/data,/scratch /path/to/cellwarden.sif cellwarden "$@"; }
 ```
 
 `cellwarden run ...` then works like a local command. `CELLWARDEN_ENV=.env` passes your API keys
 (section 3). `-B` binds the filesystems your data lives on.
 
-### Option C: Iridis X, shared copy (nothing to install)
+### Option C: a shared copy on your cluster
 
-For the DDnB group the image is already unpacked at `/iridisfs/ddnb/images/cellwarden_sandbox`:
-
-```bash
-module load apptainer/1.4.0
-apptainer exec --cleanenv /iridisfs/ddnb/images/cellwarden_sandbox cellwarden doctor
-```
-
-The shell function above works with this path.
+If your group has unpacked the image into a shared folder, there is nothing to install: use
+that folder in place of `cellwarden.sif`. For example, the Iridis X setup is described in
+[docs/sites/iridis.md](sites/iridis.md).
 
 ### Option D: build from source
 
@@ -238,7 +233,7 @@ llm:
 **Cost and network:**
 - **Budget:** every call is priced and logged, with a budget of £5 per run and £30 in total
   (section 7).
-- **Internet:** the agents need it. On Iridis, run the gate steps on the login node (section 9).
+- **Internet:** the agents need it. On clusters without internet on the compute nodes, run the gate steps on the login node (section 9).
 
 ---
 
@@ -283,7 +278,7 @@ To check the image itself, run the built-in smoke test. It takes about 10 minute
 LLM and offline:
 
 ```bash
-srun --partition=amd --cpus-per-task=8 --mem=16G --time=01:00:00 apptainer exec --cleanenv /iridisfs/ddnb/images/cellwarden_sandbox bash /opt/cellwarden/containers/smoke_test.sh
+apptainer exec --cleanenv cellwarden.sif bash /opt/cellwarden/containers/smoke_test.sh        # on a cluster, inside an srun / sbatch job
 ```
 
 ---
@@ -440,7 +435,7 @@ record: associated diseases, drugs in the clinic (phase, indication, mechanism) 
 
 ## 9. Big datasets: compute nodes and GPUs
 
-On Iridis the compute nodes have no internet, but the agents and Open Targets need it. Split the
+On many clusters (Iridis X, for example: [docs/sites/iridis.md](sites/iridis.md)) the compute nodes have no internet, but the agents and Open Targets need it. Split the
 run into three steps that share the run folder; each step continues where the last one stopped:
 
 ```bash
@@ -448,6 +443,7 @@ run into three steps that share the run folder; each step continues where the la
 cellwarden run data/*.h5 -i --until qc-review --out /scratch/$USER/my_study
 
 # 2. compute node: normalisation, batch correction, clustering, UMAP, markers, CellTypist (heavy, offline)
+export CELLWARDEN_IMAGE=/path/to/cellwarden.sif CELLWARDEN_BIND=/path/to/data,/scratch   # the image or sandbox, and folders to mount
 sbatch --export=ALL,RUN=/scratch/$USER/my_study conf/jobs/slurm_compute_offline.sbatch
 
 # 3. login node, after the job: context and annotation reviews, DE + Open Targets, interpretation, report
@@ -517,7 +513,7 @@ Everything is in the run folder (`--out`):
 | `-i needs a terminal` | `-i` was used in a batch job or a pipe. Run it on the login node, then submit the heavy part (section 9). |
 | The run waits before DE (`waits for the comparisons`) | You chose "after annotation" and the run has no terminal. `cellwarden resume` in a terminal asks. |
 | A stage `FAILED` | The last 20 lines of the log are printed. The full log is `logs/<stage>.log`. Fix the cause, then `cellwarden resume`. |
-| `disk quota exceeded` (home or scratch) | On Iridis the limit is the **number of files**. Keep runs, images and caches on a project folder or `/iridisfs`, not in home. |
+| `disk quota exceeded` (home or scratch) | Many clusters limit the **number of files** as well as space. Keep runs, images and caches on a project folder, not in home. |
 | DE is slow | `dge.test: wilcox`, or `dge.max_cells_per_side: 2000` (section 8). |
 
 ---

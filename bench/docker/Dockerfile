@@ -1,6 +1,6 @@
 # One image for the whole project: build, test and benchmark scfast (CPU).
-# Build from the repository root:   docker build -f docker/Dockerfile -t scfast .
-# Use through docker/run.sh. Not yet built in CI: the first build may need small fixes.
+# Build from the repository root:   docker build -f bench/docker/Dockerfile -t scfast .
+# Use through bench/docker/run.sh. Not yet built in CI: the first build may need small fixes.
 FROM rocker/r-ver:4.4.2
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
