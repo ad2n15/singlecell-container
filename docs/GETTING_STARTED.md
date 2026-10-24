@@ -33,8 +33,8 @@ This page covers the everyday path: install, check, run, find the results. The d
 
 | | Requirement |
 |---|---|
-| **Computer** | Linux x86_64: an HPC login or compute node, a workstation, or a cloud VM. macOS / Windows only through Docker or WSL2 ([INSTALL.md](INSTALL.md)). |
-| **Container runtime** | Apptainer ≥ 1.3 (HPC) or Docker. Everything else (R 4.6, Seurat 5, Bioconductor, Python 3.12, the Rust engine, CellTypist, RAPIDS) is inside the scpipe image. |
+| **Computer** | Linux x86_64: an HPC login or compute node, a workstation, or a cloud VM. macOS / Windows through Docker Desktop (section 2C) or WSL2 ([INSTALL.md](INSTALL.md)). |
+| **Container runtime** | Apptainer ≥ 1.3 (HPC) or Docker (workstation, cloud, macOS / Windows via Docker Desktop). Everything else (R 4.6, Seurat 5, Bioconductor, Python 3.12, the Rust engine, CellTypist, RAPIDS) is inside the scpipe image. |
 | **Disk** | The image is 6.6 GB as a `.sif` file, or 12 GB / ~133k files unpacked as a sandbox. Each run needs a few hundred MB to a few GB, depending on the number of cells. |
 | **Memory** | PBMC 3k (2,700 cells) peaks at about 1.4 GB. Memory grows with the number of cells; for 100k+ cells start with 64 GB, and check the peak memory shown per stage. |
 | **CPU / GPU** | 8 cores is a good default. A GPU (e.g. NVIDIA L4) is optional; the CPU path is complete. |
@@ -90,7 +90,61 @@ APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif cont
   containers/update_sandbox.sh /path/to/scpipe_sandbox --code-only
   ```
 
-### Option C: published image (from the first release)
+### Option C: Docker (workstation, cloud VM, macOS / Windows)
+
+You need Docker. For a GPU you also need the NVIDIA Container Toolkit (Linux).
+
+> These steps follow `containers/Dockerfile`. The Docker build hasn't yet been run end to end in
+> CI; the same software is checked through the Apptainer build. Report problems, please.
+
+**Build the image** once, in about 40–60 minutes. It needs internet and about 15 GB of free disk:
+
+```bash
+git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
+docker build -t scpipe -f containers/Dockerfile .
+```
+
+After the first release you can pull it instead:
+`docker pull ghcr.io/mukeshkbj/scpipe:latest && docker tag ghcr.io/mukeshkbj/scpipe:latest scpipe`.
+
+**Make a short command.** The image starts `scpipe` in `/work`, so mount your project folder
+there:
+
+```bash
+alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" scpipe'
+mkdir -p ~/.scpipe
+scpipe-docker doctor
+```
+
+| Part | Why |
+|---|---|
+| `-it` | Keeps the terminal, for the progress display, `-i` and the DE questions. |
+| `--user` | Results belong to you, not the image's user. |
+| `~/.scpipe` mount | The LLM budget ledger and the time-left history persist between runs. |
+| `-v "$PWD:/work"` | Data paths must be inside the current folder, given as relative paths. For data elsewhere, add `-v /data:/data:ro` and use `/data/...` paths. |
+
+**Run.** From the folder that holds the data:
+
+```bash
+cd ~/scpipe-test
+scpipe-docker run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
+```
+
+Add options after `scpipe-docker` and before `run` by editing the alias, or run `docker run ...`
+in full:
+
+| Option | Add |
+|---|---|
+| API keys | `--env-file .env` |
+| GPU | `--gpus all` |
+| More cores / memory | `--cpus 16 --memory 64g` |
+| Keep running after you close the terminal | Instead of `--detach`, use `-d` in place of `-it`, then `docker logs -f <id>` |
+
+**macOS / Windows:** use Docker Desktop. The image is linux/amd64: on Apple silicon add
+`--platform linux/amd64` (emulated, so slower, and no GPU). On Windows, run the commands inside
+WSL2 ([INSTALL.md](INSTALL.md)).
+
+### Option D: published image for Apptainer (from the first release)
 
 Once a `v*` release is published:
 
@@ -98,7 +152,7 @@ Once a `v*` release is published:
 apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
 ```
 
-or `docker pull ghcr.io/mukeshkbj/scpipe:latest`. Until then, use A or B.
+Until then, use A, B or C.
 
 ### Check the install
 
@@ -106,7 +160,7 @@ or `docker pull ghcr.io/mukeshkbj/scpipe:latest`. Until then, use A or B.
 scpipe doctor
 ```
 
-It lists the Python and R packages, the GPU, the LLM provider (with a test call), the budget and
+With Docker this is `scpipe-docker doctor`. It lists the Python and R packages, the GPU, the LLM provider (with a test call), the budget and
 Open Targets. Every **required** line must say `ok`.
 
 ---
