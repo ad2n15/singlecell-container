@@ -75,7 +75,8 @@ line per stage instead. `--progress live|plain` forces either.
 5. clustering: PCs (`auto`), Leiden resolution (0.5), highly variable genes (2000);
 6. batch correction with Harmony (only with more than one sample);
 7. differential expression: FindMarkers (MAST, wilcox, LR, ...) or pseudobulk, and either the
-   markers of each cell type or two groups of any column (condition, donor, sex, cell type, ...);
+   markers of each cell type, two groups of any column (condition, donor, sex, ...), or **choose
+   after clustering and annotation** from the actual cell types and clusters (the run asks before S4);
 8. the LLM for the review agents, from the API keys that are set;
 9. the review gates: agents decide, stop at every gate, or the defaults.
 
@@ -127,6 +128,7 @@ dge:
   test: MAST                     # FindMarkers test: MAST, wilcox, wilcox_limma, LR, t, bimod, negbinom, poisson, DESeq2
   pseudobulk_method: deseq2      # method pseudobulk: deseq2 | limma_voom
   markers: auto                  # auto: with no contrasts, markers of each cell type vs the other cells; true: always too
+  interactive: false             # true: stop before S4, once the cell types are known, and ask for the comparisons
   group_by: cell_type_broad      # the groups tested separately (cell_type_fine, cluster, ...)
   contrasts:                     # each side is one or more values of any cell metadata column
     - {name: disease_vs_control, column: condition, numerator: disease, denominator: control, covariates: [batch]}
@@ -189,6 +191,17 @@ With no comparisons set, S4 finds the markers of each cell type against the othe
 single-sample study still gets DE genes and Open Targets evidence. Groups are tested in parallel
 (`resources.threads`). `test` picks another FindMarkers test (`wilcox` is much faster than MAST on
 large data).
+
+**Choosing after annotation.** Cell types and clusters only have names once clustering (S2) and
+the annotation review (G3) are done. With `dge.interactive: true`, the run stops just before S4,
+which is what `scpipe run -i` sets when you choose "after clustering and annotation" or type a
+cell-level column. It then lists the cell types, fine cell types and clusters with their cell
+counts, and the sample-sheet groups. You pick markers per cell type, two cell types or clusters
+(by number, or `rest`), or two groups of samples (within each cell type or across all cells), and
+can add more comparisons. The choice is written into the run's config and
+`config/dge_choice.yaml`, so `resume` keeps it; delete that file to be asked again. Without a
+terminal (scheduler jobs, `--detach` with nohup) the run waits before S4, and `scpipe resume` in
+a terminal asks.
 
 `method: pseudobulk` (DESeq2, or `pseudobulk_method: limma_voom`) sums counts per cell type and
 sample and compares samples instead. Its column must have one value per sample, and each side

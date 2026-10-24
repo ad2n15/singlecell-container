@@ -267,6 +267,12 @@ class PlainReporter:
     def message(self, msg: str) -> None:
         self.say(msg)
 
+    def pause(self) -> None:
+        """Before prompting in the terminal."""
+
+    def unpause(self) -> None:
+        """After prompting."""
+
     def close(self) -> None:
         pass
 
@@ -377,6 +383,14 @@ class LiveReporter(PlainReporter):
 
     def message(self, msg: str) -> None:
         self.console.print(msg, markup=False)
+
+    def pause(self) -> None:
+        self.close()
+
+    def unpause(self) -> None:
+        self.closing = False
+        if not self.live.is_started:
+            self.live.start()
 
     def close(self) -> None:
         if self.live.is_started:

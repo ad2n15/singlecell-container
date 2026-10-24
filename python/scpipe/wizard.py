@@ -156,12 +156,20 @@ def _ask_dge(q: "_Asker", say: Say, cfg: Mapping[str, Any]) -> dict[str, Any]:
         out["test"] = q.choice("FindMarkers test", FM_TESTS, str(d0.get("test", "MAST")))
     header, rows = _sample_sheet(cfg)
     sheet_cols = [c for c in header if c not in _SHEET_SKIP]
+    later = ("later", "choose after clustering and annotation, from the actual cell types and groups")
     if method == "findmarkers":
         what = q.choice("Compare", [("markers", "markers of each cell type against the other cells"),
-                                    ("groups", "two groups of cells defined by a column")], "markers")
-        if what == "markers":
-            out.update(markers=True, contrasts=[])
-            return out
+                                    ("groups", "two groups of cells defined by a column (choose now)"), later],
+                        "markers")
+    else:
+        what = q.choice("Compare", [("groups", "two groups of samples (choose now)"), later], "groups")
+    if what == "markers":
+        out.update(markers=True, contrasts=[])
+        return out
+    if what == "later":
+        say("  The run will stop before the DE step, list the cell types, clusters and sample groups, and ask.")
+        out.update(interactive=True, contrasts=[])
+        return out
     choices = sheet_cols + ([c for c in CELL_COLUMNS] if method == "findmarkers" else [])
     say("  Columns: " + ", ".join(choices) + (" (any other cell metadata column works too)" if method == "findmarkers" else ""))
     default_col = next((c for c in sheet_cols if c != "sample_id" and len({r.get(c) for r in rows}) > 1),
@@ -171,6 +179,11 @@ def _ask_dge(q: "_Asker", say: Say, cfg: Mapping[str, Any]) -> dict[str, Any]:
         if col in sheet_cols or (method == "findmarkers" and col):
             break
         say(f"  pseudobulk compares samples: choose a samples.csv column ({', '.join(sheet_cols)})")
+    if col not in sheet_cols:
+        # cell types and clusters exist only after S2/S3/G3: ask for the values then
+        say(f"  The values of {col} are known after clustering and annotation; the run will ask you before the DE step.")
+        out.update(interactive=True, contrasts=[])
+        return out
     values = sorted({r.get(col, "") for r in rows if r.get(col, "")}) if col in sheet_cols else []
     if values:
         say(f"  values of {col}: {', '.join(values)}")
@@ -312,7 +325,9 @@ def run_wizard(cfg: Mapping[str, Any], *, ask: Ask = terminal_ask, say: Say = pr
                                     f" / {res.overrides.get('n_hvg', cfg.get('n_hvg'))}"),
     ]
     dge = {**(cfg.get("dge") or {}), **(res.overrides.get("dge") or {})}
-    if dge.get("contrasts"):
+    if dge.get("interactive"):
+        cmp = "chosen after clustering and annotation"
+    elif dge.get("contrasts"):
         c = dge["contrasts"][0]
         lab = lambda v: "+".join(v) if isinstance(v, list) else str(v)
         cmp = (f"{c['column']}: {lab(c['numerator'])} vs {lab(c['denominator'])}"

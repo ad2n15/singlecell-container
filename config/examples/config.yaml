@@ -122,6 +122,7 @@ dge:
   test: MAST                     # FindMarkers test: MAST, wilcox, wilcox_limma, LR, t, bimod, negbinom, poisson, DESeq2
   pseudobulk_method: deseq2      # method pseudobulk: deseq2 | limma_voom
   markers: auto                  # auto: with no contrasts, markers of each cell type vs the other cells; true: always too
+  interactive: false             # true: stop before S4 (cell types known) and ask for the comparisons in the terminal
   group_by: cell_type_broad      # the groups tested separately (cell_type_fine, cluster, ...)
   contrasts:                     # each side is one or more values of any cell metadata column
     - {name: treated_vs_control, column: condition, numerator: treated, denominator: control, covariates: [batch]}

@@ -118,6 +118,9 @@ DEFAULTS: dict[str, Any] = {
         "test": "MAST",
         "pseudobulk_method": "deseq2",
         "markers": "auto",
+        # true: stop before S4, once the cell types are known, and ask for the comparisons
+        # (scpipe run -i, "after clustering and annotation"; scpipe/dge_choice.py)
+        "interactive": False,
         "sample_col": "sample_id",
         "condition_col": "condition",
         "group_by": "cell_type_broad",
@@ -425,6 +428,7 @@ def _check_dge(cfg: dict[str, Any], problems: list[str]) -> None:
     need(_is_num(d["logfc_threshold"]) and d["logfc_threshold"] >= 0,
          f"dge.logfc_threshold must be a number >= 0, got {d['logfc_threshold']!r}")
     need(d["markers"] in ("auto", True, False), f"dge.markers must be auto, true or false, got {d['markers']!r}")
+    need(isinstance(d["interactive"], bool), f"dge.interactive must be true or false, got {d['interactive']!r}")
     need(_is_num(d["padj"]) and 0 < d["padj"] <= 1, f"dge.padj must be a number in (0, 1], got {d['padj']!r}")
     need(_is_num(d["lfc"]) and d["lfc"] >= 0, f"dge.lfc must be a number >= 0, got {d['lfc']!r}")
     if d["contrasts"] is None:

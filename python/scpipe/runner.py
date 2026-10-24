@@ -90,6 +90,7 @@ from typing import Any, Callable, Mapping, Sequence
 import yaml
 
 from . import config as cfgmod
+from . import dge_choice
 from . import progress as progmod
 from . import site as sitemod
 from . import stage_names
@@ -525,6 +526,12 @@ def _nice_prefix(cfg: Mapping[str, Any]) -> list[str]:
     return []
 
 
+def _terminal_ask(text: str, default: str) -> str:
+    from .wizard import terminal_ask
+
+    return terminal_ask(text, default)
+
+
 _fmt_bytes = progmod.fmt_bytes
 _fmt_s = progmod.fmt_s
 
@@ -696,6 +703,7 @@ def run_pipeline(
     out=None,
     no_gates: bool = False,
     progress: str = "auto",
+    ask=None,
 ) -> int:
     """Run the stages for an already prepared run directory. Returns 0 on success, 1 on failure.
 
@@ -768,6 +776,27 @@ def run_pipeline(
                     save_state(run_dir, state)
                     rep.skip(i, st.id, "gate; --no-gates")
                     continue
+                if st.id == "S4" and dge_choice.needs_choice(cfg, run_dir):
+                    # dge.interactive: the comparisons are chosen now that the cell types are known
+                    prompt = ask or (_terminal_ask if sys.stdin.isatty() else None)
+                    if prompt is None:
+                        state["stages"][st.id] = {"status": "waiting", "lang": st.lang, "note": "waiting for the DE comparisons"}
+                        save_state(run_dir, state)
+                        rep.close()
+                        rep.message(f"scpipe: {stage_names.label(st.id)} waits for the comparisons to test (dge.interactive); "
+                                    f"run in a terminal: {resume_cmd}")
+                        return GATE_WAITING
+                    rep.pause()
+                    try:
+                        choice = dge_choice.ask_choice(cfg, run_dir, prompt, lambda m: print(m, file=out, flush=True))
+                    except (EOFError, KeyboardInterrupt):
+                        choice = None
+                    if choice is None:
+                        save_state(run_dir, state)
+                        rep.message(f"\nscpipe: no comparison chosen; {resume_cmd} asks again")
+                        return 130
+                    dge_choice.apply_choice(run_dir, cfg, choice)
+                    rep.unpause()
                 reason = reasons.get(st.id) or f"upstream {stages[start].id} was rerun"
                 fp, parts = _fingerprint(stages, i, ctx, state)
                 missing_in = [s for s in st.inputs if _existing(run_dir, s) is None]
@@ -877,6 +906,9 @@ def status_text(run_dir: str | Path, stages: Sequence[Stage] | None = None) -> s
         if r.get("status") in ("failed", "running"):
             lines.append(f"\nlast lines of logs/{sid}.log, {stage_names.label(sid)} ({r['status']}):")
             lines += [f"  | {x}" for x in tail(run_dir / "logs" / f"{sid}.log", 10)]
+        elif r.get("status") == "waiting" and not sid.startswith("G"):
+            lines.append(f"\n{stage_names.label(sid)} waits for the comparisons to test; in a terminal run\n"
+                         f"  scpipe resume --run-dir {run_dir}")
         elif r.get("status") == "waiting":
             lines.append(f"\n{stage_names.label(sid)} is waiting for a human decision: see "
                          f"{run_dir / 'gates' / sid / 'report.html'}, then\n"
@@ -1366,7 +1398,7 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                     args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
             return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates,
-                                progress=a.progress)
+                                progress=a.progress, ask=ask)
         if a.cmd == "resume":
             rd = Path(a.run_dir).expanduser().resolve()
             resolved = cfgmod.load_resolved(rd)
@@ -1380,7 +1412,7 @@ def main(argv: list[str] | None = None, *, stages: Sequence[Stage] | None = None
                     args += ["--no-gates"]
                 return _launch_detached(args, rd, resolved["run_id"], out)
             return run_pipeline(rd, resolved, until=a.until, stages=stages, out=out, no_gates=a.no_gates,
-                                progress=a.progress)
+                                progress=a.progress, ask=ask)
         if a.cmd == "init-site":
             from . import site as sitemod
 
