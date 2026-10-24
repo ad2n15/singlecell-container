@@ -87,7 +87,32 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # the Docker Hub user may be a repository variable (not secret); the token must be a secret
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}
     steps:
+      - name: Check the Docker Hub credentials (before the 45-minute build)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          TOKEN_IS_VARIABLE: ${{ vars.DOCKERHUB_TOKEN != '' }}
+        run: |
+          where="Settings > Secrets and variables > Actions > Repository secrets"
+          ok=1
+          [ -n "$DOCKERHUB_USERNAME" ] || { echo "::error::DOCKERHUB_USERNAME is not visible to this run: add it under $where"; ok=0; }
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            if [ "$TOKEN_IS_VARIABLE" = "true" ]; then
+              echo "::error::DOCKERHUB_TOKEN is a Variable, not a Secret: delete the variable and add it under $where"
+            else
+              echo "::error::DOCKERHUB_TOKEN is not visible to this run: add it under $where"
+            fi
+            ok=0
+          fi
+          [ "$ok" = 1 ] || exit 1
+          echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin \
+            || { echo "::error::Docker Hub refused ${DOCKERHUB_USERNAME} with this token: it needs Read & Write access"; exit 1; }
+          docker logout
+          echo "Docker Hub credentials work for ${DOCKERHUB_USERNAME}"
       - name: Free disk (the RAPIDS base image plus R is ~10 GB unpacked, built twice by buildx + load)
         run: |
           df -h /
@@ -101,7 +126,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ secrets.DOCKERHUB_USERNAME && format('docker.io/{0}/scpipe', secrets.DOCKERHUB_USERNAME) || '' }}
+            ${{ env.DOCKERHUB_USERNAME && format('docker.io/{0}/scpipe', env.DOCKERHUB_USERNAME) || '' }}
             ghcr.io/${{ github.repository_owner }}/scpipe
           tags: |
             type=semver,pattern={{version}}
@@ -128,7 +153,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Log in to GHCR
         if: startsWith(github.ref, 'refs/tags/v')
@@ -158,7 +183,7 @@ jobs:
       - name: Create the release and attach the wheels
         env:
           GH_TOKEN: "${{ github.token }}"
-          DOCKERHUB_USERNAME: "${{ secrets.DOCKERHUB_USERNAME }}"
+          DOCKERHUB_USERNAME: "${{ secrets.DOCKERHUB_USERNAME || vars.DOCKERHUB_USERNAME }}"
         run: |
           v="${GITHUB_REF_NAME#v}"
           hub="${DOCKERHUB_USERNAME:-${GITHUB_REPOSITORY_OWNER}}"
