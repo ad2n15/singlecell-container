@@ -10,7 +10,7 @@ resources:
 scratch: /scratch
 container:
   runtime: docker
-  image: ghcr.io/mukeshkbj/scpipe:latest
+  image: docker.io/ad2n15/scpipe:latest
   options: ["--gpus", "all"]
 scheduler:
   partition: null

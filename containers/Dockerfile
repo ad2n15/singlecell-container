@@ -8,7 +8,8 @@
 #
 #   docker build -t scpipe -f containers/Dockerfile .
 #   docker run --rm --gpus all -v $PWD:/work scpipe doctor
-#   apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest     # published by .github/workflows/release.yml
+#   docker pull ad2n15/scpipe:latest                                    # published by .github/workflows/release.yml
+#   apptainer pull scpipe.sif docker://ad2n15/scpipe:latest             # mirror: docker://ghcr.io/ad2n15/scpipe:latest
 #   apptainer exec --nv scpipe.sif scpipe run --config config.yaml
 #
 # The image also runs on machines without a GPU: every GPU step falls back to the CPU.
@@ -91,6 +92,11 @@ RUN python -m scpipe.stages.s3_celltypist --models-dir "$SCPIPE_CELLTYPIST_MODEL
 ENV SCPIPE_REPO_ROOT=/opt/scpipe SCPIPE_IN_CONTAINER=1 \
     OMP_NUM_THREADS=8 \
     MPLCONFIGDIR=/tmp/mpl NUMBA_CACHE_DIR=/tmp/numba CUPY_CACHE_DIR=/tmp/cupy
+# org.opencontainers.image.source links the GHCR package to the (public) repository
+LABEL org.opencontainers.image.title="scpipe" \
+      org.opencontainers.image.description="Agentic single-cell RNA-seq pipeline: Seurat 5, Rust engine (scfast), RAPIDS, CellTypist, LLM review gates" \
+      org.opencontainers.image.source="https://github.com/ad2n15/singlecell-container" \
+      org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /work
 USER rapids
 ENTRYPOINT ["scpipe"]

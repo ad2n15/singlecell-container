@@ -1,11 +1,12 @@
 name: release
 
-# Prebuilt artifacts for the one-line installs (docs/INSTALL.md):
-#   pip install "scpipe[gpu]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple
-#   apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
-# A tag v* builds the scfast wheels, the scpipe wheel and the container, attaches the wheels to
-# the GitHub Release, regenerates the pip index on GitHub Pages and pushes the image to GHCR.
-# workflow_dispatch builds and tests everything without publishing.
+# Prebuilt artifacts for the one-line installs (docs/GETTING_STARTED.md):
+#   docker pull ad2n15/scpipe:latest
+#   apptainer pull scpipe.sif docker://ad2n15/scpipe:latest       # or docker://ghcr.io/ad2n15/scpipe:latest
+# A tag v* builds the scfast wheels, the scpipe wheel and the container, smoke-tests them, pushes
+# the image to Docker Hub (secrets DOCKERHUB_USERNAME, DOCKERHUB_TOKEN) and GHCR, and creates the
+# GitHub Release with the wheels attached. workflow_dispatch builds and tests everything without
+# publishing.
 
 on:
   push:
@@ -87,16 +88,21 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Free disk (the RAPIDS base image is large)
+      - name: Free disk (the RAPIDS base image plus R is ~10 GB unpacked, built twice by buildx + load)
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+            /usr/local/share/boost /usr/local/lib/node_modules /usr/share/swift /usr/local/.ghcup
+          sudo swapoff -a && sudo rm -f /mnt/swapfile /swapfile || true
           docker system prune -af
           df -h /
       - uses: actions/checkout@v4
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/scpipe
+          images: |
+            ${{ secrets.DOCKERHUB_USERNAME && format('docker.io/{0}/scpipe', secrets.DOCKERHUB_USERNAME) || '' }}
+            ghcr.io/${{ github.repository_owner }}/scpipe
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -111,16 +117,29 @@ jobs:
           load: true
           tags: scpipe:test
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # mode=min: the layers of a ~10 GB image do not fit the 10 GB Actions cache
+          cache-to: type=gha,mode=min
       - name: Smoke test (CPU runner)
         run: |
           docker run --rm scpipe:test doctor
           docker run --rm --entrypoint python scpipe:test -c "import scfast; i = scfast.device_info(); assert i['cuda_built'], i"
           docker run --rm --entrypoint bash scpipe:test /opt/scpipe/containers/smoke_test.sh
+      - name: Log in to Docker Hub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Push
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           for t in $(echo "${{ steps.meta.outputs.tags }}"); do
             docker tag scpipe:test "$t" && docker push "$t"
           done
@@ -132,25 +151,30 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.pages.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: { pattern: wheel-*, merge-multiple: true, path: wheels }
-      - name: Attach wheels to the release
-        env: { GH_TOKEN: "${{ github.token }}" }
+      - name: Create the release and attach the wheels
+        env:
+          GH_TOKEN: "${{ github.token }}"
+          DOCKERHUB_USERNAME: "${{ secrets.DOCKERHUB_USERNAME }}"
         run: |
+          v="${GITHUB_REF_NAME#v}"
+          hub="${DOCKERHUB_USERNAME:-${GITHUB_REPOSITORY_OWNER}}"
+          cat > notes.md <<EOF
+          ## Install
+
+          \`\`\`bash
+          docker pull ${hub}/scpipe:${v}
+          apptainer pull scpipe.sif docker://${hub}/scpipe:${v}
+          \`\`\`
+
+          Mirror (for sites that hit Docker Hub's pull limit): \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/scpipe:${v}\`.
+          Then: \`docker run --rm ${hub}/scpipe:${v} doctor\` or \`apptainer exec scpipe.sif scpipe doctor\`.
+          Getting started: docs/GETTING_STARTED.md. The wheels below are \`scfast\` (Linux x86_64 with
+          CUDA/cuGraph loaded at run time, Linux and macOS arm64) and \`scpipe\`; the R stages need the image.
+          EOF
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
-            || gh release create "${GITHUB_REF_NAME}" --generate-notes
+            || gh release create "${GITHUB_REF_NAME}" --title "scpipe ${v}" --notes-file notes.md --generate-notes
           gh release upload "${GITHUB_REF_NAME}" wheels/*.whl --clobber
-      - name: Build the pip index
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: python3 .github/scripts/make_simple_index.py "${GITHUB_REPOSITORY}" site
-      - uses: actions/upload-pages-artifact@v3
-        with: { path: site }
-      - id: pages
-        uses: actions/deploy-pages@v4

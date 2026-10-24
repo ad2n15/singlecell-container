@@ -31,12 +31,12 @@ compile; it runs on a GPU or, slower, without one.
 
 ```bash
 # HPC (Apptainer / Singularity): pull once, then point the site file at the .sif
-apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
+apptainer pull scpipe.sif docker://ad2n15/scpipe:latest      # mirror: docker://ghcr.io/ad2n15/scpipe:latest
 apptainer exec --nv scpipe.sif scpipe doctor
 apptainer exec --nv scpipe.sif scpipe run --config config.yaml --detach
 
 # Workstation or cloud VM (Docker with the NVIDIA container toolkit)
-docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" ghcr.io/mukeshkbj/scpipe:latest run --config config.yaml
+docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" ad2n15/scpipe:latest run --config config.yaml
 ```
 
 To keep `scpipe` on the host and run only the stages in the image, set in the site file
@@ -45,7 +45,7 @@ To keep `scpipe` on the host and run only the stages in the image, set in the si
 ```yaml
 container:
   runtime: apptainer
-  image: /path/to/scpipe.sif          # or docker://ghcr.io/mukeshkbj/scpipe:<version>
+  image: /path/to/scpipe.sif          # or docker://ad2n15/scpipe:<version>
   options: ["--nv"]
 ```
 
@@ -59,8 +59,8 @@ the test fixture, about 10 minutes on a CPU).
 cuGraph loaded at run time; Linux and macOS ARM for the CPU) and `scpipe`:
 
 ```bash
-pip install "scpipe[all]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple \
-    --extra-index-url https://pypi.nvidia.com
+# the wheels are attached to each release: https://github.com/ad2n15/singlecell-container/releases
+pip install scfast-*.whl "$(ls scpipe-*.whl)[all]" --extra-index-url https://pypi.nvidia.com
 ```
 
 `[all]` adds Harmony, the report, the LLM clients and the CUDA 12 GPU stack; use plain `scpipe` on
@@ -69,7 +69,7 @@ through `container:` as above, or install R by hand (sections 1 and 2;
 `Rscript containers/install_r_packages.R` installs every package the stages use).
 
 The wheels and the image are built and published by `.github/workflows/release.yml` on every
-`v*` tag. The sections below build everything from source.
+`v*` tag (Docker Hub `ad2n15/scpipe`, GHCR `ghcr.io/ad2n15/scpipe`, wheels on the GitHub Release). The sections below build everything from source.
 
 ## 1. Iridis X, L4 login node
 
@@ -86,7 +86,7 @@ module avail 2>&1 | grep -i -E "^R/|python|apptainer|rust|cuda"   # confirm modu
 **One-time setup** (put everything on scratch, not home):
 
 ```bash
-cd /scratch/$USER && git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
+cd /scratch/$USER && git clone https://github.com/ad2n15/singlecell-container.git singlecell && cd singlecell
 module load R python                      # confirm names/versions: R >= 4.3, Python >= 3.12
 python3 -m venv /scratch/$USER/venv-scpipe && source /scratch/$USER/venv-scpipe/bin/activate
 
@@ -199,7 +199,7 @@ Same as above without the `module` lines. On Ubuntu 22.04/24.04:
 sudo apt-get install -y build-essential gfortran git tmux cmake pkg-config \
   libhdf5-dev libcurl4-openssl-dev libssl-dev libxml2-dev libglpk-dev libgsl-dev \
   python3-venv python3-dev r-base r-base-dev
-git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
+git clone https://github.com/ad2n15/singlecell-container.git singlecell && cd singlecell
 python3 -m venv .venv && source .venv/bin/activate
 # Rust, scfast, the Python package, R packages and scfastR: as in section 1
 # (or skip all of it and use the image, section 0)

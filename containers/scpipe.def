@@ -1,7 +1,7 @@
 # scpipe for Apptainer/Singularity: the published Docker image (containers/Dockerfile),
 # so both runtimes get exactly the same software. Usually you only need
 #
-#   apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
+#   apptainer pull scpipe.sif docker://ad2n15/scpipe:latest       # or docker://ghcr.io/ad2n15/scpipe:latest
 #
 # This file is for sites that build images from a definition file:
 #
@@ -11,7 +11,7 @@
 # Run with --nv so the host GPU driver is used; point the site file at the image
 # (container.runtime: apptainer, container.image: /path/to/scpipe.sif).
 Bootstrap: docker
-From: ghcr.io/mukeshkbj/scpipe:latest
+From: docker.io/ad2n15/scpipe:latest
 
 %runscript
     exec scpipe "$@"

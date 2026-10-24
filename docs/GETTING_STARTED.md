@@ -33,7 +33,7 @@ This page covers the everyday path: install, check, run, find the results. The d
 
 | | Requirement |
 |---|---|
-| **Computer** | Linux x86_64: an HPC login or compute node, a workstation, or a cloud VM. macOS / Windows through Docker Desktop (section 2C) or WSL2 ([INSTALL.md](INSTALL.md)). |
+| **Computer** | Linux x86_64: an HPC login or compute node, a workstation, or a cloud VM. macOS / Windows through Docker Desktop (section 2A) or WSL2 ([INSTALL.md](INSTALL.md)). |
 | **Container runtime** | Apptainer ≥ 1.3 (HPC) or Docker (workstation, cloud, macOS / Windows via Docker Desktop). Everything else (R 4.6, Seurat 5, Bioconductor, Python 3.12, the Rust engine, CellTypist, RAPIDS) is inside the scpipe image. |
 | **Disk** | The image is 6.6 GB as a `.sif` file, or 12 GB / ~133k files unpacked as a sandbox. Each run needs a few hundred MB to a few GB, depending on the number of cells. |
 | **Memory** | PBMC 3k (2,700 cells) peaks at about 1.4 GB. Memory grows with the number of cells; for 100k+ cells start with 64 GB, and check the peak memory shown per stage. |
@@ -46,72 +46,23 @@ This page covers the everyday path: install, check, run, find the results. The d
 
 ## 2. Install
 
-Pick one option.
+The image is published on Docker Hub as **`ad2n15/scpipe`**, with a mirror on GitHub as
+`ghcr.io/ad2n15/scpipe`. Use a version tag (`0.1.0`) for reproducible work, or `latest`.
+[Releases](https://github.com/ad2n15/singlecell-container/releases) lists the versions.
 
-### Option A: Iridis X, shared copy (ready now)
-
-The image is already unpacked for the DDnB group at `/iridisfs/ddnb/images/scpipe_sandbox`.
-There is nothing to install:
-
-```bash
-module load apptainer/1.4.0
-apptainer exec --cleanenv /iridisfs/ddnb/images/scpipe_sandbox scpipe doctor
-```
-
-To save typing, define a shell function, for example in `~/.bashrc`:
-
-```bash
-scpipe() { apptainer exec --cleanenv --env-file "${SCPIPE_ENV:-/dev/null}" -B /iridisfs,/scratch /iridisfs/ddnb/images/scpipe_sandbox scpipe "$@"; }
-```
-
-After `module load apptainer/1.4.0`, `scpipe run ...` then works like a local command.
-`SCPIPE_ENV=.env` passes your API keys (section 6).
-
-### Option B: build the image yourself (any site with Apptainer)
-
-This takes about 40–60 minutes and needs internet, so on an HPC run it on the login node.
-Keep Apptainer's temporary folder on a local disk:
-
-```bash
-git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
-APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif containers/scpipe-build.def
-```
-
-- **Sites without `fusermount` (Iridis):** a `.sif` only runs with `--unsquash`, which unpacks it
-  into RAM on every start. Unpack it once into a sandbox folder instead:
-  ```bash
-  apptainer build --sandbox /tmp/$USER-sbx scpipe.sif
-  rsync -a /tmp/$USER-sbx/ /path/to/shared/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
-  ```
-  The `rsync -a` step matters on GPFS: unpacking straight onto it loses the execute permissions.
-- **After a code change:** update the sandbox in place in about 20 s, instead of rebuilding.
-  Without `--code-only` it also rebuilds the Rust engine, in about 5 minutes:
-  ```bash
-  containers/update_sandbox.sh /path/to/scpipe_sandbox --code-only
-  ```
-
-### Option C: Docker (workstation, cloud VM, macOS / Windows)
+### Option A: Docker (workstation, cloud VM, macOS / Windows)
 
 You need Docker. For a GPU you also need the NVIDIA Container Toolkit (Linux).
 
-> These steps follow `containers/Dockerfile`. The Docker build hasn't yet been run end to end in
-> CI; the same software is checked through the Apptainer build. Report problems, please.
-
-**Build the image** once, in about 40–60 minutes. It needs internet and about 15 GB of free disk:
-
 ```bash
-git clone https://github.com/mukeshkbj/singlecell.git && cd singlecell
-docker build -t scpipe -f containers/Dockerfile .
+docker pull ad2n15/scpipe:0.1.0
 ```
-
-After the first release you can pull it instead:
-`docker pull ghcr.io/mukeshkbj/scpipe:latest && docker tag ghcr.io/mukeshkbj/scpipe:latest scpipe`.
 
 **Make a short command.** The image starts `scpipe` in `/work`, so mount your project folder
 there:
 
 ```bash
-alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" scpipe'
+alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" ad2n15/scpipe:0.1.0'
 mkdir -p ~/.scpipe
 scpipe-docker doctor
 ```
@@ -130,8 +81,7 @@ cd ~/scpipe-test
 scpipe-docker run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
 ```
 
-Add options after `scpipe-docker` and before `run` by editing the alias, or run `docker run ...`
-in full:
+Add these options to the alias, before the image name:
 
 | Option | Add |
 |---|---|
@@ -144,15 +94,64 @@ in full:
 `--platform linux/amd64` (emulated, so slower, and no GPU). On Windows, run the commands inside
 WSL2 ([INSTALL.md](INSTALL.md)).
 
-### Option D: published image for Apptainer (from the first release)
-
-Once a `v*` release is published:
+### Option B: Apptainer / Singularity (HPC)
 
 ```bash
-apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest
+apptainer pull scpipe.sif docker://ad2n15/scpipe:0.1.0      # or docker://ghcr.io/ad2n15/scpipe:0.1.0
+apptainer exec --cleanenv scpipe.sif scpipe doctor
 ```
 
-Until then, use A, B or C.
+- **Shared clusters:** Docker Hub limits anonymous pulls per IP address, and a cluster's users
+  share one. If the pull says `toomanyrequests`, use the `ghcr.io` mirror.
+- **Building the image:** this takes a few minutes and lots of small files. Set
+  `APPTAINER_TMPDIR` and `APPTAINER_CACHEDIR` to a disk with space, not home.
+- **Sites without `fusermount` (Iridis):** a `.sif` only runs with `--unsquash`, which unpacks it
+  into RAM on every start. Unpack it once into a sandbox folder, then use that folder in place of
+  `scpipe.sif`:
+  ```bash
+  apptainer build --sandbox /tmp/$USER-sbx docker://ad2n15/scpipe:0.1.0
+  rsync -a /tmp/$USER-sbx/ /path/to/shared/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
+  ```
+  The `rsync -a` step matters on GPFS: unpacking straight onto it loses the execute permissions.
+
+To save typing, define a shell function, for example in `~/.bashrc` (use your `.sif` or sandbox
+path):
+
+```bash
+scpipe() { apptainer exec --cleanenv --env-file "${SCPIPE_ENV:-/dev/null}" -B /iridisfs,/scratch /path/to/scpipe.sif scpipe "$@"; }
+```
+
+`scpipe run ...` then works like a local command. `SCPIPE_ENV=.env` passes your API keys
+(section 6). `-B` binds the filesystems your data lives on.
+
+### Option C: Iridis X, shared copy (nothing to install)
+
+For the DDnB group the image is already unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`:
+
+```bash
+module load apptainer/1.4.0
+apptainer exec --cleanenv /iridisfs/ddnb/images/scpipe_sandbox scpipe doctor
+```
+
+The shell function above works with this path.
+
+### Option D: build from source
+
+This is for development, or for sites that build every image themselves. It takes about 40–60
+minutes, needs internet, and about 15 GB of disk:
+
+```bash
+git clone https://github.com/ad2n15/singlecell-container.git && cd singlecell-container
+docker build -t scpipe -f containers/Dockerfile .                                            # Docker
+APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif containers/scpipe-build.def   # Apptainer
+```
+
+After a code change, update a sandbox in place in about 20 s, instead of rebuilding. Without
+`--code-only` it also rebuilds the Rust engine, in about 5 minutes:
+
+```bash
+containers/update_sandbox.sh /path/to/scpipe_sandbox --code-only
+```
 
 ### Check the install
 
@@ -160,8 +159,8 @@ Until then, use A, B or C.
 scpipe doctor
 ```
 
-With Docker this is `scpipe-docker doctor`. It lists the Python and R packages, the GPU, the LLM provider (with a test call), the budget and
-Open Targets. Every **required** line must say `ok`.
+With Docker this is `scpipe-docker doctor`. It lists the Python and R packages, the GPU, the LLM
+provider (with a test call), the budget and Open Targets. Every **required** line must say `ok`.
 
 ---
 

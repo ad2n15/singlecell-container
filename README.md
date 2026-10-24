@@ -36,26 +36,21 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 
 ## Quick start
 
-The step-by-step version is [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). On Iridis X the image is
-already unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`; elsewhere build it with
-`containers/scpipe-build.def` until the first release publishes the image and the wheels below.
+The step-by-step version is [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 
 **One image with everything** (R + Seurat 5, the Rust engine built for CUDA, RAPIDS, CellTypist;
-nothing to compile, GPU optional; from the first `v*` release):
+nothing to compile, GPU optional), on Docker Hub with a mirror on GitHub:
 
 ```bash
-apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest      # HPC
-docker pull ghcr.io/mukeshkbj/scpipe:latest                             # workstation / cloud
+docker pull ad2n15/scpipe:latest                                   # workstation / cloud
+apptainer pull scpipe.sif docker://ad2n15/scpipe:latest            # HPC (mirror: docker://ghcr.io/ad2n15/scpipe:latest)
 ```
 
-**Python side only** (prebuilt wheels, no Rust or R needed for the Python steps):
-
-```bash
-pip install "scpipe[all]" --extra-index-url https://mukeshkbj.github.io/singlecell/simple --extra-index-url https://pypi.nvidia.com
-```
-
-The R stages then run in the image when the site file names it (`container.image`; `scpipe init-site`
-prints the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
+On Iridis X the image is also unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`. The
+[releases](https://github.com/ad2n15/singlecell-container/releases) carry the `scfast` and
+`scpipe` wheels for the Python side (`pip install scfast-*.whl scpipe-*.whl`, see INSTALL.md); the R stages
+then run in the image when the site file names it (`container.image`; `scpipe init-site` prints
+the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 **Run it** on your data files directly (formats are detected; one sample per file or folder):
 
