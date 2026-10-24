@@ -8,10 +8,14 @@ and moves to any HPC, workstation or cloud VM with one site file.
 
 > Rules decide, agents advise, reviewers check, humans approve, everything is logged.
 
+**New here? Start with [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**: requirements,
+install, a 5-minute test, running your own data, review gates, differential expression, compute
+nodes and troubleshooting.
+
 ```
 S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU or GPU)
 → S3 evidence + consensus annotation → G2 context gate → G3 annotation gate
-→ S4 pseudobulk DGE + Open Targets → G4 interpretation gate → S5 report + explorer
+→ S4 DE (FindMarkers/MAST or pseudobulk) + Open Targets → G4 interpretation gate → S5 report + explorer
 ```
 
 ## What it does
@@ -24,7 +28,7 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 | **CPU ⇄ GPU** | Seurat on CPU; rapids-singlecell on an NVIDIA GPU (24 GB L4 is enough for ~1M cells) through an exchange format whose counts checksum is identical in R and Python, so results are only ever merged into the object they came from |
 | **Annotation** | Consensus of lineage signatures, CellTypist and markers against 72 human cell types with Cell Ontology IDs; the annotation agent touches only low-confidence or conflicting clusters |
 | **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
-| **Pseudobulk DGE + Open Targets** | Conditions, replicates and contrasts from config; DESeq2 (limma-voom fallback); up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
+| **DE + Open Targets** | Seurat FindMarkers (MAST by default, any FindMarkers test) or pseudobulk DESeq2 / limma-voom; comparisons on any column (condition, donor, sex, cell type, cluster); markers of each cell type when none is set, or chosen after annotation; up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
 | **Run dashboard** | `<run_dir>/dashboard.html`, rewritten after every stage: pipeline strip, timeline with gate waits, per-stage and per-gate cards with timings, memory, cells, QC counts, engine, clusters, decisions and links to the gate reports |
 | **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `scpipe approve` for humans; full audit log and replay |
 | **Any LLM, £30 cap** | Claude Haiku 4.5 by default; OpenAI-compatible servers (vLLM, Ollama) supported; a ledger refuses any call that would cross the per-run or total budget and falls back to rules |
@@ -32,8 +36,12 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 
 ## Quick start
 
+The step-by-step version is [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md). On Iridis X the image is
+already unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`; elsewhere build it with
+`containers/scpipe-build.def` until the first release publishes the image and the wheels below.
+
 **One image with everything** (R + Seurat 5, the Rust engine built for CUDA, RAPIDS, CellTypist;
-nothing to compile, GPU optional):
+nothing to compile, GPU optional; from the first `v*` release):
 
 ```bash
 apptainer pull scpipe.sif docker://ghcr.io/mukeshkbj/scpipe:latest      # HPC
@@ -78,6 +86,7 @@ protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents be
 
 | Document | What it is |
 |---|---|
+| [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) | **Users start here**: requirements, install, quick test, how-tos, troubleshooting, FAQ |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the pieces fit: stages, runner, exchange, gates, LLM, portability, verification |
 | [`docs/DESIGN.md`](docs/DESIGN.md) | The design spec (goals, login-node safeguards, memory plan, risks, open questions) |
 | [`docs/exchange-spec.md`](docs/exchange-spec.md) | The Seurat ⇄ AnnData contract and checksum |

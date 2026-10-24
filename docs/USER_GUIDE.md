@@ -1,5 +1,7 @@
 # scpipe user guide
 
+For a shorter, task-oriented introduction see [GETTING_STARTED.md](GETTING_STARTED.md).
+
 How to run the pipeline on your own machine or on an HPC, read its report, and move it to a
 new site. The design is in [`DESIGN.md`](DESIGN.md); the stage-by-stage contracts are in
 [`stages-spec.md`](stages-spec.md) (S0–S2) and [`agents-spec.md`](agents-spec.md) (gates,
