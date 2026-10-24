@@ -1,4 +1,4 @@
-"""Tests for the S5 report and explorer (docs/agents-spec.md section 7): scpipe.report.*
+"""Tests for the S5 report and explorer (docs/agents-spec.md section 7): cellwarden.report.*
 and the S5 stage entry point, on a synthetic run directory (no R needed)."""
 
 import gzip
@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe.report import build, plots
+from cellwarden.report import build, plots
 
 REPO = Path(__file__).resolve().parents[2]
 SECTIONS = ("summary", "resources", "qc", "clusters", "markers", "dge", "opentargets", "gates", "llm", "software")
@@ -283,7 +283,7 @@ def test_render_gate_report(run_dir):
     assert "Gate G1" in html and "QC review" in html
     assert "max_mito_pct" in html                        # decision JSON shown in full
     assert "Mito tail looks fine." in html and "Within policy." in html
-    assert "scpipe approve --run-dir" in html and "--stage qc-review" in html
+    assert "cellwarden approve --run-dir" in html and "--stage qc-review" in html
     assert "GBP 0.0123" in html                          # LLM cost so far
     assert not p.external
     # a gate waiting for a human
@@ -392,15 +392,15 @@ def test_plots_are_inline_and_tolerant():
 
 
 # --------------------------------------------------------------------------
-# The S5 stage entry point (python -m scpipe.stages.s5_report)
+# The S5 stage entry point (python -m cellwarden.stages.s5_report)
 # --------------------------------------------------------------------------
 
 
 def test_s5_stage_with_existing_export(run_dir):
     (run_dir / "S2").mkdir(exist_ok=True)
     (run_dir / "S2" / "object.rds").write_bytes(b"not a real object")
-    env = dict(os.environ, PYTHONPATH=str(REPO / "python"), SCPIPE_RSCRIPT="/nonexistent/Rscript")
-    r = subprocess.run([sys.executable, "-m", "scpipe.stages.s5_report", "--run-dir", str(run_dir), "--skip-export"],
+    env = dict(os.environ, PYTHONPATH=str(REPO / "python"), CELLWARDEN_RSCRIPT="/nonexistent/Rscript")
+    r = subprocess.run([sys.executable, "-m", "cellwarden.stages.s5_report", "--run-dir", str(run_dir), "--skip-export"],
                        capture_output=True, text=True, env=env, timeout=300)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (run_dir / "S5" / "report.html").exists() and (run_dir / "S5" / "explorer.html").exists()
@@ -412,13 +412,13 @@ def test_s5_stage_needs_the_s2_object(tmp_path):
     rd = tmp_path / "r"
     (rd / "config").mkdir(parents=True)
     env = dict(os.environ, PYTHONPATH=str(REPO / "python"))
-    r = subprocess.run([sys.executable, "-m", "scpipe.stages.s5_report", "--run-dir", str(rd)],
+    r = subprocess.run([sys.executable, "-m", "cellwarden.stages.s5_report", "--run-dir", str(rd)],
                        capture_output=True, text=True, env=env, timeout=120)
     assert r.returncode != 0 and "S2/object.rds" in (r.stdout + r.stderr)
 
 
 def test_s5_is_registered_last_in_the_runner():
-    from scpipe import runner
+    from cellwarden import runner
 
     ids = [s.id for s in runner.STAGES]
     assert ids[-1] == "S5"

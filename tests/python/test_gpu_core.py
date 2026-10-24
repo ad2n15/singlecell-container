@@ -12,8 +12,8 @@ import pytest
 import scanpy as sc
 import scipy.sparse as sp
 
-from scpipe import gpu_core
-from scpipe.exchange import counts_checksum, read_exchange, validate_exchange, write_exchange
+from cellwarden import gpu_core
+from cellwarden.exchange import counts_checksum, read_exchange, validate_exchange, write_exchange
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -155,7 +155,7 @@ def test_cli(slim, tmp_path):
     out = tmp_path / "cli.h5ad"
     env_path = str(REPO / "python")
     proc = subprocess.run(
-        [sys.executable, "-m", "scpipe.gpu_core", "--in", str(slim[0]), "--out", str(out),
+        [sys.executable, "-m", "cellwarden.gpu_core", "--in", str(slim[0]), "--out", str(out),
          "--n-pcs", "20", "--resolution", "0.3", "--device", "cpu", "--seed", "0"],
         capture_output=True, text=True, env={"PYTHONPATH": env_path, "PATH": "/usr/bin:/bin"},
     )
@@ -165,7 +165,7 @@ def test_cli(slim, tmp_path):
     assert validate_exchange(out) == []
     if not gpu_core.gpu_available()[0]:
         proc = subprocess.run(
-            [sys.executable, "-m", "scpipe.gpu_core", "--in", str(slim[0]), "--out", str(out), "--device", "gpu"],
+            [sys.executable, "-m", "cellwarden.gpu_core", "--in", str(slim[0]), "--out", str(out), "--device", "gpu"],
             capture_output=True, text=True, env={"PYTHONPATH": env_path, "PATH": "/usr/bin:/bin"},
         )
         assert proc.returncode == 2

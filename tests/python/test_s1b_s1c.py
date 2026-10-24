@@ -22,11 +22,11 @@ import pytest
 import scipy.sparse as sp
 import yaml
 
-from scpipe import config as C
-from scpipe import qc
-from scpipe import runner as R
-from scpipe.exchange import read_exchange, write_exchange
-from scpipe.stages import read_tsv_str, s1b_doublets, s1c_qc
+from cellwarden import config as C
+from cellwarden import qc
+from cellwarden import runner as R
+from cellwarden.exchange import read_exchange, write_exchange
+from cellwarden.stages import read_tsv_str, s1b_doublets, s1c_qc
 
 REPO = Path(__file__).resolve().parents[2]
 R_COLUMNS = ["cell_id", "sample_id", "n_genes", "n_umis", "pct_mito", "pct_ribo", "pct_hb", "log10_genes_per_umi",
@@ -159,7 +159,7 @@ def _shared_numba_cache(tmp_path_factory):
 
 def stage(module, rd, extra_env=None):
     env = dict(os.environ, PYTHONPATH=str(REPO / "python"), OMP_NUM_THREADS="2")
-    env.pop("SCPIPE_ALLOW_CPU_AS_GPU", None)
+    env.pop("CELLWARDEN_ALLOW_CPU_AS_GPU", None)
     env.update(extra_env or {})
     return subprocess.run([sys.executable, "-m", module, "--run-dir", str(rd)], capture_output=True, text=True,
                           env=env, timeout=900)
@@ -173,8 +173,8 @@ class Result:
 @pytest.fixture
 def inproc(capfd, monkeypatch):
     """Run a stage's main() in this process (numba JIT stays warm, unlike a subprocess)."""
-    monkeypatch.delenv("SCPIPE_ALLOW_CPU_AS_GPU", raising=False)
-    mods = {"scpipe.stages.s1b_doublets": s1b_doublets, "scpipe.stages.s1c_qc": s1c_qc}
+    monkeypatch.delenv("CELLWARDEN_ALLOW_CPU_AS_GPU", raising=False)
+    mods = {"cellwarden.stages.s1b_doublets": s1b_doublets, "cellwarden.stages.s1c_qc": s1c_qc}
 
     def call(module, rd, extra_env=None):
         for k, v in (extra_env or {}).items():
@@ -194,12 +194,12 @@ def done(tmp_path_factory):
     """S1b then S1c on the default synthetic data (run once for the module)."""
     rd, a = make_run(tmp_path_factory.mktemp("s1"))
     before = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
-    r1 = stage("scpipe.stages.s1b_doublets", rd)
+    r1 = stage("cellwarden.stages.s1b_doublets", rd)
     assert r1.returncode == 0, r1.stdout + r1.stderr
     after_b = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     b_bytes = (rd / "S1" / "qc_metrics.tsv.gz").read_bytes()
     assert (rd / "S1" / "metrics_counts.h5ad").exists()  # S1b never deletes it
-    r2 = stage("scpipe.stages.s1c_qc", rd)
+    r2 = stage("cellwarden.stages.s1c_qc", rd)
     assert r2.returncode == 0, r2.stdout + r2.stderr
     return {"rd": rd, "a": a, "before": before, "after_b": after_b, "b_bytes": b_bytes, "log_b": r1.stdout + r1.stderr,
             "log_c": r2.stdout + r2.stderr}
@@ -250,9 +250,9 @@ def test_s1b_pre_clusters_recover_types(done):
 
 def test_s1b_deterministic_rerun(inproc, tmp_path):
     rd, _ = make_run(tmp_path, {"doublets": {"method": "none"}})
-    assert inproc("scpipe.stages.s1b_doublets", rd).returncode == 0
+    assert inproc("cellwarden.stages.s1b_doublets", rd).returncode == 0
     first = (rd / "S1" / "qc_metrics.tsv.gz").read_bytes()
-    r = inproc("scpipe.stages.s1b_doublets", rd)  # rerun on its own output: columns replaced, same bytes
+    r = inproc("cellwarden.stages.s1b_doublets", rd)  # rerun on its own output: columns replaced, same bytes
     assert r.returncode == 0, r.stderr
     assert "recomputing" in r.stdout
     assert (rd / "S1" / "qc_metrics.tsv.gz").read_bytes() == first
@@ -263,7 +263,7 @@ def test_s1b_deterministic_rerun(inproc, tmp_path):
 
 def test_s1b_scdblfinder_not_implemented(inproc, tmp_path):
     rd, _ = make_run(tmp_path, {"doublets": {"method": "scdblfinder"}})
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 1
     assert "scDblFinder" in r.stderr or "scdblfinder" in r.stderr
     assert "runs in R" in r.stderr
@@ -276,7 +276,7 @@ def test_s1b_scdblfinder_columns_from_r_are_kept(inproc, tmp_path):
     m["doublet_call"] = np.where(np.arange(len(m)) < 5, "TRUE", "FALSE")
     write_gz(m, rd / "S1" / "qc_metrics.tsv.gz")
     before = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 0, r.stderr
     after = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     pd.testing.assert_frame_equal(after[list(before.columns)], before)
@@ -287,30 +287,30 @@ def test_s1b_row_order_and_cell_mismatch(inproc, tmp_path):
     rd, a = make_run(tmp_path, {"doublets": {"method": "none"}})
     m = partial_metrics(a).sample(frac=1, random_state=1)  # table order differs from the h5ad
     write_gz(m, rd / "S1" / "qc_metrics.tsv.gz")
-    assert inproc("scpipe.stages.s1b_doublets", rd).returncode == 0
+    assert inproc("cellwarden.stages.s1b_doublets", rd).returncode == 0
     out = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     assert list(out["cell_id"]) == list(m["cell_id"])
     write_gz(m.iloc[:-3], rd / "S1" / "qc_metrics.tsv.gz")
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 1 and "differ" in r.stderr
 
 
 def test_s1b_missing_input(inproc, tmp_path):
     rd, _ = make_run(tmp_path)
     (rd / "S1" / "metrics_counts.h5ad").unlink()
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 1 and "S1a must run first" in r.stderr
 
 
 def test_s1b_device_gpu_without_gpu(inproc, tmp_path):
-    from scpipe import gpu_core
+    from cellwarden import gpu_core
 
     if gpu_core.gpu_available()[0]:
         pytest.skip("a real GPU is present")
     rd, _ = make_run(tmp_path, {"device": "gpu", "doublets": {"method": "none"}})
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 1 and "no usable GPU" in r.stderr
-    r = inproc("scpipe.stages.s1b_doublets", rd, {"SCPIPE_ALLOW_CPU_AS_GPU": "1"})
+    r = inproc("cellwarden.stages.s1b_doublets", rd, {"CELLWARDEN_ALLOW_CPU_AS_GPU": "1"})
     assert r.returncode == 0, r.stderr
     assert "cpu-as-gpu" in r.stdout
 
@@ -373,16 +373,16 @@ def test_s1c_matches_engine(done):
 
 def test_s1c_needs_s1b(inproc, tmp_path):
     rd, _ = make_run(tmp_path)
-    r = inproc("scpipe.stages.s1c_qc", rd)
+    r = inproc("cellwarden.stages.s1c_qc", rd)
     assert r.returncode == 1 and "S1b" in r.stderr
     assert (rd / "S1" / "metrics_counts.h5ad").exists()
 
 
 def test_s1c_bad_policy_keeps_exchange(inproc, tmp_path):
     rd, _ = make_run(tmp_path, {"doublets": {"method": "none"}})
-    assert inproc("scpipe.stages.s1b_doublets", rd).returncode == 0
+    assert inproc("cellwarden.stages.s1b_doublets", rd).returncode == 0
     (rd / "config" / "qc_policy.yaml").write_text("hard_limits:\n  min_genes: -1\n")
-    r = inproc("scpipe.stages.s1c_qc", rd)
+    r = inproc("cellwarden.stages.s1c_qc", rd)
     assert r.returncode == 1 and "min_genes" in r.stderr
     assert (rd / "S1" / "metrics_counts.h5ad").exists()
     assert not (rd / "S1" / "qc_decisions.tsv.gz").exists()
@@ -401,7 +401,7 @@ def test_runner_with_real_python_stages(tmp_path):
     write_gz(partial_metrics(a), src / "qc_metrics.tsv.gz")
 
     def r_dummy(sid, outputs, copy=()):
-        code = "import os,pathlib,shutil,sys\nrd=pathlib.Path(os.environ['SCPIPE_RUN_DIR'])\n(rd/'S1').mkdir(exist_ok=True)\n"
+        code = "import os,pathlib,shutil,sys\nrd=pathlib.Path(os.environ['CELLWARDEN_RUN_DIR'])\n(rd/'S1').mkdir(exist_ok=True)\n"
         for o in outputs:
             code += f"p=rd/{o!r}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('x')\n"
         for name in copy:

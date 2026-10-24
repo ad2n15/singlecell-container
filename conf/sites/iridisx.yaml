@@ -9,10 +9,10 @@ resources:
   max_memory_gb: 64
   gpu_mem_cap_gb: 20           # leave headroom on the shared 24 GB L4
   nice: 10
-scratch: /scratch/$USER/scpipe
+scratch: /scratch/$USER/cellwarden
 container:
   runtime: apptainer           # apptainer | singularity | docker | none
-  image: null                  # e.g. /scratch/$USER/scpipe/scpipe.sif; null = use the host environment
+  image: null                  # e.g. /scratch/$USER/cellwarden/cellwarden.sif; null = use the host environment
   # Shared DDnB images (benchmark / one-off): see run_1m_apptainer.sh
   # image: /iridisfs/ddnb/images/seurat_5.0.0.sif
   options: ["--nv"]            # add --bind /iridisfs/ddnb:/iridisfs/ddnb via container.options if needed

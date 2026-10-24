@@ -11,13 +11,13 @@ import time
 
 import pytest
 
-from scpipe.agents.base import Agent, Tool, load_prompt, wrap_data
-from scpipe.llm import (AgentLog, BudgetExceeded, Ledger, Provider, ProviderError, Response, ToolCall, Usage,
+from cellwarden.agents.base import Agent, Tool, load_prompt, wrap_data
+from cellwarden.llm import (AgentLog, BudgetExceeded, Ledger, Provider, ProviderError, Response, ToolCall, Usage,
                         get_provider, load_prices, price_for, role_settings, sha256_text)
-from scpipe.llm import anthropic_provider as AP
-from scpipe.llm import openai_provider as OP
-from scpipe.llm.mock_provider import MockProvider, MockScriptExhausted
-from scpipe.llm.provider import JSON_TOOL, parse_json_text
+from cellwarden.llm import anthropic_provider as AP
+from cellwarden.llm import openai_provider as OP
+from cellwarden.llm.mock_provider import MockProvider, MockScriptExhausted
+from cellwarden.llm.provider import JSON_TOOL, parse_json_text
 
 KEY = "sk-ant-test-secret-0123456789"
 

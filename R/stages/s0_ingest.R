@@ -1,4 +1,4 @@
-# scpipe stage S0: ingest (docs/stages-spec.md section 3.1).
+# cellwarden stage S0: ingest (docs/stages-spec.md section 3.1).
 #
 # Reads every sample in samples.csv, checks counts are raw integers, prefixes
 # barcodes with <sample_id>_, harmonises genes across samples (Ensembl ID key
@@ -188,7 +188,7 @@ s0_read_h5ad <- function(path) {
     m <- .scx_as_dgc(ex$layers[["counts"]])
     dimnames(m) <- list(NULL, rownames(ex$obs))
     return(list(counts = m, symbol = g$symbol, gene_id = g$gene_id,
-                meta = .s0_meta_from_obs(ex$obs), notes = "read as scpipe exchange file (layers['counts'])"))
+                meta = .s0_meta_from_obs(ex$obs), notes = "read as cellwarden exchange file (layers['counts'])"))
   }
   h5 <- .scx_open(path)
   on.exit(h5$close_all(), add = TRUE)
@@ -771,7 +771,7 @@ run_s0 <- function(cfg, repo) {
   fmeta <- data.frame(gene_symbol_original = sym_u, gene_id = gid_u, row.names = feat_names,
                       stringsAsFactors = FALSE)
   obj[["RNA"]] <- SeuratObject::AddMetaData(obj[["RNA"]], metadata = fmeta)
-  obj@misc$scpipe <- list(stage = "S0", run_id = cfg$run_id, config_hash = cfg$config_hash,
+  obj@misc$cellwarden <- list(stage = "S0", run_id = cfg$run_id, config_hash = cfg$config_hash,
                           gene_key = key_name, created_utc = .scp_utc())
 
   # ---- organism check on the merged data

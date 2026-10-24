@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from scpipe import progress as P
+from cellwarden import progress as P
 
 
 def test_parse_step_from_r_and_python_logs():
@@ -15,14 +15,14 @@ def test_parse_step_from_r_and_python_logs():
     assert P.parse_step("[16:40:01] G2: bundle built (sha d887b58), mode auto") == "G2: bundle built (sha d887b58), mode auto"
     assert P.parse_step("[16:40:01] S1b: start (run dir /x)") is None
     assert P.parse_step("[16:40:09] S1b: done in 4.1s") is None
-    assert P.parse_step("# scpipe: started 2026-10-23T16:06:35Z") is None
+    assert P.parse_step("# cellwarden: started 2026-10-23T16:06:35Z") is None
     assert P.parse_step("Warning message: something") is None
     assert len(P.parse_step("[10:00:00] " + "x" * 200)) == 90
 
 
 def test_log_follower_reads_only_new_complete_lines(tmp_path):
     log = tmp_path / "S2.log"
-    log.write_text("# scpipe: started\n")
+    log.write_text("# cellwarden: started\n")
     f = P.LogFollower(log)
     assert f.latest_step() is None
     with open(log, "a") as fh:
@@ -76,15 +76,15 @@ def test_plain_reporter_lines():
     r.start(5, "S2", "not run yet")
     r.step("harmony")
     r.done(5, "S2", 32.4, 600 * 1024**2)
-    r.waiting(7, "G2", 97, Path("/r/gates/G2/report.html"), "scpipe approve --run-dir /r --stage context-review",
-              "scpipe resume --run-dir /r")
-    r.failed(8, "G3", 1, 2.0, Path("/r/logs/G3.log"), ["boom"], "scpipe resume --run-dir /r")
+    r.waiting(7, "G2", 97, Path("/r/gates/G2/report.html"), "cellwarden approve --run-dir /r --stage context-review",
+              "cellwarden resume --run-dir /r")
+    r.failed(8, "G3", 1, 2.0, Path("/r/logs/G3.log"), ["boom"], "cellwarden resume --run-dir /r")
     text = out.getvalue()
     assert "  [ 1/12] S0   Ingest — skipped (done, inputs unchanged)" in text
     assert "  [ 6/12] S2   Normalise, PCA, batch correction, clustering — running (not run yet)" in text
     assert "— done in 32.4s, peak RSS 600.00 MB" in text and "harmony" not in text
     assert "[ 8/12] G2   Tissue and disease context review — WAITING for your decision after 1m37s" in text
-    assert "approve:  scpipe approve --run-dir /r --stage context-review" in text
+    assert "approve:  cellwarden approve --run-dir /r --stage context-review" in text
     assert "— FAILED (exit code 1) after 2.0s" in text and "         | boom" in text
     assert "\x1b" not in text  # no terminal control codes in logs
 

@@ -1,7 +1,7 @@
-# R packages for every scpipe stage (R/stages/*.R), installed by containers/Dockerfile.
+# R packages for every cellwarden stage (R/stages/*.R), installed by containers/Dockerfile.
 # Also usable on a native install: Rscript containers/install_r_packages.R
 # (binaries come from the Posit Package Manager when the repos option points there).
-# Only missing packages are installed. SCPIPE_R_LIB=<dir> installs them into that library instead
+# Only missing packages are installed. CELLWARDEN_R_LIB=<dir> installs them into that library instead
 # of the default one (containers/update_sandbox.sh uses it to add packages to an unpacked image).
 
 cran <- c(
@@ -17,7 +17,7 @@ cran <- c(
 bioc <- c("DESeq2", "limma", "edgeR", "SummarizedExperiment", "scDblFinder", "BiocParallel", "glmGamPoi", "MAST")
 github <- c(BPCells = "bnprks/BPCells/r", presto = "immunogenomics/presto")
 
-lib <- Sys.getenv("SCPIPE_R_LIB", "")
+lib <- Sys.getenv("CELLWARDEN_R_LIB", "")
 if (nzchar(lib)) {
   dir.create(lib, recursive = TRUE, showWarnings = FALSE)
   .libPaths(c(lib, .libPaths()))

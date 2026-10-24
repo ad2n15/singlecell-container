@@ -1,6 +1,6 @@
 # Site file for a workstation or cloud VM of your own: no scheduler, no
 # container, no need to be polite. Raise the caps to what the machine has.
-# `scpipe init-site` drafts this file from what it detects.
+# `cellwarden init-site` drafts this file from what it detects.
 site: workstation
 execution: direct
 resources:
@@ -8,7 +8,7 @@ resources:
   max_memory_gb: 128
   gpu_mem_cap_gb: 20
   nice: 0
-scratch: ~/scpipe
+scratch: ~/cellwarden
 container:
   runtime: none
   image: null

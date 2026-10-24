@@ -1,17 +1,17 @@
-# scpipe stages S0–S2 — interface specification v1.0
+# CellWarden stages S0–S2 — interface specification v1.0
 
 The contract for build step 2: ingest (S0), QC metrics and rules-based QC decisions (S1), and core processing with the CPU/GPU switch (S2). It sits alongside `docs/exchange-spec.md` (data hand-off between R and Python) and `docs/DESIGN.md` (architecture). Every stage reads only the files listed as its inputs and writes only its listed outputs, so stages can be rerun, resumed and tested independently.
 
 ## 1. Orchestration: built-in runner (replaces Nextflow)
 
-With everything on one node (DESIGN v0.4), Nextflow's main benefits (spreading jobs across nodes) no longer apply, and it would add a Java dependency on every site. Stages are run by a small built-in runner, `scpipe` (Python):
+With everything on one node (DESIGN v0.4), Nextflow's main benefits (spreading jobs across nodes) no longer apply, and it would add a Java dependency on every site. Stages are run by a small built-in runner, `cellwarden` (Python):
 
 | Command | Behaviour |
 |---|---|
-| `scpipe run --config config.yaml [--run-dir DIR] [--until STAGE] [--detach]` | Creates or reuses the run directory, validates inputs, runs stages in order, skips stages already completed with identical inputs |
-| `scpipe resume --run-dir DIR` | Continues from the first incomplete stage |
-| `scpipe status --run-dir DIR` | Prints stage states, timings and peak memory |
-| `scpipe doctor [--config config.yaml]` | Basic preflight: R and Python packages present, optional packages listed as available/missing, GPU detected or not, write access to the run directory |
+| `cellwarden run --config config.yaml [--run-dir DIR] [--until STAGE] [--detach]` | Creates or reuses the run directory, validates inputs, runs stages in order, skips stages already completed with identical inputs |
+| `cellwarden resume --run-dir DIR` | Continues from the first incomplete stage |
+| `cellwarden status --run-dir DIR` | Prints stage states, timings and peak memory |
+| `cellwarden doctor [--config config.yaml]` | Basic preflight: R and Python packages present, optional packages listed as available/missing, GPU detected or not, write access to the run directory |
 
 `--detach` re-launches the run inside `tmux` (or `nohup` if tmux is missing) and prints how to reattach.
 
@@ -20,11 +20,11 @@ With everything on one node (DESIGN v0.4), Nextflow's main benefits (spreading j
 **Stage invocation.** Each stage is a separate process:
 
 - R stages: `Rscript R/stages/run_stage.R --stage <ID> --run-dir <DIR>`
-- Python stages: `python -m scpipe.stages.<module> --run-dir <DIR>`
+- Python stages: `python -m cellwarden.stages.<module> --run-dir <DIR>`
 
 A stage exits 0 on success, non-zero on failure, and writes `logs/<STAGE>.log`. Stages read their settings from `<run-dir>/config/config.resolved.yaml`, never from the user's original file.
 
-**Resource caps** (applied by the runner to every stage via environment variables, from `resources` in config): `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMBA_NUM_THREADS`, `SCPIPE_THREADS`, `SCPIPE_MAX_MEMORY_GB`, `SCPIPE_GPU_MEM_CAP_GB`. The R side calls `setThreads()` when the Seurat version provides it. Stages run under `nice -n <resources.nice>`.
+**Resource caps** (applied by the runner to every stage via environment variables, from `resources` in config): `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMBA_NUM_THREADS`, `CELLWARDEN_THREADS`, `CELLWARDEN_MAX_MEMORY_GB`, `CELLWARDEN_GPU_MEM_CAP_GB`. The R side calls `setThreads()` when the Seurat version provides it. Stages run under `nice -n <resources.nice>`.
 
 ## 2. Run directory layout
 
@@ -112,9 +112,9 @@ S1a writes `S1/metrics_counts.h5ad` (exchange full mode, counts plus log-normali
 
 Adds `doublet_score` (float) and `doublet_call` (bool).
 
-**Pre-clustering:** a quick, coarse clustering of all cells before filtering, used only to spot QC rules that would wipe out a whole population. It runs on HVGs with 20 PCs and Leiden at resolution 0.3, reusing `scpipe.gpu_core`, and adds `pre_cluster` (string). Pre-clusters are never used downstream.
+**Pre-clustering:** a quick, coarse clustering of all cells before filtering, used only to spot QC rules that would wipe out a whole population. It runs on HVGs with 20 PCs and Leiden at resolution 0.3, reusing `cellwarden.gpu_core`, and adds `pre_cluster` (string). Pre-clusters are never used downstream.
 
-### 3.4 S1c rules-based QC engine (Python, `scpipe.qc`)
+### 3.4 S1c rules-based QC engine (Python, `cellwarden.qc`)
 
 Public functions, reused unchanged by the QC agent in build step 3:
 
@@ -175,7 +175,7 @@ review_triggers:
 3. Variable genes: `FindVariableFeatures` with `vst` and `n_hvg` (default 2000).
 4. Choose the device and memory plan (section 6).
 5. **CPU path** (Seurat): `ScaleData` on HVGs, `RunPCA`, Harmony if `integration.method = harmony` and the R `harmony` package is installed (otherwise S2 fails with a clear message, or runs the GPU path if `device = auto` and the Python side has harmonypy), `FindNeighbors`, `FindClusters` with Leiden (`algorithm = 4`; uses leidenbase when available), `RunUMAP` (uwot).
-6. **GPU path** (exchange): `write_exchange(slim)`, then `python -m scpipe.gpu_core`, then `merge_exchange_results()`.
+6. **GPU path** (exchange): `write_exchange(slim)`, then `python -m cellwarden.gpu_core`, then `merge_exchange_results()`.
 7. **Parameters**, both paths: `pcs` (`auto` or an integer; `auto` uses the elbow rule from DESIGN, minimum 10, maximum 50), `n_neighbors` (default 20), `resolution` (default 0.5), `seed`.
 8. `S2/summary.json`: device and plan used and why, cells in and out, PCs, clusters, timings per step, peak memory.
 
@@ -183,7 +183,7 @@ review_triggers:
 
 ```yaml
 project: my_study
-run_dir: /scratch/$USER/scpipe/my_study     # overridable with --run-dir
+run_dir: /scratch/$USER/cellwarden/my_study     # overridable with --run-dir
 seed: 42
 samples: samples.csv
 qc_policy: qc_policy.yaml
@@ -213,17 +213,17 @@ Relative paths are resolved against the directory containing `config.yaml`. The 
 
 ## 5. Device and memory plan
 
-`scpipe.resources.choose_plan(n_cells, n_hvg, device_setting, gpu_info)` returns `{device, plan, reason}`:
+`cellwarden.resources.choose_plan(n_cells, n_hvg, device_setting, gpu_info)` returns `{device, plan, reason}`:
 
 - `device: cpu` → CPU path.
-- `device: gpu` → GPU path. Fails if no usable GPU is found (`scpipe.gpu_core.gpu_available()`).
+- `device: gpu` → GPU path. Fails if no usable GPU is found (`cellwarden.gpu_core.gpu_available()`).
 - `device: auto` → GPU path if a GPU is available and the estimated GPU memory (cells × n_hvg × 4 bytes × 3, for working copies) fits under the GPU memory cap; otherwise CPU path.
 - `plan`: `in_memory` (fits), `managed_memory` (GPU, up to 3× the cap, using RAPIDS managed memory), or `cpu` (falls back to the CPU path). The reason is recorded in `S2/summary.json`.
 
 ## 6. Tests
 
 - **Unit tests per module:** R testthat in `tests/R/`, pytest in `tests/python/`.
-- **End-to-end:** `tests/integration/run_stages.sh` runs `scpipe run` on the two-sample fixture (`tests/fixtures/pbmc_like`, split by its `sample` column into two inputs in two different formats) through S0–S2 twice, once with `device: cpu` and once with `device: gpu`. On this CPU-only workspace, the `gpu` run uses `gpu_core`'s CPU fallback via a test-only override `SCPIPE_ALLOW_CPU_AS_GPU=1`.
+- **End-to-end:** `tests/integration/run_stages.sh` runs `cellwarden run` on the two-sample fixture (`tests/fixtures/pbmc_like`, split by its `sample` column into two inputs in two different formats) through S0–S2 twice, once with `device: cpu` and once with `device: gpu`. On this CPU-only workspace, the `gpu` run uses `gpu_core`'s CPU fallback via a test-only override `CELLWARDEN_ALLOW_CPU_AS_GPU=1`.
 - **Checks:**
   - Both runs finish.
   - QC decisions are identical.

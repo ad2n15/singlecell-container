@@ -1,4 +1,4 @@
-"""Unit tests for the rules-based QC engine (scpipe.qc, docs/stages-spec.md 3.4)."""
+"""Unit tests for the rules-based QC engine (cellwarden.qc, docs/stages-spec.md 3.4)."""
 
 import json
 
@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from scpipe import qc
+from cellwarden import qc
 
 SPEC_POLICY = """
 hard_limits:

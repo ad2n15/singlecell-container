@@ -14,13 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from scpipe.agents import _compat
-from scpipe.agents.annotation import AnnotationAgent, lookup_cell_type
-from scpipe.agents.context import ContextAgent, search_entity
-from scpipe.agents.interpretation import InterpretationAgent
-from scpipe.gates import g2_context as G2
-from scpipe.gates import g3_annotation as G3
-from scpipe.gates import g4_interpretation as G4
+from cellwarden.agents import _compat
+from cellwarden.agents.annotation import AnnotationAgent, lookup_cell_type
+from cellwarden.agents.context import ContextAgent, search_entity
+from cellwarden.agents.interpretation import InterpretationAgent
+from cellwarden.gates import g2_context as G2
+from cellwarden.gates import g3_annotation as G3
+from cellwarden.gates import g4_interpretation as G4
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURES = REPO / "tests" / "fixtures" / "agent_bundles"
@@ -282,7 +282,7 @@ def test_g2_search_entity_offline():
 
 
 def test_g2_search_entity_uses_bundle_settings(run_dir, tmp_path, monkeypatch):
-    from scpipe.opentargets import OpenTargetsClient
+    from cellwarden.opentargets import OpenTargetsClient
 
     cfg = {"opentargets": {"enabled": True, "offline": True, "cache_dir": "ot_cache"}, "config_dir": str(tmp_path)}
     b = G2.build_bundle(run_dir, cfg)
@@ -525,7 +525,7 @@ def test_run_gate_review_mode_waits(run_dir, gate, role, good):
 
 def test_reviewer_sees_policy_and_evidence_but_not_rationale(run_dir, monkeypatch):
     """Real protocol: the reviewer gets the gate's policy and the proposal content, never the worker's rationale."""
-    from scpipe.llm import mock_provider as mp
+    from cellwarden.llm import mock_provider as mp
 
     seen = []
     orig = mp.MockProvider.complete
@@ -570,10 +570,10 @@ def test_reviewer_escalate_waits_for_human_then_approve(run_dir):
     res = _compat.run_gate("G3", run_dir, cfg)
     gate_dir = run_dir / "gates" / "G3"
     assert not res["continue"] and (gate_dir / "pending.json").exists() and not (gate_dir / "decision.json").exists()
-    assert json.loads((gate_dir / "pending.json").read_text())["approve"].startswith("scpipe approve --run-dir")
+    assert json.loads((gate_dir / "pending.json").read_text())["approve"].startswith("cellwarden approve --run-dir")
     html = (gate_dir / "report.html").read_text()
     assert "Annotation (consensus vs proposal)" in html and "CD8 T cell" in html
-    from scpipe.gates import approve
+    from cellwarden.gates import approve
 
     dec = approve("G3", run_dir, cfg, by="alice")
     assert dec["decided_by"] == "human:alice" and dec["changes_vs_proposal"] == []
@@ -583,7 +583,7 @@ def test_reviewer_escalate_waits_for_human_then_approve(run_dir):
     bad = json.loads(json.dumps(dec["decision"]))
     bad["clusters"][0].update(label_fine="hepatocyte", label_broad="hepatocyte", cl_id="CL:0000182", status="agent")
     (run_dir / "edited.json").write_text(json.dumps(bad))
-    from scpipe.gates import GateError
+    from cellwarden.gates import GateError
 
     with pytest.raises(GateError, match="consensus cluster"):
         approve("G3", run_dir, cfg, from_file=run_dir / "edited.json", by="alice")
@@ -592,8 +592,8 @@ def test_reviewer_escalate_waits_for_human_then_approve(run_dir):
     assert res2["continue"] and res2["decision"]["decided_by"] == "human:alice"
 
 
-@pytest.mark.parametrize("gate,module", [("G2", "scpipe.gates.g2_context"), ("G3", "scpipe.gates.g3_annotation"),
-                                         ("G4", "scpipe.gates.g4_interpretation")])
+@pytest.mark.parametrize("gate,module", [("G2", "cellwarden.gates.g2_context"), ("G3", "cellwarden.gates.g3_annotation"),
+                                         ("G4", "cellwarden.gates.g4_interpretation")])
 def test_gate_stage_cli_exit_codes(run_dir, gate, module):
     """The runner calls ``python -m <module> --run-dir D``: 0 to continue, 3 while waiting for a human."""
     import subprocess
@@ -620,8 +620,8 @@ def test_max_tool_calls_is_twelve(run_dir):
 
 def _load_shim_fallback():
     """Load _compat.py with the real llm/base/protocol modules hidden so its fallbacks are used."""
-    hidden = {"scpipe.llm": sys.modules.get("scpipe.llm"), "scpipe.agents.base": sys.modules.get("scpipe.agents.base"),
-              "scpipe.gates.protocol": sys.modules.get("scpipe.gates.protocol")}
+    hidden = {"cellwarden.llm": sys.modules.get("cellwarden.llm"), "cellwarden.agents.base": sys.modules.get("cellwarden.agents.base"),
+              "cellwarden.gates.protocol": sys.modules.get("cellwarden.gates.protocol")}
     for k in hidden:
         sys.modules[k] = None  # type: ignore[assignment]  # makes `import` raise ImportError
     try:
@@ -664,7 +664,7 @@ def test_shim_fallback_loop_matches_contract(run_dir):
 
 def test_g4_reads_the_stage_opentargets_summary(tmp_path):
     """S4 writes contrasts as a list with a separate targets table; G4 turns it into per-gene evidence."""
-    from scpipe.gates.g4_interpretation import read_opentargets_summary
+    from cellwarden.gates.g4_interpretation import read_opentargets_summary
 
     stage = {"contrasts": [{"contrast": "markers", "groups": [{"group": "B cell", "directions": {
         "up": {"n_de": 240, "genes": [{"gene": "MS4A1", "symbol": "MS4A1", "ensembl_id": "ENSG1", "log2fc": 5.7, "padj": 0.0,

@@ -114,7 +114,7 @@ test_that("detector: deterministic for a fixed seed; small samples are skipped w
 
 # ------------------------------------------------------------------ S1a end to end
 new_run <- function(engine, method = "scrublet", tag = "dbl") {
-  rd <- file.path(tempdir(), sprintf("scpipe-%s-%s", tag, basename(tempfile(""))))
+  rd <- file.path(tempdir(), sprintf("cellwarden-%s-%s", tag, basename(tempfile(""))))
   dir.create(file.path(rd, "config"), recursive = TRUE)
   sheet <- read.csv(file.path(INPUTS, "samples.csv"), colClasses = "character")
   sheet$path <- file.path(INPUTS, sheet$path)

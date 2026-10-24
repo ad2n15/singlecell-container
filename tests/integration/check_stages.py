@@ -407,7 +407,7 @@ info <- list(
   layers = Layers(o[[assay]]), reductions = Reductions(o), graphs = Graphs(o),
   n_variable_features = length(VariableFeatures(o)),
   reduction_dims = lapply(setNames(Reductions(o), Reductions(o)), function(r) ncol(Embeddings(o, r))),
-  merges = length(o@misc$scpipe_exchange_merges)
+  merges = length(o@misc$cellwarden_exchange_merges)
 )
 writeLines(jsonlite::toJSON(info, auto_unbox = TRUE, pretty = TRUE), a[3])
 """
@@ -466,7 +466,7 @@ def cmd_s2(a) -> int:
     pcs = summ.get("pcs", summ.get("n_pcs"))
     c.info(f"PCs: summary={pcs}, pca dims in object={info['reduction_dims'].get('pca')}")
     if a.device == "gpu":
-        c.ok(info["merges"] >= 1, f"exchange merge recorded in misc$scpipe_exchange_merges ({info['merges']})")
+        c.ok(info["merges"] >= 1, f"exchange merge recorded in misc$cellwarden_exchange_merges ({info['merges']})")
 
     md = pd.read_csv(a.out_tsv, sep="\t", keep_default_na=False, na_values=[""])
     clus_col = "seurat_clusters" if "seurat_clusters" in md.columns else "ident"

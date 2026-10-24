@@ -1,20 +1,12 @@
-"""scpipe: Seurat <-> AnnData exchange format and GPU core step (Python side)."""
+"""scpipe is now CellWarden: ``import scpipe`` and ``import scpipe.<module>`` give ``cellwarden``.
 
-from .exchange import (
-    SCHEMA_VERSION,
-    ExchangeError,
-    counts_checksum,
-    read_exchange,
-    validate_exchange,
-    write_exchange,
-)
+Kept for one release so code written for scpipe keeps working; use ``cellwarden`` instead.
+"""
 
-__all__ = [
-    "SCHEMA_VERSION",
-    "ExchangeError",
-    "counts_checksum",
-    "read_exchange",
-    "validate_exchange",
-    "write_exchange",
-]
-__version__ = "0.2.0"
+import sys
+import warnings
+
+import cellwarden
+
+warnings.warn("scpipe has been renamed CellWarden: import cellwarden instead", DeprecationWarning, stacklevel=2)
+sys.modules[__name__] = cellwarden

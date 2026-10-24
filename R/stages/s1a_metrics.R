@@ -1,4 +1,4 @@
-# scpipe stage S1a: per-cell QC metrics (docs/stages-spec.md section 3.2).
+# cellwarden stage S1a: per-cell QC metrics (docs/stages-spec.md section 3.2).
 #
 # Inputs:  S0/object.rds (or .qs2), qc_policy.yaml (protected populations)
 # Outputs: S1/metrics_counts.h5ad  exchange file, full mode (counts + log-normalised X, all cells);

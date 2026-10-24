@@ -1,4 +1,4 @@
-# scpipe exchange format (Seurat <-> AnnData), R side.
+# cellwarden exchange format (Seurat <-> AnnData), R side.
 #
 # Implements docs/exchange-spec.md v1.0 with hdf5r (no anndataR needed):
 #
@@ -17,7 +17,7 @@
 # dgCMatrix (CSC) has exactly the arrays of the cells x genes CSR matrix, so
 # sparse matrices are written and read without densifying or transposing.
 #
-# Checksum canonical form (agreed with python/scpipe/exchange.py): cells x genes
+# Checksum canonical form (agreed with python/cellwarden/exchange.py): cells x genes
 # CSR, duplicates summed, column indices sorted within rows, explicit zeros
 # removed; then SHA-256 over shape (n_cells, n_genes) as int64 LE, indptr and
 # indices as int64 LE, data as float64 LE.
@@ -1086,6 +1086,6 @@ merge_exchange_results <- function(obj, path, overwrite = FALSE, allow_subset = 
               writer = ex$writer, created_utc = ex$created_utc,
               source_counts_checksum = ex$source_counts_checksum, cluster_key = ck,
               n_cells = length(present), merged_utc = .scx_utc_now())
-  obj@misc$scpipe_exchange_merges <- c(obj@misc$scpipe_exchange_merges, list(rec))
+  obj@misc$cellwarden_exchange_merges <- c(obj@misc$cellwarden_exchange_merges, list(rec))
   obj
 }

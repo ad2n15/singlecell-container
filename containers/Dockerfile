@@ -1,16 +1,16 @@
-# scpipe single image (docs/DESIGN.md 7.5): everything every stage needs, prebuilt.
+# cellwarden single image (docs/DESIGN.md 7.5): everything every stage needs, prebuilt.
 #
 #   NVIDIA RAPIDS base (CUDA 12, Python 3.12, CuPy, cuGraph, cuVS, cuML in /opt/conda)
 #   + R with Seurat 5, BPCells, presto, DESeq2, limma, leidenbase, hdf5r, harmony
-#   + scpipe, rapids-singlecell, CellTypist (with its default model) and harmonypy
+#   + cellwarden, rapids-singlecell, CellTypist (with its default model) and harmonypy
 #   + the Rust engine built with CUDA and cuGraph: scfast (Python) and scfastR (R).
 # No Rust toolchain or compiler is needed at run time: the engine is built in the "build" stage.
 #
-#   docker build -t scpipe -f containers/Dockerfile .
-#   docker run --rm --gpus all -v $PWD:/work scpipe doctor
-#   docker pull ad2n15/scpipe:latest                                    # published by .github/workflows/release.yml
-#   apptainer pull scpipe.sif docker://ad2n15/scpipe:latest             # mirror: docker://ghcr.io/ad2n15/scpipe:latest
-#   apptainer exec --nv scpipe.sif scpipe run --config config.yaml
+#   docker build -t cellwarden -f containers/Dockerfile .
+#   docker run --rm --gpus all -v $PWD:/work cellwarden doctor
+#   docker pull cellwarden/cellwarden:latest                                    # published by .github/workflows/release.yml
+#   apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest             # mirror: docker://ghcr.io/cellwarden/cellwarden:latest
+#   apptainer exec --nv cellwarden.sif cellwarden run --config config.yaml
 #
 # The image also runs on machines without a GPU: every GPU step falls back to the CPU.
 ARG RAPIDS_IMAGE=nvcr.io/nvidia/rapidsai/base:26.10-cuda12-py3.12
@@ -22,7 +22,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # R and its packages use the system toolchain and libraries, never conda's.
 ENV SYS_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# System libraries for R, hdf5r, BPCells, igraph, uwot and curl; tmux for `scpipe run --detach`.
+# System libraries for R, hdf5r, BPCells, igraph, uwot and curl; tmux for `cellwarden run --detach`.
 RUN PATH=$SYS_PATH apt-get update && PATH=$SYS_PATH apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg locales tmux git build-essential gfortran cmake pkg-config \
       libhdf5-dev libcurl4-openssl-dev libssl-dev libxml2-dev libglpk-dev libgsl-dev \
@@ -65,13 +65,13 @@ RUN mkdir -p /out && cd /out \
 # ---------------------------------------------------------------- final image
 FROM base
 COPY --from=build /out /tmp/scfast
-COPY python /opt/scpipe/python
-COPY R /opt/scpipe/R
-COPY conf /opt/scpipe/conf
-COPY config /opt/scpipe/config
-COPY docs /opt/scpipe/docs
-COPY tests /opt/scpipe/tests
-COPY containers/smoke_test.sh /opt/scpipe/containers/smoke_test.sh
+COPY python /opt/cellwarden/python
+COPY R /opt/cellwarden/R
+COPY conf /opt/cellwarden/conf
+COPY config /opt/cellwarden/config
+COPY docs /opt/cellwarden/docs
+COPY tests /opt/cellwarden/tests
+COPY containers/smoke_test.sh /opt/cellwarden/containers/smoke_test.sh
 
 # scfastR (binary package from the build stage).
 RUN PATH=$SYS_PATH R CMD INSTALL /tmp/scfast/scfastR_*.tar.gz \
@@ -79,25 +79,25 @@ RUN PATH=$SYS_PATH R CMD INSTALL /tmp/scfast/scfastR_*.tar.gz \
 
 # Python into the RAPIDS conda environment. rapids-singlecell without its [rapids] extra: the
 # RAPIDS libraries are already in the image as conda packages; only its pure-Python deps come in.
-RUN pip install --no-cache-dir /tmp/scfast/scfast-*.whl "/opt/scpipe/python[harmony,report,llm,test]" \
+RUN pip install --no-cache-dir /tmp/scfast/scfast-*.whl "/opt/cellwarden/python[harmony,report,llm,test]" \
          "rapids-singlecell-cu12==0.18.1" \
-    && python -c "import scpipe, scfast, rapids_singlecell, cupy, harmonypy, celltypist; i = scfast.device_info(); assert i['cuda_built'], i" \
+    && python -c "import cellwarden, scfast, rapids_singlecell, cupy, harmonypy, celltypist; i = scfast.device_info(); assert i['cuda_built'], i" \
     && rm -rf /tmp/scfast
 
-# CellTypist's default model, so annotation works offline (s3_celltypist reads SCPIPE_CELLTYPIST_MODELS).
-ENV SCPIPE_CELLTYPIST_MODELS=/opt/scpipe/models/celltypist
-RUN python -m scpipe.stages.s3_celltypist --models-dir "$SCPIPE_CELLTYPIST_MODELS" --download Immune_All_Low.pkl \
-    && chmod -R a+rX /opt/scpipe
+# CellTypist's default model, so annotation works offline (s3_celltypist reads CELLWARDEN_CELLTYPIST_MODELS).
+ENV CELLWARDEN_CELLTYPIST_MODELS=/opt/cellwarden/models/celltypist
+RUN python -m cellwarden.stages.s3_celltypist --models-dir "$CELLWARDEN_CELLTYPIST_MODELS" --download Immune_All_Low.pkl \
+    && chmod -R a+rX /opt/cellwarden
 
-ENV SCPIPE_REPO_ROOT=/opt/scpipe SCPIPE_IN_CONTAINER=1 \
+ENV CELLWARDEN_REPO_ROOT=/opt/cellwarden CELLWARDEN_IN_CONTAINER=1 \
     OMP_NUM_THREADS=8 \
     MPLCONFIGDIR=/tmp/mpl NUMBA_CACHE_DIR=/tmp/numba CUPY_CACHE_DIR=/tmp/cupy
 # org.opencontainers.image.source links the GHCR package to the (public) repository
-LABEL org.opencontainers.image.title="scpipe" \
+LABEL org.opencontainers.image.title="cellwarden" \
       org.opencontainers.image.description="Agentic single-cell RNA-seq pipeline: Seurat 5, Rust engine (scfast), RAPIDS, CellTypist, LLM review gates" \
-      org.opencontainers.image.source="https://github.com/ad2n15/singlecell-container" \
+      org.opencontainers.image.source="https://github.com/cellwarden/cellwarden" \
       org.opencontainers.image.licenses="Apache-2.0"
 WORKDIR /work
 USER rapids
-ENTRYPOINT ["scpipe"]
+ENTRYPOINT ["cellwarden"]
 CMD ["--help"]

@@ -1,6 +1,6 @@
 # Scale runs on the HPC (Phase 8)
 
-Runs the pipeline's S0–S2 (`scpipe run --until S2`) at 50k, 100k, 200k and 500k cells on
+Runs the pipeline's S0–S2 (`cellwarden run --until S2`) at 50k, 100k, 200k and 500k cells on
 four engine variants and judges each against the Seurat baseline with the adoption rule in
 [`docs/RUST_ENGINE.md`](../../docs/RUST_ENGINE.md) section 8.2. It is Phase 8 of
 [`docs/scfast-integration.md`](../../docs/scfast-integration.md): the first place the
@@ -19,10 +19,10 @@ neighbours, Leiden resolution 0.5, scrublet doublets, no integration, no LLM.
 
 ## Steps
 
-1. **Inputs** (once, on the HPC; refused elsewhere without `SCPIPE_ALLOW_LARGE=1`):
+1. **Inputs** (once, on the HPC; refused elsewhere without `CELLWARDEN_ALLOW_LARGE=1`):
 
    ```bash
-   SCPIPE_ALLOW_LARGE=1 python bench/hpc/make_scale_inputs.py --out bench/hpc/data \
+   CELLWARDEN_ALLOW_LARGE=1 python bench/hpc/make_scale_inputs.py --out bench/hpc/data \
        --sizes 50000,100000,200000,500000 --genes 5000 --types 12
    ```
 
@@ -47,7 +47,7 @@ neighbours, Leiden resolution 0.5, scrublet doublets, no integration, no LLM.
    `CONDA_ENV` or `VENV` for the software stack; edit its `#SBATCH` lines for the site
    (partition `l4`, one GPU, 8 cores, 64 GB, 24 h).
 
-   Each run lives in `<out>/n<N>/<variant>/`: `config.yaml`, `run/` (the scpipe run
+   Each run lives in `<out>/n<N>/<variant>/`: `config.yaml`, `run/` (the CellWarden run
    directory with `S2/summary.json` and the stage logs), `time.log` (`/usr/bin/time -v`),
    `gpu_mem.log` (`nvidia-smi` samples once a second, GPU variants), `clusters.tsv.gz`
    (S2 clusters). One JSON line per run goes to `<out>/runs.jsonl`. A variant that fails or
@@ -83,7 +83,7 @@ use it for timing and the scaling curve and check parity on real data before ado
 ## What to expect to go wrong
 
 - `engine_gpu: scfast needs scfastR built with CUDA`: scfastR was installed without the
-  `cuda` feature or no device is visible; `python -m scpipe doctor` shows both lines.
+  `cuda` feature or no device is visible; `python -m cellwarden doctor` shows both lines.
 - `rapids` needs `rapids_singlecell` + `cupy` importable from the same Python; without them
   the variant fails at the first size and is skipped afterwards.
 - Seurat at 500k cells may run out of memory in `ScaleData`/`RunPCA`; that is a result

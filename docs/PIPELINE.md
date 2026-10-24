@@ -1,4 +1,4 @@
-# scpipe: the pipeline, end to end
+# cellwarden: the pipeline, end to end
 
 One page that describes the whole pipeline: what goes in, every stage and review gate in
 order, what comes out, how to configure and run it, and where things stand. The detailed
@@ -10,9 +10,9 @@ architecture is [`ARCHITECTURE.md`](ARCHITECTURE.md); installation is [`INSTALL.
 
 ---
 
-## 1. What scpipe is
+## 1. What CellWarden is
 
-scpipe takes single-cell RNA-seq count matrices from one or more samples and produces a
+CellWarden takes single-cell RNA-seq count matrices from one or more samples and produces a
 quality-controlled, clustered, annotated and interpreted dataset with a self-contained HTML
 report, in one command.
 
@@ -61,19 +61,19 @@ Stages (S) transform data; gates (G) are decision points where the pipeline may 
 file or folder becomes one sample, and no config file is needed:
 
 ```bash
-scpipe run donorA.h5 donorB.rds donorC.h5ad                 # files of any supported format
-scpipe run /data/cellranger_runs/                             # a folder: every sample in it (Cell Ranger outs/ too)
-scpipe run samples.csv                                        # a samples sheet (3.1)
-scpipe run a.h5 b.h5 --meta condition=control --out results/  # add a metadata column, choose the output folder
-scpipe run a.h5 b.h5 --config config.yaml                     # the files, with your other settings
+cellwarden run donorA.h5 donorB.rds donorC.h5ad                 # files of any supported format
+cellwarden run /data/cellranger_runs/                             # a folder: every sample in it (Cell Ranger outs/ too)
+cellwarden run samples.csv                                        # a samples sheet (3.1)
+cellwarden run a.h5 b.h5 --meta condition=control --out results/  # add a metadata column, choose the output folder
+cellwarden run a.h5 b.h5 --config config.yaml                     # the files, with your other settings
 ```
 
 - Sample IDs come from the file names (or the folder for Cell Ranger's generic names such as
   `filtered_feature_bc_matrix.h5`); clashes get `_2`, `_3`.
-- Results go to `--out`, or `./scpipe_<first sample or --name>_<date>`; a non-empty folder that is
-  not an earlier scpipe run is never overwritten. The same command again resumes.
+- Results go to `--out`, or `./cellwarden_<first sample or --name>_<date>`; a non-empty folder that is
+  not an earlier CellWarden run is never overwritten. The same command again resumes.
 - The run writes the config it used to `<out>/config/input_config.yaml`; edit it and run
-  `scpipe run --config <out>/config/input_config.yaml` to change settings.
+  `cellwarden run --config <out>/config/input_config.yaml` to change settings.
 - The built-in QC policy (3.2) applies unless your config names another.
 
 For full control you prepare three files next to your data (templates in [`config/examples/`](../config/examples)).
@@ -122,7 +122,7 @@ The full key list with defaults is in section 8. The minimum is:
 
 ```yaml
 project: my_study
-run_dir: /scratch/$USER/scpipe/my_study
+run_dir: /scratch/$USER/cellwarden/my_study
 samples: samples.csv
 qc_policy: qc_policy.yaml
 site: iridisx               # optional: conf/sites/<name>.yaml or a path
@@ -160,7 +160,7 @@ Every setting is validated before anything runs, and all problems are reported a
 - **Writes:** `S1/qc_metrics.tsv.gz` (one row per cell); a transient counts file for S1b on
   the Seurat/GPU path.
 
-### S1b: Doublets (Python, `scpipe/stages/s1b_doublets.py`)
+### S1b: Doublets (Python, `cellwarden/stages/s1b_doublets.py`)
 
 - `doublets.method`: `scrublet` (default, per sample; on the GPU via rapids-singlecell when
   available), `scdblfinder`, or `none`.
@@ -168,7 +168,7 @@ Every setting is validated before anything runs, and all problems are reported a
   cluster-loss review trigger).
 - On the Rust path S1a has already done this and S1b passes the table through.
 
-### S1c: QC rules engine (Python, `scpipe/stages/s1c_qc.py`, `scpipe/qc.py`)
+### S1c: QC rules engine (Python, `cellwarden/stages/s1c_qc.py`, `cellwarden/qc.py`)
 
 Every cell ends **keep**, **exclude** or **review**, with reason codes, by applying in order:
 
@@ -185,7 +185,7 @@ Every cell ends **keep**, **exclude** or **review**, with reason codes, by apply
 **Writes:** `S1/qc_decisions.tsv.gz` (decision + reason codes + policy hash per cell),
 `S1/qc_summary.json`.
 
-### G1: QC gate (Python, `scpipe/gates/g1_qc.py`)
+### G1: QC gate (Python, `cellwarden/gates/g1_qc.py`)
 
 - The QC agent sees per-sample and per-cluster summaries (never per-cell rows) and may propose
   **tighter** thresholds, only inside the policy's hard limits.
@@ -202,7 +202,7 @@ Drops excluded cells, then:
 2. **Highly variable genes:** `n_hvg` (default 2,000, Seurat vst).
 3. **Scale + PCA:** `pcs: auto` or a number (randomised SVD with implicit scaling on the scfast path).
 4. **Integration (batch correction):** `integration.method: none` (default) or `harmony` on
-   `integration.batch_key` (any sample-sheet column; `scpipe run ... --integrate sample_id`).
+   `integration.batch_key` (any sample-sheet column; `cellwarden run ... --integrate sample_id`).
    Harmony runs in **scfast's Rust implementation** wherever scfastR provides it: the harmony 2.x
    algorithm and defaults, with the same batch mixing and neighbour structure as R harmony (kNN
    overlap 0.97–0.98, the same as R harmony against itself with another seed) at a fraction of the
@@ -231,7 +231,7 @@ barcode**, refused if the counts checksum (SHA-256, identical in R and Python) d
 **Writes:** `S2/object.rds` (clusters, PCA, UMAP), `S2/summary.json` (path, device, memory
 plan and why, timings, cluster counts).
 
-### S3: Evidence and consensus annotation (R + Python, `scpipe/stages/s3.py`, `R/stages/s3_evidence.R`)
+### S3: Evidence and consensus annotation (R + Python, `cellwarden/stages/s3.py`, `R/stages/s3_evidence.R`)
 
 - **Markers** per cluster (presto Wilcoxon) → `S3/markers.tsv.gz`.
 - **Signature scores** for lineage gene sets (`R/stages/data/signatures.yaml`, or your own via
@@ -244,19 +244,19 @@ plan and why, timings, cluster counts).
 - **Writes:** `S3/annotation_consensus.tsv`, `S3/cluster_summary.json`,
   `S3/evidence_bundle.json` (the aggregated evidence the agents see).
 
-### G2: Context gate (Python, `scpipe/gates/g2_context.py`)
+### G2: Context gate (Python, `cellwarden/gates/g2_context.py`)
 
 The context agent infers the likely **tissue** (UBERON ID) and **disease** candidates (EFO IDs,
 resolved through Open Targets) from the evidence; the organism is fixed to human. Because this is
 speculative, the default mode is `review`: a person confirms it.
 
-### G3: Annotation gate (Python, `scpipe/gates/g3_annotation.py`)
+### G3: Annotation gate (Python, `cellwarden/gates/g3_annotation.py`)
 
 The annotation agent may relabel **only** clusters the consensus marked `low_confidence` or
 `conflict`, and only with labels from the cell-type table. Output: the final labels in
 `S3/annotation.tsv`. Default mode `auto`.
 
-### S4: Differential expression (FindMarkers or pseudobulk) + Open Targets (R + Python, `scpipe/stages/s4.py`, `R/stages/s4_dge.R`)
+### S4: Differential expression (FindMarkers or pseudobulk) + Open Targets (R + Python, `cellwarden/stages/s4.py`, `R/stages/s4_dge.R`)
 
 - **FindMarkers (default, `dge.method: findmarkers`):** Seurat `FindMarkers` between two sets
   of cells with `dge.test` (MAST by default; wilcox, wilcox_limma, LR, t, bimod, negbinom,
@@ -280,13 +280,13 @@ The annotation agent may relabel **only** clusters the consensus marked `low_con
   `refs/opentargets`, `offline: true` for no network).
 - **Writes:** `S4/dge/*.tsv.gz`, `S4/dge_summary.json`, `S4/opentargets_summary.json`.
 
-### G4: Interpretation gate (Python, `scpipe/gates/g4_interpretation.py`)
+### G4: Interpretation gate (Python, `cellwarden/gates/g4_interpretation.py`)
 
 The interpretation agent writes short, **labelled hypotheses** about the DGE results. Every
 statement must cite Open Targets evidence IDs that exist in `opentargets_summary.json` and genes in
 the direction our own DGE found; anything else is rejected in code. Default mode `review`.
 
-### S5: Report and explorer (R + Python, `scpipe/stages/s5_report.py`, `R/stages/s5_export.R`)
+### S5: Report and explorer (R + Python, `cellwarden/stages/s5_report.py`, `R/stages/s5_export.R`)
 
 - `S5/report.html`: one self-contained page (no CDN): ingest, QC (counts, reasons, per sample),
   clustering and UMAP, annotation with evidence, every gate decision, DGE and interpretation.
@@ -310,7 +310,7 @@ flowchart TD
   RV -- request changes --> W
   RV -- "approve, mode auto" --> D["decision.json → run continues"]
   RV -- "escalate, or mode review" --> H["pending.json + report.html<br/>stop with exit code 3"]
-  H -- "scpipe approve" --> D
+  H -- "cellwarden approve" --> D
   PC -- "no LLM key / budget used up" --> F["rules baseline, fallback = true"] --> H
 ```
 
@@ -324,11 +324,11 @@ Each gate writes `gates/Gx/bundle.json`, `proposal.json`, `review.json`, `decisi
 `report.html` (plus `pending.json` while waiting). A stopped run waits for:
 
 ```bash
-scpipe approve --run-dir <run_dir> --stage context-review --by <your name>   # or --from-file decision.json
-scpipe resume  --run-dir <run_dir>
+cellwarden approve --run-dir <run_dir> --stage context-review --by <your name>   # or --from-file decision.json
+cellwarden resume  --run-dir <run_dir>
 ```
 
-**LLM providers** (`python/scpipe/llm/`): set an API key and the agents use it, no config needed.
+**LLM providers** (`python/cellwarden/llm/`): set an API key and the agents use it, no config needed.
 
 | Key set | Provider | Default model |
 |---|---|---|
@@ -337,11 +337,11 @@ scpipe resume  --run-dir <run_dir>
 | `NVIDIA_API_KEY` | `nvidia` (NIM, build.nvidia.com) | `nvidia/nemotron-3-ultra-550b-a55b` |
 
 With several keys set, Claude is used first, then OpenAI, then NVIDIA. Choose explicitly with
-`scpipe run ... --llm nvidia [--llm-model <model>]` or `llm.default.provider` in the config;
+`cellwarden run ... --llm nvidia [--llm-model <model>]` or `llm.default.provider` in the config;
 `--llm none` turns the agents off. Any other OpenAI-style server (vLLM, Ollama, a local NIM) works
 as `provider: openai_compatible` with a `base_url`. Roles can use different providers
 (`llm.roles.reviewer: {provider: openai}`). The choice is recorded as `llm_choice` in
-`config.resolved.yaml` and shown by `scpipe doctor`; with no key the gates run on rules.
+`config.resolved.yaml` and shown by `cellwarden doctor`; with no key the gates run on rules.
 `max_tokens` per role caps each agent's answer (defaults: 2048 for workers, 1024 for the reviewer;
 raise it for a model that reasons before answering). `extra_body` adds fields to each request on
 OpenAI-style endpoints; NVIDIA Nemotron models get `chat_template_kwargs: {enable_thinking: false}`
@@ -362,20 +362,20 @@ Targets. No counts, per-cell rows or barcodes.
 ## 6. Running it
 
 ```bash
-scpipe doctor  --config config.yaml                 # preflight: packages, GPU, LLM key, budget, Open Targets
-scpipe run     --config config.yaml --detach        # run in tmux; survives a dropped SSH session
-scpipe status  --run-dir <run_dir>                  # stage states, timings, peak memory
-scpipe dashboard --run-dir <run_dir> --watch 30     # live dashboard.html
-scpipe approve --run-dir <run_dir> --stage context-review --by me
-scpipe resume  --run-dir <run_dir>                  # continue after a gate, disconnect or kill
-scpipe init-site --write conf/sites/mysite.yaml     # draft a site file for a new machine
+cellwarden doctor  --config config.yaml                 # preflight: packages, GPU, LLM key, budget, Open Targets
+cellwarden run     --config config.yaml --detach        # run in tmux; survives a dropped SSH session
+cellwarden status  --run-dir <run_dir>                  # stage states, timings, peak memory
+cellwarden dashboard --run-dir <run_dir> --watch 30     # live dashboard.html
+cellwarden approve --run-dir <run_dir> --stage context-review --by me
+cellwarden resume  --run-dir <run_dir>                  # continue after a gate, disconnect or kill
+cellwarden init-site --write conf/sites/mysite.yaml     # draft a site file for a new machine
 ```
 
-Useful options: `scpipe run --until S2` (stop after a stage), `--no-gates` (record gates as
+Useful options: `cellwarden run --until S2` (stop after a stage), `--no-gates` (record gates as
 skipped), `--execution slurm` (submit as one job), `--run-dir` (override the config), `--llm` / `--llm-model`
 (agents' provider and model), `--out` / `--name` / `--meta` (runs from data files, section 3).
 
-**The runner** (`python/scpipe/runner.py`) runs each stage as its own process under `nice`, with
+**The runner** (`python/cellwarden/runner.py`) runs each stage as its own process under `nice`, with
 thread, memory and GPU-memory caps passed as environment variables. `state.json` stores each
 stage's status, timings, peak memory and a **fingerprint** of the config keys and input files it
 uses: running again skips finished stages, and changing a setting reruns only the stages that
@@ -386,12 +386,12 @@ depend on it. `dashboard.html` is rewritten after every state change.
 Targets on an internet-connected node).
 
 **Containers:** with `container.image` set (in the site file), every stage runs inside the
-scpipe image, so the host needs only Python and `scpipe`. On Iridis X:
+CellWarden image, so the host needs only Python and `cellwarden`. On Iridis X:
 
 ```bash
 module load apptainer/1.4.0
 export APPTAINER_TMPDIR=/tmp/$USER-apptainer
-apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-scpipe/scpipe.sif scpipe run --config config.yaml
+apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-cellwarden/cellwarden.sif cellwarden run --config config.yaml
 ```
 
 ---
@@ -421,7 +421,7 @@ apptainer exec --unsquash --nv /iridisfs/aihackathon/aazd1f17-scpipe/scpipe.sif 
 
 | Key | Default | Options / meaning |
 |---|---|---|
-| `project` | `scpipe` | name shown in the report |
+| `project` | `cellwarden` | name shown in the report |
 | `run_dir` | — | where every output goes (required with `--config`; `--out` for data-file runs) |
 | `ingest.empty_drops` | `auto` | empty-droplet filtering of raw 10x matrices: `auto`, `on`, `off` |
 | `seed` | `42` | all random steps |
@@ -477,7 +477,7 @@ rapids-singlecell runs out of memory. Agreement with Seurat: PC similarity ≥ 0
 ## 10. Status and known gaps (October 2026)
 
 - **Tested end to end:** the full pipeline S0 → S5 through all four gates (mock LLM, offline Open
-  Targets) passes in the scpipe image on an Iridis L4 node; Python ≈500 and R ≈1,500 unit tests.
+  Targets) passes in the CellWarden image on an Iridis L4 node; Python ≈500 and R ≈1,500 unit tests.
 - **scfastR on the GPU inside the image:** the R package does not find the image's CUDA libraries
   yet, so on a GPU plan S2 uses `gpu_exchange` (rapids-singlecell) instead of `gpu_scfast`.
   Results are correct, only slower. The Python `scfast` GPU path works.
@@ -495,7 +495,7 @@ rapids-singlecell runs out of memory. Agreement with Seurat: PC similarity ≥ 0
 ```
 R/stages/            S0, S1a, S2, S3 evidence, S4 DGE, S5 export; gene lists and signature sets
 R/exchange/          Seurat ⇄ AnnData exchange (R side)
-python/scpipe/       runner, config, site, qc rules engine, exchange, gpu_core, dashboard
+python/cellwarden/       runner, config, site, qc rules engine, exchange, gpu_core, dashboard
   stages/            S1b, S1c, S3, S4, S5, CellTypist
   gates/ agents/     G1–G4 protocol and agents
   llm/ opentargets/  LLM providers + budget ledger; Open Targets client
@@ -503,7 +503,7 @@ python/scpipe/       runner, config, site, qc rules engine, exchange, gpu_core, 
 rust/                scfast-core, scfast-py, scfast-r
 config/examples/     config.yaml, samples.csv, qc_policy.yaml
 conf/sites/          site files (iridisx, workstation, docker); conf/templates/ scheduler scripts
-containers/          Dockerfile, scpipe-build.def (Apptainer), scpipe.def, install_r_packages.R, smoke_test.sh
+containers/          Dockerfile, cellwarden-build.def (Apptainer), cellwarden.def, install_r_packages.R, smoke_test.sh
 bench/               benchmarks against Seurat, Scanpy, rapids-singlecell; Iridis wrappers
 tests/               unit tests, fixtures, integration (round trip, stages, full pipeline)
 docs/                this page, ARCHITECTURE, DESIGN, INSTALL, USER_GUIDE, specs

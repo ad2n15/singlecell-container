@@ -1,6 +1,6 @@
-# scpipe stage S4: differential expression (docs/agents-spec.md section 6,
+# cellwarden stage S4: differential expression (docs/agents-spec.md section 6,
 # DESIGN.md 6.1). The Open Targets half of S4 is Python
-# (python/scpipe/stages/s4_opentargets.py) and runs after this step.
+# (python/cellwarden/stages/s4_opentargets.py) and runs after this step.
 #
 # Two engines (dge.method):
 # * findmarkers (default): Seurat::FindMarkers between two sets of cells, with
@@ -268,11 +268,11 @@ s4_pseudobulk <- function(obj, group, sample, assay = "RNA") {
   pb_of_cell <- units$pb_id[idx]
   agg <- NULL; method <- "Seurat::AggregateExpression"
   if (nrow(units) > 1) {
-    obj$scpipe_pb <- factor(pb_of_cell, levels = units$pb_id)
+    obj$cellwarden_pb <- factor(pb_of_cell, levels = units$pb_id)
     agg <- tryCatch(suppressMessages(
       # AggregateExpression always sums the counts layer; passing layer= is a
       # duplicate-argument error in Seurat 5.0.x.
-      Seurat::AggregateExpression(obj, assays = assay, group.by = "scpipe_pb", verbose = FALSE)[[assay]]),
+      Seurat::AggregateExpression(obj, assays = assay, group.by = "cellwarden_pb", verbose = FALSE)[[assay]]),
       error = function(e) { scp_warn_log("AggregateExpression failed (", conditionMessage(e), "); summing counts directly"); NULL })
     if (!is.null(agg) && (!all(units$pb_id %in% colnames(agg)) || nrow(agg) != nrow(obj[[assay]]))) {
       scp_warn_log("AggregateExpression returned unexpected dimensions; summing counts directly")
@@ -490,9 +490,9 @@ s4_findmarkers_group <- function(obj, side, test, covariates, d, seed) {
 
 .s4_col <- function(x) if (identical(x, "cluster")) "seurat_clusters" else x
 
-#' Parallel FindMarkers workers: SCPIPE_THREADS (the runner's resources.threads), at least 1.
+#' Parallel FindMarkers workers: CELLWARDEN_THREADS (the runner's resources.threads), at least 1.
 s4_workers <- function() {
-  n <- suppressWarnings(as.integer(Sys.getenv("SCPIPE_THREADS", "1")))
+  n <- suppressWarnings(as.integer(Sys.getenv("CELLWARDEN_THREADS", "1")))
   if (is.na(n) || n < 1) 1L else n
 }
 

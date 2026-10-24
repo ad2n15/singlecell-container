@@ -26,7 +26,7 @@ UMAP (uwot and rapids are already fast), marker testing (presto is already fast)
 ## 2. Architecture
 
 ```
-          Seurat (R)                                scpipe (Python)
+          Seurat (R)                                cellwarden (Python)
               │ extendr                                 │ PyO3 / maturin
               ▼                                         ▼
   ┌──────────────────────────── scfast (Rust) ────────────────────────────┐

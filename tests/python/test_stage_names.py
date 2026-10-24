@@ -2,10 +2,10 @@
 
 import pytest
 
-from scpipe import runner as R
-from scpipe import stage_names as N
-from scpipe.config import ConfigError
-from scpipe.gates.protocol import GateError, load_gate
+from cellwarden import runner as R
+from cellwarden import stage_names as N
+from cellwarden.config import ConfigError
+from cellwarden.gates.protocol import GateError, load_gate
 
 
 def test_every_stage_has_a_unique_name_and_title():

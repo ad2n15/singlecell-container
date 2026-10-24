@@ -1,4 +1,4 @@
-# scpipe stage S3 (R half): per-cluster evidence (docs/agents-spec.md section 4).
+# cellwarden stage S3 (R half): per-cluster evidence (docs/agents-spec.md section 4).
 #
 # Input:   S2/object.rds (or .qs2), clusters in `seurat_clusters`
 #          config/samples.csv (sample sheet; only for the metadata hint)

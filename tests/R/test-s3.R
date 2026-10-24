@@ -6,7 +6,7 @@
 # A run directory is built once from tests/fixtures/stage_inputs (donor_A as a
 # 10x mtx folder, donor_B as .h5ad; planted types T, B, Mono, NK, Platelet in
 # truth.tsv) by running S0 and S2 through the stage functions (every cell
-# kept; CPU plan forced with SCPIPE_PLAN_JSON), then run_s3 on it.
+# kept; CPU plan forced with CELLWARDEN_PLAN_JSON), then run_s3 on it.
 
 suppressPackageStartupMessages({
   library(testthat)
@@ -33,7 +33,7 @@ TRUTH <- read.delim(file.path(INPUTS, "truth.tsv"), colClasses = "character", qu
 quiet <- function(expr) { out <- NULL; utils::capture.output(out <- force(expr)); out }
 
 new_run <- function(tag, ...) {
-  rd <- file.path(tempdir(), sprintf("scpipe-s3-%s-%s", tag, basename(tempfile(""))))
+  rd <- file.path(tempdir(), sprintf("cellwarden-s3-%s-%s", tag, basename(tempfile(""))))
   dir.create(file.path(rd, "config"), recursive = TRUE)
   samples <- data.frame(sample_id = c("donor_A", "donor_B"),
                         path = file.path(INPUTS, c("donor_A", "donor_B.h5ad")),
@@ -65,7 +65,7 @@ build_s2 <- function(rd) {
                   reasons = "", policy_hash = "p", decided_by = "rules")
   dir.create(file.path(rd, "S1"), showWarnings = FALSE)
   scp_write_tsv_gz(d, file.path(rd, "S1", "qc_decisions.tsv.gz"))
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
   quiet(run_s2(cfg, REPO))
   rd
 }

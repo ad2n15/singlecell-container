@@ -1,7 +1,7 @@
 # singlecell: agentic Seurat pipeline — design spec
 
 Status: **implemented** (as-built view in [`ARCHITECTURE.md`](ARCHITECTURE.md)) · Version 0.5 · 17 Oct 2026
-Changes in 0.5: stages are run by the built-in `scpipe` runner (Python, `state.json` checkpoints) instead of Nextflow; no hosted CI (tests run locally or on the HPC); stages S0–S2 are implemented (see `docs/stages-spec.md`).
+Changes in 0.5: stages are run by the built-in `cellwarden` runner (Python, `state.json` checkpoints) instead of Nextflow; no hosted CI (tests run locally or on the HPC); stages S0–S2 are implemented (see `docs/stages-spec.md`).
 Changes in 0.4: runs directly on the Iridis X L4 **login node** (the only node with internet), without a SLURM job; accepts any dataset format and size; pluggable LLM providers with Claude Haiku 4.5 as default and a hard £30 budget guard.
 Changes in 0.3: everything runs on **one internet-connected node** (first target: an Iridis X L4 node). No node-to-node hand-offs. CPU ⇄ GPU switching within the node is kept.
 Changes in 0.2: first target site is University of Southampton Iridis X (SLURM + Apptainer); portability to any HPC.
@@ -53,9 +53,9 @@ Safeguards built in for login-node use:
 |---|---|
 | Resource caps | Thread, RAM and GPU-memory limits set in the site file and enforced at start-up (`setThreads()`, BLAS/OpenMP threads, RAPIDS memory pool size) |
 | Polite scheduling | Runs under `nice`, so interactive users keep priority |
-| Survives disconnects | Runs inside `tmux` or `screen` (`scpipe run --detach`), so closing the SSH session doesn't stop it |
+| Survives disconnects | Runs inside `tmux` or `screen` (`cellwarden run --detach`), so closing the SSH session doesn't stop it |
 | Shares the GPU | Checks free GPU memory at start and before each GPU step; waits or falls back to CPU rather than failing if another user is on the GPU |
-| Survives being killed | Checkpoint after every stage and every agent decision; `scpipe resume` continues from the last one |
+| Survives being killed | Checkpoint after every stage and every agent decision; `cellwarden resume` continues from the last one |
 
 **Fallback if login-node compute isn't permitted:** set `execution: split`. Heavy stages are submitted as SLURM jobs to an offline GPU partition, while agents and Open Targets stay on the login node, with gate bundles on shared storage. This is a configuration switch, not a different pipeline.
 
@@ -197,7 +197,7 @@ A separate agent with a separate system prompt and, where configured, a differen
 ### 4.6 Human review
 
 - **Review bundle per gate:** an HTML report (plots, tables, worker rationale, reviewer verdict) and an editable decisions file.
-- **To approve:** `scpipe approve --stage qc`, or edit the decisions CSV and run `scpipe approve --stage qc --from-file edited.csv`. Edits are validated against policy before acceptance.
+- **To approve:** `cellwarden approve --stage qc`, or edit the decisions CSV and run `cellwarden approve --stage qc --from-file edited.csv`. Edits are validated against policy before acceptance.
 - **Recorded:** who approved, when, and what changed relative to the agent proposal.
 - **Later option:** a web review page with approve/reject buttons, built on the same bundle.
 
@@ -227,7 +227,7 @@ llm:
 ```
 
 - **`openai_compatible`** covers most other hosted models and local servers (for example vLLM or Ollama), so sites without a Claude account can still run the agents.
-- **Capability check:** `scpipe doctor` runs a short tool-use and structured-output test against the configured model, since agents depend on both.
+- **Capability check:** `cellwarden doctor` runs a short tool-use and structured-output test against the configured model, since agents depend on both.
 - **Model choice:** Haiku 4.5 suits these well-structured tasks. A stronger model can be set for the context or reviewer role if a future budget allows.
 
 **Budget guard.** A local cost ledger records token use and cost for every call, using the provider's published prices.
@@ -280,7 +280,7 @@ The largest GPU object is the scaled variable-gene matrix: 2,000 genes × 4 byte
 | Roughly 1–3M | RAPIDS managed memory, which spills from GPU to system RAM (slower but works); or more GPUs on the same node via rapids-singlecell's Dask mode |
 | Beyond that | Seurat sketching (about 50k–100k representative cells on the GPU, then projected to all cells), or the CPU path with BPCells |
 
-`scpipe doctor` reports the GPU's total and currently free memory. The pipeline picks the plan from the cell count after QC and the memory free at that moment, which matters on a shared login node. The chosen plan is recorded in the run summary.
+`cellwarden doctor` reports the GPU's total and currently free memory. The pipeline picks the plan from the cell count after QC and the memory free at that moment, which matters on a shared login node. The chosen plan is recorded in the run summary.
 
 ## 6. DGE and Open Targets
 
@@ -351,11 +351,11 @@ First target: **the Iridis X L4 login node, run directly** (Apptainer, no schedu
 | `slurm` (also `pbs`, `lsf`, `sge`) | One scheduler job on a compute node that has internet | A site's compute nodes have internet |
 | `split` | Heavy stages as offline scheduler jobs; agents and Open Targets on the internet node | A site doesn't allow compute on its internet node |
 
-In every mode the built-in `scpipe` runner executes the stages one after another and records each in `state.json` with a fingerprint of its inputs and settings, so a rerun skips finished stages. At a gate the run exits cleanly, and `scpipe approve` resumes it.
+In every mode the built-in `cellwarden` runner executes the stages one after another and records each in `state.json` with a fingerprint of its inputs and settings, so a rerun skips finished stages. At a gate the run exits cleanly, and `cellwarden approve` resumes it.
 
 ### 7.2 Site profile
 
-A new site is one small YAML file, `conf/sites/<site>.yaml`, that supplies defaults for the `execution`, `resources` and `container` sections of `config.yaml`. Until `scpipe init-site` exists (build step 7), the same keys are set directly in `config.yaml`, as in `config/examples/config.yaml`. A sketch for Iridis X (limits to be agreed with the Iridis team):
+A new site is one small YAML file, `conf/sites/<site>.yaml`, that supplies defaults for the `execution`, `resources` and `container` sections of `config.yaml`. Until `cellwarden init-site` exists (build step 7), the same keys are set directly in `config.yaml`, as in `config/examples/config.yaml`. A sketch for Iridis X (limits to be agreed with the Iridis team):
 
 ```yaml
 site: iridisx
@@ -365,7 +365,7 @@ resources:
   max_memory_gb: 64
   gpu_mem_cap_gb: 20         # leave headroom on the shared L4
   nice: 10
-scratch: /scratch/$USER/scpipe
+scratch: /scratch/$USER/cellwarden
 container:
   runtime: apptainer         # apptainer | singularity | docker | none
   options: ["--nv"]
@@ -375,16 +375,16 @@ The same pipeline runs at any site by pointing `config.yaml` at a different site
 
 ### 7.3 Making it easy for any user
 
-The `scpipe` command is the only thing users run. It drives the stages itself and submits to the scheduler when the site needs it:
+The `cellwarden` command is the only thing users run. It drives the stages itself and submits to the scheduler when the site needs it:
 
 | Command | What it does |
 |---|---|
-| `scpipe init-site` | Detects the scheduler, partitions, GPU type and memory, container runtime and internet access, then drafts the site file for the user to confirm |
-| `scpipe doctor` | Preflight check: GPU, driver vs CUDA version and free GPU memory, container runtime, internet to the LLM provider and Open Targets, API key present, an LLM tool-use test, remaining budget, write access to scratch |
-| `scpipe run --config config.yaml [--detach]` | Starts the run in the site's execution mode; `--detach` runs it inside `tmux` |
-| `scpipe resume` | Continues from the last checkpoint after a disconnect, kill or gate |
-| `scpipe status` | Current stage, gate status, LLM spend so far, last log lines |
-| `scpipe approve --stage <gate>` | Human approval; submits the resume job |
+| `cellwarden init-site` | Detects the scheduler, partitions, GPU type and memory, container runtime and internet access, then drafts the site file for the user to confirm |
+| `cellwarden doctor` | Preflight check: GPU, driver vs CUDA version and free GPU memory, container runtime, internet to the LLM provider and Open Targets, API key present, an LLM tool-use test, remaining budget, write access to scratch |
+| `cellwarden run --config config.yaml [--detach]` | Starts the run in the site's execution mode; `--detach` runs it inside `tmux` |
+| `cellwarden resume` | Continues from the last checkpoint after a disconnect, kill or gate |
+| `cellwarden status` | Current stage, gate status, LLM spend so far, last log lines |
+| `cellwarden approve --stage <gate>` | Human approval; submits the resume job |
 
 ### 7.4 Degrading gracefully
 
@@ -400,7 +400,7 @@ The `scpipe` command is the only thing users run. It drives the stages itself an
 
 - **One image**, published to a public registry (GHCR) and pulled as a `.sif`. It contains R 4.6, Seurat 5.6, BPCells, presto, DESeq2, anndataR, reticulate, rapids-singlecell (CUDA 12), CellTypist, SingleR, the LLM provider adapters (Anthropic SDK and an OpenAI-compatible client) and the Open Targets client.
 - **Versioned tags and digests** pinned in each pipeline release, so every site runs identical software.
-- **Built on a CUDA 12 base**, run with `--nv`. `scpipe doctor` checks that the node's driver supports it.
+- **Built on a CUDA 12 base**, run with `--nv`. `cellwarden doctor` checks that the node's driver supports it.
 
 ### 7.6 Storage
 
@@ -424,7 +424,7 @@ R/                 Seurat stages, exchange format (R side), plotting theme
 python/            GPU steps, exchange format (Python side)
 agents/            QC, context, annotation, interpretation, reviewer; tool definitions; prompts
 opentargets/       GraphQL client, queries, cache
-scpipe/ (python/)  runner, config, resources, QC rules engine, gate logic
+cellwarden/ (python/)  runner, config, resources, QC rules engine, gate logic
 conf/sites/        one site file per HPC (iridisx.yaml first), plus workstation and docker examples
 containers/        recipe for the single image
 tests/             exchange round-trip tests, policy tests, PBMC smoke test
@@ -439,7 +439,7 @@ docs/DESIGN.md     this document
 4. **Evidence (S3), context agent, annotation agent.**
 5. **DGE (S4), Open Targets, interpretation agent.**
 6. **Final report, explorer, local test suite.**
-7. **Portability:** `scpipe init-site` and `doctor`, plus a second site profile tested to prove the site-file approach.
+7. **Portability:** `cellwarden init-site` and `doctor`, plus a second site profile tested to prove the site-file approach.
 
 ## 10. Open questions
 
@@ -465,6 +465,6 @@ Still open:
 | Node or partition access changes | Site file is the only place node details live; `init-site` regenerates it |
 | Login-node compute not permitted, or processes killed by a watchdog | Confirm policy first; resource caps, `nice` and checkpoints; `split` mode as fallback |
 | LLM spend exceeds the £30 limit | Ledger-based hard stop before any call that would exceed it; rules-only fallback with a human gate |
-| A future user's chosen LLM handles tools poorly | `scpipe doctor` tool-use test; rules and reviewer still enforce policy in code |
+| A future user's chosen LLM handles tools poorly | `cellwarden doctor` tool-use test; rules and reviewer still enforce policy in code |
 | Data leaves the cluster | Agents receive only aggregated tables and gene names; no counts or sample metadata beyond IDs |
 | Open Targets schema changes | Queries pinned per release; cached responses; schema check in the local test suite |

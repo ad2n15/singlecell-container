@@ -7,9 +7,9 @@ import json
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import runner as R
-from scpipe.llm import provider as P
+from cellwarden import config as C
+from cellwarden import runner as R
+from cellwarden.llm import provider as P
 
 KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY")
 
@@ -112,7 +112,7 @@ def test_retired_model_error_says_why(no_keys, monkeypatch):
 
 
 def test_role_max_tokens_reaches_the_agent(no_keys):
-    from scpipe.agents.reviewer import Reviewer
+    from cellwarden.agents.reviewer import Reviewer
 
     llm = {"default": {"provider": "mock", "model": "mock-model"}, "roles": {"reviewer": {"max_tokens": 4096}}}
     assert Reviewer(P.get_provider(llm, "reviewer")).max_tokens == 4096

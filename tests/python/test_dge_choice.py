@@ -6,10 +6,10 @@ import sys
 
 import yaml
 
-from scpipe import config as C
-from scpipe import dge_choice as DC
-from scpipe import runner as R
-from scpipe import wizard as W
+from cellwarden import config as C
+from cellwarden import dge_choice as DC
+from cellwarden import runner as R
+from cellwarden import wizard as W
 
 
 def scripted(answers):
@@ -48,7 +48,7 @@ def project(tmp_path, dge=None):
 
 
 def s4_stage():
-    code = "import os, yaml; d = yaml.safe_load(open(os.environ['SCPIPE_CONFIG']))['dge']; print('S4 contrasts', len(d['contrasts']))"
+    code = "import os, yaml; d = yaml.safe_load(open(os.environ['CELLWARDEN_CONFIG']))['dge']; print('S4 contrasts', len(d['contrasts']))"
     return [R.Stage("S4", "python", lambda ctx: [sys.executable, "-c", code])]
 
 

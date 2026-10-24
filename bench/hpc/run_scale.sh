@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scale runs on the HPC (docs/scfast-integration.md, Phase 8): every engine variant at every
-# size, each as a real pipeline run `scpipe run --until S2` (S0 ingest, S1 QC, S2 core).
+# size, each as a real pipeline run `cellwarden run --until S2` (S0 ingest, S1 QC, S2 core).
 #
 #   bash bench/hpc/run_scale.sh --data bench/hpc/data --sizes 50000,100000,200000,500000 \
 #       --engines seurat-cpu,scfast-cpu,scfast-cuda,rapids --threads 8 [--out bench/results/scale]
@@ -11,7 +11,7 @@
 #   scfast-cuda  engine: scfast  device: gpu  engine_gpu: scfast    scfastR in process, CUDA
 #   rapids       engine: seurat  device: gpu  engine_gpu: rapids    rapids-singlecell via the exchange
 #
-# Per run, under <out>/n<N>/<engine>/: config.yaml + samples.csv, run/ (the scpipe run dir),
+# Per run, under <out>/n<N>/<engine>/: config.yaml + samples.csv, run/ (the cellwarden run dir),
 # time.log (/usr/bin/time -v), gpu_mem.log (nvidia-smi samples, GPU variants), clusters.tsv.gz
 # (S2 clusters, for ARI). One JSON line per run is appended to <out>/runs.jsonl; summarise.py
 # turns that file into the table and the adoption verdicts. A variant that fails or times out at
@@ -53,7 +53,7 @@ TIME_BIN="$(command -v /usr/bin/time || true)"
 HAVE_SMI=0; command -v nvidia-smi >/dev/null 2>&1 && HAVE_SMI=1
 
 echo "scale runs: data=$DATA out=$OUT sizes=$SIZES engines=$ENGINES threads=$THREADS node=$NODE commit=$COMMIT"
-echo "environment:"; "$PYTHON" -m scpipe doctor 2>&1 | sed 's/^/  /' || true
+echo "environment:"; "$PYTHON" -m cellwarden doctor 2>&1 | sed 's/^/  /' || true
 [[ $HAVE_SMI -eq 1 ]] && nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed 's/^/  gpu: /'
 echo
 
@@ -133,9 +133,9 @@ for n in "${SIZE_LIST[@]}"; do
     set +e
     if [[ -n "$TIME_BIN" ]]; then
       timeout "$TIMEOUT" "$TIME_BIN" -v -o "$dir/time.log" \
-        "$PYTHON" -m scpipe run --config "$dir/config.yaml" --run-dir "$dir/run" --until S2 > "$dir/stdout.log" 2>&1
+        "$PYTHON" -m cellwarden run --config "$dir/config.yaml" --run-dir "$dir/run" --until S2 > "$dir/stdout.log" 2>&1
     else
-      timeout "$TIMEOUT" "$PYTHON" -m scpipe run --config "$dir/config.yaml" --run-dir "$dir/run" --until S2 > "$dir/stdout.log" 2>&1
+      timeout "$TIMEOUT" "$PYTHON" -m cellwarden run --config "$dir/config.yaml" --run-dir "$dir/run" --until S2 > "$dir/stdout.log" 2>&1
     fi
     rc=$?
     set -e

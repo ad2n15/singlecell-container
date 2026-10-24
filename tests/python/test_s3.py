@@ -1,12 +1,12 @@
 """End-to-end tests for stage S3 on the real fixture (docs/agents-spec.md sections 4-5).
 
-Runs ``scpipe run --until S3`` once (module scope) on tests/fixtures/stage_inputs
+Runs ``cellwarden run --until S3`` once (module scope) on tests/fixtures/stage_inputs
 (S0-S2 take about a minute; S3 a few seconds) and checks the S3 files, the
 bundle (no per-cell data), the CellTypist skip note, the consensus against the
 planted cell types (purity >= 0.9 clusters), idempotence of the consensus step
 and runner skipping. Skipped when Rscript/Seurat or scanpy are missing.
 
-Set ``SCPIPE_S3_TEST_RUN=/path/to/run`` to reuse a finished run directory
+Set ``CELLWARDEN_S3_TEST_RUN=/path/to/run`` to reuse a finished run directory
 (must contain S2/object.rds) instead of running S0-S2 again.
 
 Run from the repo root: PYTHONPATH=python python3 -m pytest -q tests/python/test_s3.py
@@ -27,14 +27,14 @@ import pandas as pd
 import pytest
 import yaml
 
-from scpipe import runner as R
-from scpipe.annotation import consensus as cons
-from scpipe.stages import s3_celltypist, s3_consensus
+from cellwarden import runner as R
+from cellwarden.annotation import consensus as cons
+from cellwarden.stages import s3_celltypist, s3_consensus
 
 REPO = Path(__file__).resolve().parents[2]
 INPUTS = REPO / "tests" / "fixtures" / "stage_inputs"
 CONF = REPO / "tests" / "integration" / "stage_configs"
-RSCRIPT = os.environ.get("SCPIPE_RSCRIPT", "Rscript")
+RSCRIPT = os.environ.get("CELLWARDEN_RSCRIPT", "Rscript")
 HAVE_CELLTYPIST = importlib.util.find_spec("celltypist") is not None
 
 PLANTED = {"T": "T cell", "B": "B cell", "Mono": "monocyte", "NK": "NK cell", "Platelet": "platelet"}
@@ -71,20 +71,20 @@ def _write_conf(work: Path) -> Path:
     return conf / "cpu.yaml"
 
 
-def _scpipe(*args: str) -> subprocess.CompletedProcess:
+def _cellwarden(*args: str) -> subprocess.CompletedProcess:
     env = dict(os.environ, PYTHONPATH=str(REPO / "python") + os.pathsep + os.environ.get("PYTHONPATH", ""))
-    return subprocess.run([sys.executable, "-m", "scpipe", *args], capture_output=True, text=True, env=env)
+    return subprocess.run([sys.executable, "-m", "cellwarden", *args], capture_output=True, text=True, env=env)
 
 
 def _run_until_s3(cfg: Path, rd: Path) -> subprocess.CompletedProcess:
     # --no-gates: this is an S3 test; the gates (G1 before S2) are covered by their own tests and would
     # stop the run (exit 3, human review) when no LLM is configured.
-    return _scpipe("run", "--config", str(cfg), "--run-dir", str(rd), "--until", "S3", "--no-gates")
+    return _cellwarden("run", "--config", str(cfg), "--run-dir", str(rd), "--until", "S3", "--no-gates")
 
 
 @pytest.fixture(scope="module")
 def run_dir(tmp_path_factory) -> Path:
-    reuse = os.environ.get("SCPIPE_S3_TEST_RUN")
+    reuse = os.environ.get("CELLWARDEN_S3_TEST_RUN")
     if reuse and (Path(reuse) / "S2" / "object.rds").exists():
         rd = Path(reuse)
         cfg = Path(yaml.safe_load((rd / "config" / "config.resolved.yaml").read_text())["config_file"])
@@ -95,7 +95,7 @@ def run_dir(tmp_path_factory) -> Path:
     r = _run_until_s3(cfg, rd)
     if r.returncode != 0:
         logs = "\n".join(f"--- {p.name}\n" + p.read_text()[-3000:] for p in sorted((rd / "logs").glob("*.log")))
-        pytest.fail(f"scpipe run --until S3 failed:\n{r.stdout}\n{r.stderr}\n{logs}")
+        pytest.fail(f"cellwarden run --until S3 failed:\n{r.stdout}\n{r.stderr}\n{logs}")
     return rd
 
 

@@ -1,7 +1,7 @@
-# scpipe run configuration: stages S0-S2 (docs/stages-spec.md, section 4).
+# cellwarden run configuration: stages S0-S2 (docs/stages-spec.md, section 4).
 #
-#   scpipe doctor --config config/examples/config.yaml     # preflight check
-#   scpipe run    --config config/examples/config.yaml --detach
+#   cellwarden doctor --config config/examples/config.yaml     # preflight check
+#   cellwarden run    --config config/examples/config.yaml --detach
 #
 # Relative paths in this file are resolved against the directory that holds
 # it, so samples.csv and qc_policy.yaml below are the files next to it.
@@ -14,8 +14,8 @@ project: my_study
 
 # Where everything for this run is written: state.json, logs/, S0/, S1/, S2/.
 # Use scratch, not home or project storage. $USER is expanded.
-# Overridden by `scpipe run --run-dir DIR`.
-run_dir: /scratch/$USER/scpipe/my_study
+# Overridden by `cellwarden run --run-dir DIR`.
+run_dir: /scratch/$USER/cellwarden/my_study
 
 # One seed for every random step (doublet simulation, PCA, Leiden, UMAP).
 seed: 42
@@ -28,8 +28,8 @@ qc_policy: qc_policy.yaml       # QC rules for S1c
 object_format: rds              # rds | qs2
 
 # Resource caps, applied to every stage through environment variables
-# (OMP/BLAS/NUMBA threads, SCPIPE_THREADS, SCPIPE_MAX_MEMORY_GB,
-# SCPIPE_GPU_MEM_CAP_GB) and `nice`. The defaults below suit a shared login
+# (OMP/BLAS/NUMBA threads, CELLWARDEN_THREADS, CELLWARDEN_MAX_MEMORY_GB,
+# CELLWARDEN_GPU_MEM_CAP_GB) and `nice`. The defaults below suit a shared login
 # node such as the Iridis X L4 node (docs/DESIGN.md section 2.1). On a
 # workstation of your own you can raise them and set nice: 0.
 resources:
@@ -64,7 +64,7 @@ device: auto                    # auto | cpu | gpu
 #   seurat: previous behaviour (Seurat on CPU; exchange + rapids/scanpy on GPU)
 #   auto:   scfast if scfastR is installed and the device plan is CPU (or, on a GPU
 #           plan, engine_gpu resolves to scfast), else seurat
-#           (`scpipe doctor` shows what auto would pick here)
+#           (`cellwarden doctor` shows what auto would pick here)
 engine: auto                    # auto | scfast | seurat
 
 # Which implementation runs on a GPU plan (device: gpu, or auto with a usable GPU).
@@ -72,7 +72,7 @@ engine: auto                    # auto | scfast | seurat
 #           visible device; UMAP stays on the CPU); error otherwise
 #   rapids: rapids-singlecell through the exchange format (previous behaviour)
 #   auto:   scfast when scfastR reports cuda_available, else rapids
-#           (`scpipe doctor` shows "scfastR cuda built" / "CUDA device visible")
+#           (`cellwarden doctor` shows "scfastR cuda built" / "CUDA device visible")
 engine_gpu: auto                # auto | scfast | rapids
 
 integration:
@@ -112,7 +112,7 @@ llm:
                                 # interpretation_worker, reviewer (e.g. a stronger model for the reviewer)
   budget:
     per_run_limit: 5            # GBP; a call that would cross a limit is not made
-    total_limit: 30             # GBP across all runs (ledger in ~/.scpipe/ledger.json)
+    total_limit: 30             # GBP across all runs (ledger in ~/.cellwarden/ledger.json)
     usd_to_gbp: 0.78
   replay: false                 # true: reuse logged outputs for identical prompts (no calls, no cost)
 

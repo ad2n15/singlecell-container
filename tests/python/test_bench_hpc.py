@@ -18,20 +18,20 @@ import summarise  # noqa: E402
 
 
 def test_make_scale_inputs_refuses_large_sizes_without_env(tmp_path, monkeypatch):
-    monkeypatch.delenv("SCPIPE_ALLOW_LARGE", raising=False)
-    with pytest.raises(msi.RefusedError, match="SCPIPE_ALLOW_LARGE=1"):
+    monkeypatch.delenv("CELLWARDEN_ALLOW_LARGE", raising=False)
+    with pytest.raises(msi.RefusedError, match="CELLWARDEN_ALLOW_LARGE=1"):
         msi.check_allowed([2000, 50_000])
     msi.check_allowed([2000, 5000])  # at the limit is fine
-    msi.check_allowed([50_000], env={"SCPIPE_ALLOW_LARGE": "1"})
+    msi.check_allowed([50_000], env={"CELLWARDEN_ALLOW_LARGE": "1"})
     with pytest.raises(msi.RefusedError):
-        msi.check_allowed([50_000], env={"SCPIPE_ALLOW_LARGE": "0"})
+        msi.check_allowed([50_000], env={"CELLWARDEN_ALLOW_LARGE": "0"})
     # through main(): exit 2, nothing written
     assert msi.main(["--sizes", "50000", "--out", str(tmp_path / "x")]) == 2
     assert not (tmp_path / "x").exists()
     # and as a script, the documented sizes are refused too
     proc = subprocess.run([sys.executable, str(HPC / "make_scale_inputs.py"), "--out", str(tmp_path / "y")],
-                          capture_output=True, text=True, env={**os.environ, "SCPIPE_ALLOW_LARGE": ""})
-    assert proc.returncode == 2 and "SCPIPE_ALLOW_LARGE=1" in proc.stderr
+                          capture_output=True, text=True, env={**os.environ, "CELLWARDEN_ALLOW_LARGE": ""})
+    assert proc.returncode == 2 and "CELLWARDEN_ALLOW_LARGE=1" in proc.stderr
     assert not (tmp_path / "y").exists()
     with pytest.raises(ValueError):
         msi.parse_sizes("10")
@@ -50,8 +50,8 @@ def test_make_scale_inputs_small_size_writes_a_complete_input(tmp_path):
     assert "syn,sample.h5,10x_h5" in (d / "samples.csv").read_text()
     man = json.loads((out / "manifest.json").read_text())
     assert man["datasets"][0]["cells"] == 300 and set(man["datasets"][0]["files"]) == {"sample.h5", "truth.tsv", "samples.csv"}
-    # the sample sheet validates as a scpipe config input
-    from scpipe import config as C
+    # the sample sheet validates as a cellwarden config input
+    from cellwarden import config as C
 
     (d / "config.yaml").write_text(f"project: t\nrun_dir: {tmp_path / 'run'}\nsamples: samples.csv\n")
     cfg = C.load_config(d / "config.yaml")

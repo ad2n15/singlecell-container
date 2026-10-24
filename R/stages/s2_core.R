@@ -1,12 +1,12 @@
-# scpipe stage S2: core processing (docs/stages-spec.md section 3.5).
+# cellwarden stage S2: core processing (docs/stages-spec.md section 3.5).
 #
 # Inputs:  S0/object.rds (or .qs2), S1/qc_decisions.tsv.gz
 # Outputs: S2/object.rds (filtered, normalised, HVGs, reductions, graphs, clusters)
 #          S2/exchange/slim.h5ad + S2/exchange/results.h5ad (GPU path only)
 #          S2/summary.json
 #
-# Device / memory plan: `python -m scpipe.resources choose-plan` (spec section 5)
-# prints {"device", "plan", "reason"}. SCPIPE_PLAN_JSON (a JSON string, or a
+# Device / memory plan: `python -m cellwarden.resources choose-plan` (spec section 5)
+# prints {"device", "plan", "reason"}. CELLWARDEN_PLAN_JSON (a JSON string, or a
 # path to a JSON file) replaces that call; it is a test hook.
 #
 # Leiden: Seurat >= 5.1 runs FindClusters(algorithm = 4) through leidenbase.
@@ -26,7 +26,7 @@
 # --------------------------------------------------------------------------
 
 s2_python <- function() {
-  p <- Sys.getenv("SCPIPE_PYTHON", "")
+  p <- Sys.getenv("CELLWARDEN_PYTHON", "")
   if (nzchar(p)) p else "python3"
 }
 
@@ -84,35 +84,35 @@ s2_python_has <- function(repo, module) {
 }
 
 s2_choose_plan <- function(cfg, repo, n_cells, n_hvg) {
-  hook <- Sys.getenv("SCPIPE_PLAN_JSON", "")
+  hook <- Sys.getenv("CELLWARDEN_PLAN_JSON", "")
   if (nzchar(hook)) {
     txt <- if (file.exists(hook)) paste(readLines(hook, warn = FALSE), collapse = "\n") else hook
     p <- tryCatch(jsonlite::fromJSON(txt, simplifyVector = TRUE),
-                  error = function(e) scp_stop("SCPIPE_PLAN_JSON is not valid JSON: ", conditionMessage(e)))
-    return(.s2_check_plan(p, "SCPIPE_PLAN_JSON"))
+                  error = function(e) scp_stop("CELLWARDEN_PLAN_JSON is not valid JSON: ", conditionMessage(e)))
+    return(.s2_check_plan(p, "CELLWARDEN_PLAN_JSON"))
   }
   device <- cfg$device
   if (identical(cfg$normalization, "sct")) {
     if (device == "gpu") scp_stop("normalization: sct runs on the CPU only; set device: cpu or auto")
     return(list(device = "cpu", plan = "cpu", reason = "normalization sct is CPU only", source = "S2"))
   }
-  cap <- suppressWarnings(as.numeric(Sys.getenv("SCPIPE_GPU_MEM_CAP_GB", "")))
+  cap <- suppressWarnings(as.numeric(Sys.getenv("CELLWARDEN_GPU_MEM_CAP_GB", "")))
   if (is.na(cap)) cap <- as.numeric(cfg$resources$gpu_mem_cap_gb %||% 20)
-  args <- c("-m", "scpipe.resources", "choose-plan", "--n-cells", as.character(n_cells),
+  args <- c("-m", "cellwarden.resources", "choose-plan", "--n-cells", as.character(n_cells),
             "--n-hvg", as.character(n_hvg), "--device", device, "--gpu-mem-cap-gb", format(cap))
   r <- s2_run_python(repo, args)
   p <- if (r$status == 0) .s2_parse_json_out(r$stdout) else NULL
   if (is.null(p)) {
     err <- paste(tail(c(r$stdout, r$stderr), 10), collapse = "\n  ")
     if (device %in% c("cpu", "auto")) {
-      scp_warn_log("scpipe.resources choose-plan failed (exit ", r$status, "); device is ", device,
+      scp_warn_log("cellwarden.resources choose-plan failed (exit ", r$status, "); device is ", device,
                    ", continuing on the CPU path:\n  ", err)
       return(list(device = "cpu", plan = "cpu", source = "S2",
                   reason = paste0("device: ", device, " in config; choose-plan unavailable, so the CPU path is used")))
     }
     scp_stop("device plan: `", s2_python(), " ", paste(args, collapse = " "), "` failed (exit ", r$status, "):\n  ", err)
   }
-  .s2_check_plan(p, "scpipe.resources choose-plan")
+  .s2_check_plan(p, "cellwarden.resources choose-plan")
 }
 
 # --------------------------------------------------------------------------
@@ -485,7 +485,7 @@ run_s2 <- function(cfg, repo) {
     if (assay == "RNA" && "scale.data" %in% SeuratObject::Layers(obj[[assay]]))
       SeuratObject::LayerData(obj, assay = assay, layer = "scale.data") <- NULL
   } else {
-    # 6. GPU path (exchange): slim -> scpipe.gpu_core -> merge
+    # 6. GPU path (exchange): slim -> cellwarden.gpu_core -> merge
     if (identical(pcs_setting, "auto")) {
       sd <- tm("pcs_auto_estimate", .s2_sample_pca_stdev(obj, hvg, npcs_compute, seed, assay))
       el <- s2_elbow_pcs(sd)
@@ -502,27 +502,27 @@ run_s2 <- function(cfg, repo) {
                                     config_hash = cfg$config_hash, assay = assay,
                                     reductions = character(), graphs = FALSE))
     gpu_dev <- if (path == "exchange_cpu") "cpu"
-               else if (identical(Sys.getenv("SCPIPE_ALLOW_CPU_AS_GPU"), "1")) "cpu" else "gpu"
-    args <- c("-m", "scpipe.gpu_core", "--in", slim, "--out", results,
+               else if (identical(Sys.getenv("CELLWARDEN_ALLOW_CPU_AS_GPU"), "1")) "cpu" else "gpu"
+    args <- c("-m", "cellwarden.gpu_core", "--in", slim, "--out", results,
               "--n-pcs", as.character(pcs_used), "--n-neighbors", as.character(cfg$n_neighbors),
               "--resolution", format(cfg$clustering$resolution), "--seed", as.character(seed),
               "--device", gpu_dev, "--run-id", cfg$run_id)
     if (integ == "harmony") args <- c(args, "--batch-key", batch_key)
-    extra_env <- c(paste0("SCPIPE_GPU_PLAN=", plan$plan))
+    extra_env <- c(paste0("CELLWARDEN_GPU_PLAN=", plan$plan))
     scp_log("running: ", s2_python(), " ", paste(args, collapse = " "))
     t0 <- proc.time()[["elapsed"]]
     r <- s2_run_python(repo, args, extra_env)
     timings[["gpu_core"]] <- round(proc.time()[["elapsed"]] - t0, 3)
     for (l in r$stderr) if (nzchar(l)) scp_log("gpu_core: ", l)
     if (r$status != 0 || !file.exists(results)) {
-      scp_stop("scpipe.gpu_core failed (exit ", r$status, "):\n  ", paste(tail(c(r$stdout, r$stderr), 15), collapse = "\n  "))
+      scp_stop("cellwarden.gpu_core failed (exit ", r$status, "):\n  ", paste(tail(c(r$stdout, r$stderr), 15), collapse = "\n  "))
     }
     gpu_summary <- .s2_parse_json_out(r$stdout)
     obj <- tm("merge", merge_exchange_results(obj, results, overwrite = TRUE, assay = assay))
     pcs_used <- if (!is.null(gpu_summary$n_pcs)) as.integer(gpu_summary$n_pcs) else pcs_used
-    umap_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
-    leiden_impl <- paste0("scpipe.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
-    if (integ == "harmony") integration_impl <- paste0("harmony via scpipe.gpu_core (", gpu_summary$harmony_impl %||% "harmonypy/rapids",
+    umap_impl <- paste0("cellwarden.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
+    leiden_impl <- paste0("cellwarden.gpu_core (", gpu_summary$device %||% gpu_dev, ")")
+    if (integ == "harmony") integration_impl <- paste0("harmony via cellwarden.gpu_core (", gpu_summary$harmony_impl %||% "harmonypy/rapids",
                                                        ", ", gpu_summary$device %||% gpu_dev, ")")
     exchange_files <- list(slim = slim, results = results,
                            slim_sha256 = digest::digest(file = slim, algo = "sha256"),
@@ -531,7 +531,7 @@ run_s2 <- function(cfg, repo) {
 
   cl <- obj$seurat_clusters
   sizes <- table(cl)
-  obj@misc$scpipe_s2 <- list(run_id = cfg$run_id, config_hash = cfg$config_hash, device = plan$device,
+  obj@misc$cellwarden_s2 <- list(run_id = cfg$run_id, config_hash = cfg$config_hash, device = plan$device,
                              plan = plan$plan, path = path, engine = engine, pcs = pcs_used, created_utc = .scp_utc())
   tm("save", scp_save_object(obj, out_dir, cfg$object_format))
 

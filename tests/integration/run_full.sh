@@ -3,16 +3,16 @@
 #
 #   tests/integration/run_full.sh [WORKDIR]
 #
-# Extends run_stages.sh: one `scpipe run` on the two-sample fixture with
+# Extends run_stages.sh: one `cellwarden run` on the two-sample fixture with
 # `llm.default.provider: mock` and `opentargets.offline: true`, CPU path, from
 # S0 through S5. S0-S2 run first (same checks as run_stages.sh); then every
-# later stage of the runner's registry is run with `scpipe resume --until`
+# later stage of the runner's registry is run with `cellwarden resume --until`
 # and checked:
 #
 #   S3      markers, cluster summary, signatures, evidence bundle, consensus
 #   G1-G4   the gate's bundle/proposal/review/decision.json and report.html
 #           (a gate that stops for a human, exit 3, is approved with
-#           `scpipe approve --by run_full` and the run resumed)
+#           `cellwarden approve --by run_full` and the run resumed)
 #   S4      dge_summary.json, opentargets_summary.json (offline; no contrasts
 #           are configured because both fixture samples are controls)
 #   S5      S5/umap.tsv.gz (one row per S2 cell), report.html parses and holds
@@ -32,14 +32,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 export RSCRIPT="${RSCRIPT:-Rscript}"
-export SCPIPE_DOCTOR_OFFLINE="${SCPIPE_DOCTOR_OFFLINE:-1}"
+export CELLWARDEN_DOCTOR_OFFLINE="${CELLWARDEN_DOCTOR_OFFLINE:-1}"
 INPUTS="$REPO/tests/fixtures/stage_inputs"
 CHECK=("$PYTHON" "$HERE/check_stages.py")
 
 if [[ $# -ge 1 ]]; then
   WORK="$1"; mkdir -p "$WORK"; WORK="$(cd "$WORK" && pwd)"
 else
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/scpipe-full.XXXXXX")"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/cellwarden-full.XXXXXX")"
   CLEANUP_ON_PASS=1
 fi
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
@@ -69,7 +69,7 @@ import os, sys, yaml
 src, dst, ledger = sys.argv[1:4]
 cfg = yaml.safe_load(open(src))
 cfg["project"] = "full_test"
-cfg["engine"] = os.environ.get("SCPIPE_TEST_ENGINE", "auto")   # auto: Rust path when scfastR is installed
+cfg["engine"] = os.environ.get("CELLWARDEN_TEST_ENGINE", "auto")   # auto: Rust path when scfastR is installed
 cfg["llm"] = {"default": {"provider": "mock", "model": "mock-model"},
               "budget": {"per_run_limit": 5, "total_limit": 30, "ledger_path": ledger}, "replay": False}
 cfg["opentargets"] = {"enabled": True, "offline": True, "cache_dir": "refs/opentargets"}
@@ -78,7 +78,7 @@ cfg["report"] = {"explorer_max_cells": 100000, "expr_genes": 50, "expr_max_cells
 yaml.safe_dump(cfg, open(dst, "w"), sort_keys=False)
 PY
 
-echo "scpipe full pipeline S0-S5 end-to-end (mock LLM, offline Open Targets)"
+echo "cellwarden full pipeline S0-S5 end-to-end (mock LLM, offline Open Targets)"
 echo "  repo:    $REPO"
 echo "  workdir: $WORK"
 echo
@@ -107,10 +107,10 @@ run_step() {   # run_step ID "description" DEPENDS_ON -- cmd...
   echo "--- [$id] $st (exit $rc)"; echo
 }
 
-scpipe() { "$PYTHON" -m scpipe "$@"; }
+cellwarden() { "$PYTHON" -m cellwarden "$@"; }
 
 # The runner's stage order after S2 (whatever is registered today).
-registered() { "$PYTHON" -c 'from scpipe import runner; print(" ".join(s.id for s in runner.STAGES))'; }
+registered() { "$PYTHON" -c 'from cellwarden import runner; print(" ".join(s.id for s in runner.STAGES))'; }
 is_registered() { local s; for s in $(registered); do [[ "$s" == "$1" ]] && return 0; done; return 1; }
 
 show_logs() {
@@ -120,10 +120,10 @@ show_logs() {
 }
 
 first_run() {   # S0-S2 (G1 sits before S2: a gate that stops for a human is approved and the run resumed)
-  scpipe run --config "$CONF/full.yaml" --run-dir "$RUN" --until S2
+  cellwarden run --config "$CONF/full.yaml" --run-dir "$RUN" --until S2
   local rc=$?
   [[ $rc -eq 3 ]] && { resume_until S2; return $?; }
-  [[ $rc -eq 0 ]] || { echo "scpipe run exited $rc"; show_logs; }
+  [[ $rc -eq 0 ]] || { echo "cellwarden run exited $rc"; show_logs; }
   return $rc
 }
 
@@ -133,17 +133,17 @@ resume_until() {
   local stage="$1" i rc gate
   is_registered "$stage" || { echo "$stage is not registered in the runner yet: SKIP"; return 99; }
   for i in 1 2 3 4 5; do
-    scpipe resume --run-dir "$RUN" --until "$stage" | tee "$WORK/resume_$stage.out"
+    cellwarden resume --run-dir "$RUN" --until "$stage" | tee "$WORK/resume_$stage.out"
     rc=${PIPESTATUS[0]}
     [[ $rc -eq 0 ]] && return 0
     if [[ $rc -eq 3 ]]; then
       gate="$(grep -oE -- '--stage [a-z-]+-review|--stage G[0-9]' "$WORK/resume_$stage.out" | head -1 | awk '{print $2}')"
       [[ -n "$gate" ]] || { echo "exit 3 but no '--stage <gate>' hint in the output"; show_logs; return 1; }
-      echo ">>> gate $gate waits for a human: scpipe approve --by run_full"
-      scpipe approve --run-dir "$RUN" --stage "$gate" --by run_full || { echo "scpipe approve failed"; show_logs; return 1; }
+      echo ">>> gate $gate waits for a human: cellwarden approve --by run_full"
+      cellwarden approve --run-dir "$RUN" --stage "$gate" --by run_full || { echo "cellwarden approve failed"; show_logs; return 1; }
       continue
     fi
-    echo "scpipe resume exited $rc"; show_logs; return $rc
+    echo "cellwarden resume exited $rc"; show_logs; return $rc
   done
   echo "still not through $stage after 5 resumes"; return 1
 }
@@ -276,20 +276,20 @@ PY
 
 rerun_same() {
   "${CHECK[@]}" snapshot "$RUN" "$WORK/state_before_rerun.json" || return 1
-  scpipe run --config "$CONF/full.yaml" --run-dir "$RUN" || { echo "rerun exited $?"; return 1; }
+  cellwarden run --config "$CONF/full.yaml" --run-dir "$RUN" || { echo "rerun exited $?"; return 1; }
   "${CHECK[@]}" skipped "$WORK/state_before_rerun.json" "$RUN"
 }
 
 status_check() {
   local out rc
-  out="$(scpipe status --run-dir "$RUN" 2>&1)"; rc=$?
+  out="$(cellwarden status --run-dir "$RUN" 2>&1)"; rc=$?
   echo "$out"
   [[ $rc -eq 0 ]] || return 1
   grep -q "S5" <<<"$out" || { echo "status does not mention S5"; return 1; }
 }
 
 run_step T0 "stage inputs reproducible"               ""   -- "$PYTHON" "$REPO/tests/fixtures/make_stage_inputs.py" --check
-run_step T1 "scpipe doctor (mock LLM, offline)"       ""   -- scpipe doctor --config "$CONF/full.yaml"
+run_step T1 "cellwarden doctor (mock LLM, offline)"       ""   -- cellwarden doctor --config "$CONF/full.yaml"
 run_step F1 "run S0-S2 (device cpu)"                  "T0" -- first_run
 run_step F2 "state.json, logs, config copies"         "F1" -- "${CHECK[@]}" state "$RUN"
 run_step F3 "QC decisions vs injected truth"          "F1" -- "${CHECK[@]}" qc-truth "$RUN" "$INPUTS/truth.tsv"
@@ -308,7 +308,7 @@ run_step G4 "gate G4 (interpretation agent, mock)"    "S4" -- resume_until G4
 run_step G4c "G4: four files + report.html"           "G4" -- check_gate G4
 run_step S5 "stage S5 (export, report, explorer)"     "F1" -- resume_until S5
 run_step S5c "S5: umap export, report.html, explorer.html" "S5" -- check_s5
-run_step R0 "scpipe status lists S5"                  "S5" -- status_check
+run_step R0 "cellwarden status lists S5"                  "S5" -- status_check
 run_step R1 "rerun same config skips every stage"     "S5" -- rerun_same
 
 T_END=$(date +%s.%N)

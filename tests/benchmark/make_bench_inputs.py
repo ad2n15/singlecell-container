@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate synthetic benchmark datasets for scpipe (development sizes only).
+"""Generate synthetic benchmark datasets for cellwarden (development sizes only).
 
 During development we benchmark at **2,000 and 5,000 cells only**. Larger runs
 (50k+) are done on the HPC before the first real analysis, not here.

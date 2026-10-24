@@ -1,4 +1,4 @@
-"""Tests for scpipe.opentargets (client, cache, offline mode, summary) and the S4 Open Targets step.
+"""Tests for cellwarden.opentargets (client, cache, offline mode, summary) and the S4 Open Targets step.
 
 Never touch the network: ``requests.post`` is replaced by a fake that serves
 the recorded responses in tests/fixtures/opentargets/ (routing by GraphQL
@@ -21,7 +21,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
 
-from scpipe.opentargets import (  # noqa: E402
+from cellwarden.opentargets import (  # noqa: E402
     OpenTargetsClient,
     OpenTargetsError,
     cache_key,
@@ -29,10 +29,10 @@ from scpipe.opentargets import (  # noqa: E402
     search_entity,
     target_by_symbol,
 )
-from scpipe.opentargets import client as C  # noqa: E402
-from scpipe.opentargets import queries as Q  # noqa: E402
-from scpipe.opentargets.summary import build_summary, read_dge_table  # noqa: E402
-from scpipe.stages import s4_opentargets  # noqa: E402
+from cellwarden.opentargets import client as C  # noqa: E402
+from cellwarden.opentargets import queries as Q  # noqa: E402
+from cellwarden.opentargets.summary import build_summary, read_dge_table  # noqa: E402
+from cellwarden.stages import s4_opentargets  # noqa: E402
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "opentargets"
 GENES = json.loads((FIX / "manifest.json").read_text())["genes"]
@@ -421,7 +421,7 @@ def test_stage_cli(tmp_path, net, capsys):
 
 
 def test_s4_driver_skip_dge(tmp_path, net):
-    from scpipe.stages import s4
+    from cellwarden.stages import s4
 
     rd, cfg = make_run(tmp_path)
     assert s4.main(["--run-dir", str(rd), "--skip-dge"]) == 0
@@ -430,7 +430,7 @@ def test_s4_driver_skip_dge(tmp_path, net):
 
 def test_config_validates_contrasts_against_sample_sheet(tmp_path):
     """dge.contrasts must name values of the sample sheet's condition column; cache_dir becomes absolute."""
-    from scpipe import config as C
+    from cellwarden import config as C
 
     proj = tmp_path / "proj"
     (proj / "data" / "A").mkdir(parents=True)
@@ -478,7 +478,7 @@ def test_no_network_in_tests(tmp_path, no_network):
 def test_shape_target_reads_the_current_api():
     """drugAndClinicalCandidates (one row per drug with its diseases) and tractability.label, as served
     since October 2026; each drug's first disease comes before further ones, no pair twice."""
-    from scpipe.opentargets.client import shape_target
+    from cellwarden.opentargets.client import shape_target
 
     t = {"id": "ENSG1", "approvedSymbol": "MS4A1", "tractability": [{"modality": "AB", "label": "GO CC high conf", "value": True}],
          "drugAndClinicalCandidates": {"count": 2, "rows": [

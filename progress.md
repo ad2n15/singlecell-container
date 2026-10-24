@@ -49,7 +49,7 @@ Constraints from the user (2026-10-17):
 - Current scfast-cpu at 100k synthetic, Mac 12 threads under load avg ~20 (s): read 0.15, normalize 0.19, pca 1.13, neighbors 0.68, cluster 0.87, umap 1.28 -> ~4.3 s incl. read (Seurat 93 s, Scanpy 54 s incl. read, both measured on a quieter machine).
 - PCA experiments rejected: Krylov 10/4 (PBMC kNN 0.87, fails); f32 product kernels (~10% single-thread, loses f64 determinism).
 
-- scpipe S2 fast path: scfastR::RunUMAPFast replaces single-thread uwot (R agent, merged): S2 UMAP 100k 50.7 s -> 2.7 s, 20k 9.15 -> 0.43 s; silhouette 0.797 vs uwot 0.793. R test failures (3 scfastR parity, 5 tests/R) also fail on the base commit.
+- CellWarden S2 fast path: scfastR::RunUMAPFast replaces single-thread uwot (R agent, merged): S2 UMAP 100k 50.7 s -> 2.7 s, 20k 9.15 -> 0.43 s; silhouette 0.797 vs uwot 0.793. R test failures (3 scfastR parity, 5 tests/R) also fail on the base commit.
 - Agent finding: kNN method "auto" switches to HNSW at >= 50k cells; at 100k x 20 dims HNSW is 10.3 s vs exact 0.97 s and less pure. Forwarded to the scale work (S2 FindNeighborsFast uses auto).
 
 - Real data and CPU baselines (`bench/modal_baselines.py`, branch `t3/scfast-real-data-baselines`).
@@ -373,23 +373,23 @@ Input: `60k_Human_TotalSeqB_hashing_3p_gem-x_Multiplex_count_raw_feature_bc_matr
   scfast-cpu 5.10, scanpy 79.0. PC sim 0.99999 and kNN 0.96-0.9998 vs scanpy for all; ARI vs scanpy
   0.74-0.77 for all, including rapids (scanpy on GPU), so the gap is Leiden on this data, not scfast.
   `bench/results/gpu_l4_hash60k/`.
-- scpipe S0-S5 locally (CPU, Seurat path, live Claude Haiku 4.5 gates): run dir `~/scpipe/hash60k/run`, input
+- CellWarden S0-S5 locally (CPU, Seurat path, live Claude Haiku 4.5 gates): run dir `~/cellwarden/hash60k/run`, input
   barcodes with >= 250 genes (56,934). 14m23s total; G1 escalated (4 clusters lose 75-99%, mostly scrublet
   doublets 11,893 = 21%), approved by the user; G2-G4 auto-approved; 22 Claude calls, GBP 0.46. 42,732 cells,
-  21 clusters (T, NK, B, CD14/CD16 mono, cDC, pDC, HSPC). Key: `~/.config/scpipe/anthropic_api_key` (0600).
-- scpipe on Modal GPU: `bench/modal_scpipe.py` builds `containers/Dockerfile` (first build ever). Fixed two
+  21 clusters (T, NK, B, CD14/CD16 mono, cDC, pDC, HSPC). Key: `~/.config/cellwarden/anthropic_api_key` (0600).
+- CellWarden on Modal GPU: `bench/modal_cellwarden.py` builds `containers/Dockerfile` (first build ever). Fixed two
   Dockerfile bugs: `nice-utils` is not an Ubuntu package; the R 4.4.2 pin conflicts with CRAN's r-recommended
-  (needs R >= 4.5/4.6), so R is unpinned (same fix in `scpipe.def`).
+  (needs R >= 4.5/4.6), so R is unpinned (same fix in `cellwarden.def`).
   Third fix: the [gpu] extra builds the rapids-singlecell sdist (needs nvcc); use the prebuilt
   rapids-singlecell-cu12 wheel. `.dockerignore` now excludes build artefacts at any depth (a local
   scfast rebuild during upload aborted one Modal build). Image builds in ~25-50 min; any context change rebuilds.
-- First real GPU run of scpipe (L4): S0 3m04s, S1a 3m48s, S1b 1m46s (local 6m49s). S1b gave ~7,500
+- First real GPU run of CellWarden (L4): S0 3m04s, S1a 3m48s, S1b 1m46s (local 6m49s). S1b gave ~7,500
   pre-clusters: gpu_core passed n_iterations=2 to rsc.tl.leiden, which caps cuGraph levels (scanpy: full
   passes). ~1,000 CLUSTER_LOSS triggers made a 551,817-token G1 prompt (API 400; rules fallback, escalate).
   Fixed in f86e2fc with a regression test; S2 used the same call.
   Rerun with the fix: 15 pre-clusters, 3 CLUSTER_LOSS triggers (doublet clusters, 97-99%), G1 prompt normal
   (3 calls, GBP 0.018), reviewer escalated as on the CPU run. Run paused at G1 on the volume
-  (`scfast-data:scpipe/hash60k/run`); S2-S5 on the GPU not run (approve + resume with bench/modal_scpipe.py).
+  (`scfast-data:cellwarden/hash60k/run`); S2-S5 on the GPU not run (approve + resume with bench/modal_cellwarden.py).
 
 ## In progress
 Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
@@ -401,7 +401,7 @@ Subagents (T3 delegate_task, own worktrees, branches from perf/hillclimb):
 
 ## Surprises (evidence)
 - The G1 bundle lists every triggered review rule with no cap, so many small pre-clusters can push the qc_worker prompt past the model context (551,817 tokens seen). The gate falls back to rules and escalates, so no wrong decision results, but the LLM step is lost.
-- `scpipe doctor` tool-use test uses `max_tokens=16`; Claude Haiku 4.5 needs more for a tool call (16: stop_reason max_tokens, 0 calls; 256: tool_use, 1 call), so doctor warns although the key and tool use work.
+- `cellwarden doctor` tool-use test uses `max_tokens=16`; Claude Haiku 4.5 needs more for a tool call (16: stop_reason max_tokens, 0 calls; 256: tool_use, 1 call), so doctor warns although the key and tool use work.
 - 3 Python tests fail on main too (not touched by this branch): test_runner::test_status_output, test_runner::test_failure_then_resume (log-tail line assertions), test_s3::test_consensus_recovers_planted_types (platelet cluster low_confidence). 498 others pass.
 - Tried and rejected for UMAP: polynomial fast_pow (scalar and 8-lane batched): no gain; the SGD is bound by random gathers.
 
@@ -431,7 +431,7 @@ Merged into perf/hillclimb overnight (each with evidence in its commits):
   SNN in BFS order.
 - GPU: CUDA PCA via the clipped Gram matrix (cuSOLVER), device preprocess, fused kNN kernel, SNN +
   cuGraph Leiden on device, raw int32-index upload; five CUDA bugs fixed (see GPU sections).
-- R/scpipe: RunUMAPFast replaces single-thread uwot on the S2 fast path.
+- R/cellwarden: RunUMAPFast replaces single-thread uwot on the S2 fast path.
 
 Surprises (evidence):
 - Parity on real data was failing before tonight (PBMC 3k PC sim 0.73): missing clip, too-few

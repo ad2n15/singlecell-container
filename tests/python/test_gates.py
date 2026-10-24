@@ -1,10 +1,10 @@
-"""Tests for the gate protocol and gate G1 (scpipe.gates; docs/agents-spec.md section 2).
+"""Tests for the gate protocol and gate G1 (cellwarden.gates; docs/agents-spec.md section 2).
 
 Offline: synthetic QC metrics, S1c run in-process for the baseline, and the
 ``mock`` LLM provider scripting the happy path and the failure paths
 (invalid proposal, budget exhausted, reviewer escalates, approve, replay).
 The last test drives the real runner: S1c, G1 (as a subprocess stage, exit
-code 3 while waiting), ``scpipe approve`` and ``scpipe resume``.
+code 3 while waiting), ``cellwarden approve`` and ``cellwarden resume``.
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ import pandas as pd
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import runner as R
-from scpipe.gates import (DEFAULT_MODES, EXIT_WAITING, GateError, approve, diff_json, gate_main, gate_mode, run_gate,
+from cellwarden import config as C
+from cellwarden import runner as R
+from cellwarden.gates import (DEFAULT_MODES, EXIT_WAITING, GateError, approve, diff_json, gate_main, gate_mode, run_gate,
                           write_gate_files)
-from scpipe.gates.g1_qc import BASELINE_NAME, G1Gate
-from scpipe.stages import write_tsv_gz
-from scpipe.stages.s1c_qc import run as s1c_run
+from cellwarden.gates.g1_qc import BASELINE_NAME, G1Gate
+from cellwarden.stages import write_tsv_gz
+from cellwarden.stages.s1c_qc import run as s1c_run
 from test_qc import SPEC_POLICY
 from test_qc_agent import metrics
 
@@ -192,7 +192,7 @@ def test_g1_review_mode_waits_even_when_approved(tmp_path):
     assert res.waiting and res.decision is None and res.review["verdict"] == "approve"
     assert gate_files(rd) == ["bundle.json", "pending.json", "proposal.json", "report.html", "review.json"]
     pending = json.loads((rd / "gates" / "G1" / "pending.json").read_text())
-    assert pending["approve"] == f"scpipe approve --run-dir {rd} --stage qc-review" and pending["mode"] == "review"
+    assert pending["approve"] == f"cellwarden approve --run-dir {rd} --stage qc-review" and pending["mode"] == "review"
     assert (rd / "S1" / "qc_decisions.tsv.gz").read_bytes() == before  # nothing applied while waiting
     assert "waiting for a human" in (rd / "gates" / "G1" / "report.html").read_text()
 
@@ -358,7 +358,7 @@ def test_gate_main_exit_codes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# runner integration: exit 3, scpipe approve, scpipe resume, fingerprints
+# runner integration: exit 3, cellwarden approve, cellwarden resume, fingerprints
 # ---------------------------------------------------------------------------
 
 
@@ -379,7 +379,7 @@ def test_runner_stops_at_g1_and_resumes_after_approve(tmp_path):
     write_tsv_gz(metrics(), rd / "S1" / "qc_metrics.tsv.gz")
 
     def dummy(sid, outputs):
-        code = "import os,pathlib\nrd=pathlib.Path(os.environ['SCPIPE_RUN_DIR'])\n"
+        code = "import os,pathlib\nrd=pathlib.Path(os.environ['CELLWARDEN_RUN_DIR'])\n"
         for o in outputs:
             code += f"p=rd/{o!r}; p.parent.mkdir(parents=True, exist_ok=True); p.write_text('x')\n"
         return lambda ctx: [sys.executable, "-c", code]
@@ -391,7 +391,7 @@ def test_runner_stops_at_g1_and_resumes_after_approve(tmp_path):
     out = io.StringIO()
     assert R.main(["run", "--config", str(proj / "config.yaml")], stages=stages, out=out) == 3, out.getvalue()
     text = out.getvalue()
-    assert "G1   QC review — WAITING" in text and f"scpipe approve --run-dir {rd} --stage qc-review" in text
+    assert "G1   QC review — WAITING" in text and f"cellwarden approve --run-dir {rd} --stage qc-review" in text
     st = json.loads((rd / "state.json").read_text())
     assert st["stages"]["S1c"]["status"] == "done" and st["stages"]["G1"]["status"] == "waiting" and st["stages"]["G1"]["exit_code"] == 3
     assert st["stages"]["S2"]["status"] == "pending" and not (rd / "S2").exists()
@@ -404,7 +404,7 @@ def test_runner_stops_at_g1_and_resumes_after_approve(tmp_path):
     # approve, then resume
     out = io.StringIO()
     assert R.main(["approve", "--run-dir", str(rd), "--stage", "G1", "--by", "dana"], out=out) == 0, out.getvalue()
-    assert "approved by human:dana" in out.getvalue() and "scpipe resume" in out.getvalue()
+    assert "approved by human:dana" in out.getvalue() and "cellwarden resume" in out.getvalue()
     out = io.StringIO()
     assert R.main(["resume", "--run-dir", str(rd)], stages=stages, out=out) == 0, out.getvalue()
     st = json.loads((rd / "state.json").read_text())

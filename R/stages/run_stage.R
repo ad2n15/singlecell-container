@@ -1,10 +1,10 @@
 #!/usr/bin/env Rscript
-# Entry point for the R stages of scpipe (docs/stages-spec.md section 1):
+# Entry point for the R stages of cellwarden (docs/stages-spec.md section 1):
 #
 #   Rscript R/stages/run_stage.R --stage S0|S1a|S2 --run-dir DIR
 #
 # Reads <DIR>/config/config.resolved.yaml, applies thread caps from
-# SCPIPE_THREADS, runs the stage, and exits 0 on success or 1 with an
+# CELLWARDEN_THREADS, runs the stage, and exits 0 on success or 1 with an
 # "ERROR" line on failure. Logs go to stdout/stderr; the runner redirects
 # them to logs/<STAGE>.log.
 
@@ -84,4 +84,4 @@ scp_run_stage <- function(stage, run_dir, repo) {
   quit(status = if (isTRUE(ok)) 0L else 1L, save = "no")
 }
 
-if (sys.nframe() == 0L || identical(Sys.getenv("SCPIPE_RUN_STAGE_MAIN"), "1")) .scp_main()
+if (sys.nframe() == 0L || identical(Sys.getenv("CELLWARDEN_RUN_STAGE_MAIN"), "1")) .scp_main()

@@ -3,11 +3,11 @@
 #
 #   tests/integration/run_stages.sh [WORKDIR]
 #
-# Runs `scpipe run` through S2 on the two-sample QC-stress fixture
+# Runs `cellwarden run` through S2 on the two-sample QC-stress fixture
 # (tests/fixtures/stage_inputs: donor_A as a 10x mtx folder, donor_B as .h5ad)
 # twice, once with device: cpu and once with device: gpu. Without a GPU the
 # gpu run uses gpu_core's CPU fallback through the test-only override
-# SCPIPE_ALLOW_CPU_AS_GPU=1. Then checks the outputs, reruns, and a
+# CELLWARDEN_ALLOW_CPU_AS_GPU=1. Then checks the outputs, reruns, and a
 # resolution change.
 #
 # Every step runs even if an earlier one fails (steps that depend on a failed
@@ -31,7 +31,7 @@ NEW_RESOLUTION=1.0
 if [[ $# -ge 1 ]]; then
   WORK="$1"; mkdir -p "$WORK"; WORK="$(cd "$WORK" && pwd)"
 else
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/scpipe-stages.XXXXXX")"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/cellwarden-stages.XXXXXX")"
   CLEANUP_ON_PASS=1
 fi
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
@@ -60,7 +60,7 @@ for r in rows:
     w.writerow(r)
 PY
 
-echo "scpipe stages S0-S2 end-to-end"
+echo "cellwarden stages S0-S2 end-to-end"
 echo "  repo:    $REPO"
 echo "  workdir: $WORK"
 echo
@@ -89,15 +89,15 @@ run_step() {   # run_step ID "description" DEPENDS_ON(space-separated or "") -- 
   echo "--- [$id] $st (exit $rc)"; echo
 }
 
-scpipe() { "$PYTHON" -m scpipe "$@"; }
+cellwarden() { "$PYTHON" -m cellwarden "$@"; }
 
 # A pipeline run. On failure, show the tail of every stage log that exists.
 pipeline_run() {   # pipeline_run RUN_DIR CONFIG [extra env assignments...]
   local run="$1" cfg="$2"; shift 2
-  env "$@" "$PYTHON" -m scpipe run --config "$cfg" --run-dir "$run" --until S2
+  env "$@" "$PYTHON" -m cellwarden run --config "$cfg" --run-dir "$run" --until S2
   local rc=$?
   if [[ $rc -ne 0 ]]; then
-    echo "scpipe run exited $rc"
+    echo "cellwarden run exited $rc"
     local f
     for f in "$run"/logs/*.log; do
       [[ -e "$f" ]] || continue
@@ -108,11 +108,11 @@ pipeline_run() {   # pipeline_run RUN_DIR CONFIG [extra env assignments...]
   return $rc
 }
 
-status_check() {   # scpipe status prints every stage and exits 0
+status_check() {   # cellwarden status prints every stage and exits 0
   local out rc s miss=0
-  out="$(scpipe status --run-dir "$CPU" 2>&1)"; rc=$?
+  out="$(cellwarden status --run-dir "$CPU" 2>&1)"; rc=$?
   echo "$out"
-  [[ $rc -eq 0 ]] || { echo "scpipe status exited $rc"; return 1; }
+  [[ $rc -eq 0 ]] || { echo "cellwarden status exited $rc"; return 1; }
   for s in S0 S1a S1b S1c S2; do
     grep -q "$s" <<<"$out" || { echo "status output does not mention $s"; miss=1; }
   done
@@ -128,7 +128,7 @@ rerun_same() {   # same config again: every stage must be skipped
 
 resume_noop() {  # resume on a finished run: exits 0, reruns nothing
   "${CHECK[@]}" snapshot "$CPU" "$WORK/state_before_resume.json" || return 1
-  scpipe resume --run-dir "$CPU" --until S2 || { echo "scpipe resume exited $?"; return 1; }
+  cellwarden resume --run-dir "$CPU" --until S2 || { echo "cellwarden resume exited $?"; return 1; }
   "${CHECK[@]}" skipped "$WORK/state_before_resume.json" "$CPU"
 }
 
@@ -159,9 +159,9 @@ inputs_ok() {
 }
 
 run_step T0  "stage inputs reproducible, sheets agree" ""    -- inputs_ok
-run_step T1  "scpipe doctor"                         ""      -- scpipe doctor --config "$CONF/cpu.yaml"
+run_step T1  "cellwarden doctor"                         ""      -- cellwarden doctor --config "$CONF/cpu.yaml"
 run_step C1  "run S0-S2, device cpu"                 "T0"    -- pipeline_run "$CPU" "$CONF/cpu.yaml"
-run_step G1  "run S0-S2, device gpu (CPU fallback)"  "T0"    -- pipeline_run "$GPU" "$CONF/gpu.yaml" SCPIPE_ALLOW_CPU_AS_GPU=1
+run_step G1  "run S0-S2, device gpu (CPU fallback)"  "T0"    -- pipeline_run "$GPU" "$CONF/gpu.yaml" CELLWARDEN_ALLOW_CPU_AS_GPU=1
 run_step C2  "cpu: state.json all done, logs, config copies" "C1" -- "${CHECK[@]}" state "$CPU"
 run_step G2  "gpu: state.json all done, logs, config copies" "G1" -- "${CHECK[@]}" state "$GPU"
 run_step C3  "cpu: S0 ingest report (two formats)"   "C1"    -- "${CHECK[@]}" ingest "$CPU" "$INPUTS"
@@ -172,7 +172,7 @@ run_step X1  "QC decisions identical cpu vs gpu"     "C1 G1" -- "${CHECK[@]}" qc
 run_step C6  "cpu: S2 object, summary, purity"       "C1"    -- "${CHECK[@]}" s2 "$CPU" "$INPUTS/truth.tsv" "$WORK/clusters_cpu.tsv" --device cpu
 run_step G6  "gpu: S2 object, summary, purity"       "G1"    -- "${CHECK[@]}" s2 "$GPU" "$INPUTS/truth.tsv" "$WORK/clusters_gpu.tsv" --device gpu
 run_step X2  "ARI cpu vs gpu clusters"               "C6 G6" -- "${CHECK[@]}" ari "$WORK/clusters_cpu.tsv" "$WORK/clusters_gpu.tsv"
-run_step R0  "scpipe status"                         "C1"    -- status_check
+run_step R0  "cellwarden status"                         "C1"    -- status_check
 run_step R1  "rerun same config skips every stage"   "C2"    -- rerun_same
 run_step R2  "resume on a finished run is a no-op"   "R1"    -- resume_noop
 run_step R3  "resolution change reruns only S2"      "R1"    -- rerun_resolution

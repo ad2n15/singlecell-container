@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 import scipy.sparse as sp
 
-from scpipe.exchange import (
+from cellwarden.exchange import (
     ExchangeError,
     counts_checksum,
     read_exchange,

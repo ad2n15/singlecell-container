@@ -1,8 +1,8 @@
-# scpipe S1a, scfast engine: scrublet-style doublet detection and coarse
+# cellwarden S1a, scfast engine: scrublet-style doublet detection and coarse
 # pre-clustering, in process, with scfastR (docs/scfast-integration.md,
 # "S1b doublets and pre-clustering"). Used by run_s1a() when
 # scp_resolve_engine() gives "scfast"; replaces Python scrublet and the
-# scpipe.gpu_core pre-clustering of S1b, so no S1/metrics_counts.h5ad is written.
+# cellwarden.gpu_core pre-clustering of S1b, so no S1/metrics_counts.h5ad is written.
 #
 # Doublets, per sample, on raw counts (genes x cells dgCMatrix):
 #   1. simulate 2 * n_cells doublets by summing the counts of random cell pairs;

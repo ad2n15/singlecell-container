@@ -1,10 +1,10 @@
-"""scpipe.dashboard: renders from state.json + summaries, never fails on partial runs."""
+"""cellwarden.dashboard: renders from state.json + summaries, never fails on partial runs."""
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from scpipe import dashboard
+from cellwarden import dashboard
 
 
 def _state(run: Path, stages: dict) -> None:

@@ -1,4 +1,4 @@
-"""scpipe run -i: the questions, their checks, and what the run gets from the answers."""
+"""cellwarden run -i: the questions, their checks, and what the run gets from the answers."""
 
 import io
 import sys
@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe import runner as R
-from scpipe import wizard as W
+from cellwarden import runner as R
+from cellwarden import wizard as W
 
 FIX = Path(__file__).resolve().parents[1] / "fixtures" / "stage_inputs"
 NO_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY")

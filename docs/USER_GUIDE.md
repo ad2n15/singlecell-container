@@ -1,11 +1,11 @@
-# scpipe user guide
+# CellWarden user guide
 
 For a shorter, task-oriented introduction see [GETTING_STARTED.md](GETTING_STARTED.md).
 
 How to run the pipeline on your own machine or on an HPC, read its report, and move it to a
 new site. The design is in [`DESIGN.md`](DESIGN.md); the stage-by-stage contracts are in
 [`stages-spec.md`](stages-spec.md) (S0–S2) and [`agents-spec.md`](agents-spec.md) (gates,
-S3–S5, portability). The `scpipe` command is the only thing you run.
+S3–S5, portability). The `cellwarden` command is the only thing you run.
 
 **The principle behind every decision the pipeline makes:** rules decide, agents advise,
 reviewers check, humans approve, everything is logged. No agent changes data directly; it makes
@@ -15,18 +15,18 @@ a proposal that code validates against policy, and you can always see (and overr
 
 ```bash
 # 1. install (see README.md), then check the node you are on
-scpipe doctor --config config.yaml
+cellwarden doctor --config config.yaml
 
 # 2. run; --detach keeps it alive inside tmux when your SSH session drops
-scpipe run --config config.yaml --detach
+cellwarden run --config config.yaml --detach
 
 # 3. follow it: text, or open <run_dir>/dashboard.html (rewritten after every stage; refreshes itself)
-scpipe status --run-dir /scratch/$USER/scpipe/my_study
-scpipe dashboard --run-dir /scratch/$USER/scpipe/my_study --watch 30   # optional: keep regenerating
+cellwarden status --run-dir /scratch/$USER/cellwarden/my_study
+cellwarden dashboard --run-dir /scratch/$USER/cellwarden/my_study --watch 30   # optional: keep regenerating
 
 # 4. if a gate stops the run for your approval (exit code 3), it prints what to do:
-scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage context-review [--from-file edited.json] [--by you]
-scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
+cellwarden approve --run-dir /scratch/$USER/cellwarden/my_study --stage context-review [--from-file edited.json] [--by you]
+cellwarden resume  --run-dir /scratch/$USER/cellwarden/my_study
 
 # 5. open the result
 <run-dir>/S5/report.html      # everything, one self-contained page
@@ -34,11 +34,11 @@ scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
 ```
 
 Stages run in the order below. Every stage is checkpointed in `state.json` with a fingerprint of
-its inputs and settings, so `scpipe run` again with the same config skips what is done, and a
+its inputs and settings, so `cellwarden run` again with the same config skips what is done, and a
 config change reruns only the stages that use the changed settings and those after them.
 
-The terminal, `scpipe status` and the dashboard show each stage's name; on the command line
-(`--until`, `scpipe approve --stage`) the name, the title or the short ID all work, in any case
+The terminal, `cellwarden status` and the dashboard show each stage's name; on the command line
+(`--until`, `cellwarden approve --stage`) the name, the title or the short ID all work, in any case
 (`--until clustering`, `--until S2`). Folders and logs keep the short IDs (`S2/`, `logs/S2.log`).
 
 | ID | Name | What it does |
@@ -58,16 +58,16 @@ The terminal, `scpipe status` and the dashboard show each stage's name; on the c
 
 ### Progress
 
-In a terminal, `scpipe run` and `scpipe resume` show a live display: finished stages with their
+In a terminal, `cellwarden run` and `cellwarden resume` show a live display: finished stages with their
 time and memory, the current stage and its latest step (from the stage's log), a bar, the elapsed
 time and an estimate of the time left. The estimate appears once ingest has counted the cells;
 it starts from built-in timings and adapts to your machine (recent runs are kept in
-`~/.scpipe/stage_times.json`). In logs, pipes, `--detach` and scheduler jobs the output is one
+`~/.cellwarden/stage_times.json`). In logs, pipes, `--detach` and scheduler jobs the output is one
 line per stage instead. `--progress live|plain` forces either.
 
-### Guided setup: `scpipe run -i`
+### Guided setup: `cellwarden run -i`
 
-`scpipe run <data> -i` asks a few questions before the run; Enter keeps each suggested value:
+`cellwarden run <data> -i` asks a few questions before the run; Enter keeps each suggested value:
 
 1. mode: **automatic** (defaults, adaptive QC, the review agents decide at each gate) or **guided**;
 2. QC hard limits: minimum genes (200) and UMIs (400) per cell, maximum mitochondrial % (25);
@@ -121,7 +121,7 @@ llm:                             # optional: without it the first key set is use
   roles: {}                      # per-role overrides: qc_worker, context_worker, annotation_worker, interpretation_worker, reviewer
   budget:
     per_run_limit: 5             # GBP; a call that would cross a limit is not made
-    total_limit: 30              # GBP across all runs (ledger in ~/.scpipe/ledger.json)
+    total_limit: 30              # GBP across all runs (ledger in ~/.cellwarden/ledger.json)
     usd_to_gbp: 0.78
   replay: false                  # true: reuse logged outputs for identical prompts (no calls, no cost)
 
@@ -163,7 +163,7 @@ report:
 **Claude, OpenAI or NVIDIA.** Export one key and the agents use it:
 `ANTHROPIC_API_KEY` (Claude Haiku 4.5), `OPENAI_API_KEY` (gpt-4.1-mini) or `NVIDIA_API_KEY`
 (NVIDIA NIM, `nvidia/nemotron-3-ultra-550b-a55b`). With several keys, Claude is preferred, then OpenAI,
-then NVIDIA. Pick one per run with `scpipe run ... --llm nvidia --llm-model <model>`, or in the config:
+then NVIDIA. Pick one per run with `cellwarden run ... --llm nvidia --llm-model <model>`, or in the config:
 
 ```yaml
 llm:
@@ -174,7 +174,7 @@ llm:
 
 A local NIM or vLLM server: `{provider: openai_compatible, base_url: http://localhost:8000/v1, model: ...}`.
 The NVIDIA preset asks for JSON with `json_object` (not every NIM model supports `json_schema`); use
-a NIM model that supports tool calls. `scpipe doctor` shows which provider and model were chosen and
+a NIM model that supports tool calls. `cellwarden doctor` shows which provider and model were chosen and
 makes a tool-use test call.
 
 ### Differential expression (S4)
@@ -196,13 +196,13 @@ large data).
 
 **Choosing after annotation.** Cell types and clusters only have names once clustering (S2) and
 the annotation review (G3) are done. With `dge.interactive: true`, the run stops just before S4,
-which is what `scpipe run -i` sets when you choose "after clustering and annotation" or type a
+which is what `cellwarden run -i` sets when you choose "after clustering and annotation" or type a
 cell-level column. It then lists the cell types, fine cell types and clusters with their cell
 counts, and the sample-sheet groups. You pick markers per cell type, two cell types or clusters
 (by number, or `rest`), or two groups of samples (within each cell type or across all cells), and
 can add more comparisons. The choice is written into the run's config and
 `config/dge_choice.yaml`, so `resume` keeps it; delete that file to be asked again. Without a
-terminal (scheduler jobs, `--detach` with nohup) the run waits before S4, and `scpipe resume` in
+terminal (scheduler jobs, `--detach` with nohup) the run waits before S4, and `cellwarden resume` in
 a terminal asks.
 
 `method: pseudobulk` (DESeq2, or `pseudobulk_method: limma_voom`) sums counts per cell type and
@@ -224,7 +224,7 @@ On a **GPU plan** a second key, `engine_gpu: auto | scfast | rapids` (default `a
 between the Rust CUDA backend (`gpu_scfast`: PCA, kNN and Leiden on the GPU in process, UMAP on
 the CPU, no exchange files) and rapids-singlecell through the exchange (`gpu_exchange`). `auto`
 takes the Rust backend only when `scfastR` was built with the `cuda` feature **and** a device is
-visible (`scpipe doctor` prints both), otherwise rapids. The CUDA backend has not yet been run
+visible (`cellwarden doctor` prints both), otherwise rapids. The CUDA backend has not yet been run
 on real hardware — see [`INSTALL.md`](INSTALL.md) for the acceptance tests to run on the L4
 before trusting `gpu_scfast` on a real dataset.
 
@@ -233,7 +233,7 @@ so Python and Scanpy are not involved and nothing is written for the exchange. N
 selection and the scaling statistics are one fused pass (`PreprocessFast`; HVGs agree with Seurat's
 vst at ≥ 99.8%). `S2/summary.json` records `path` (`cpu_scfast`, `gpu_scfast`, `cpu_seurat`,
 `gpu_exchange`, `exchange_cpu`), `engine`, `scfast_version`, `scfast_device` and `preprocessing`. Doublet calls differ slightly from Scrublet's (the detector is a reimplementation),
-and Harmony without the R `harmony` package falls back to the exchange route. `scpipe doctor` prints
+and Harmony without the R `harmony` package falls back to the exchange route. `cellwarden doctor` prints
 the engine `auto` would choose. Install steps, including Rust, are in [`INSTALL.md`](INSTALL.md).
 
 ## 3. The run directory
@@ -259,15 +259,15 @@ Put the run directory on scratch; results you keep belong on project storage.
 
 ### Watching a run: the dashboard
 
-`<run_dir>/dashboard.html` is one self-contained page (no network, no JavaScript) that `scpipe run`
+`<run_dir>/dashboard.html` is one self-contained page (no network, no JavaScript) that `cellwarden run`
 rewrites after every stage change. It shows the pipeline strip (S0 … S5 with the four gates)
 coloured by status, a wall-clock timeline with the waiting time at each gate hatched, and a card
 per stage and gate: wall time, peak memory, cells in and out, QC keep/review/exclude, engine and
 path, clusters, the S2 step timings, contrasts, the gate mode, who decided, fallback, reviewer
 verdict and a link to that gate's `report.html`. Open it over SMB/`scp`, or in a browser on the
-login node; while the run is live it reloads itself every 30 s. `scpipe dashboard --run-dir D`
+login node; while the run is live it reloads itself every 30 s. `cellwarden dashboard --run-dir D`
 regenerates it by hand, and `--watch N` keeps doing so until the run finishes. The tail of the log
-is shown inline for a running, waiting or failed stage. Set `SCPIPE_NO_DASHBOARD=1` to disable it.
+is shown inline for a running, waiting or failed stage. Set `CELLWARDEN_NO_DASHBOARD=1` to disable it.
 
 ## 4. Gates and approvals
 
@@ -286,8 +286,8 @@ depends on `gates.<G>`:
 When a run stops at a gate it exits with code 3, writes `gates/<G>/report.html`, and prints:
 
 ```
-scpipe approve --run-dir D --stage context-review [--from-file edited.json] [--by NAME]
-scpipe resume  --run-dir D
+cellwarden approve --run-dir D --stage context-review [--from-file edited.json] [--by NAME]
+cellwarden resume  --run-dir D
 ```
 
 Open the gate's `report.html`, optionally copy `decision.json`, edit it and pass it with
@@ -297,12 +297,12 @@ refuses a call, the rules baseline becomes the decision (`fallback: true`) and t
 `review` mode, so nothing is ever applied silently.
 
 Every LLM call is logged to `llm/agent_log.jsonl` with hashes of the prompt and input, the
-tokens used and the cost in GBP; `llm/ledger.json` holds the totals. `scpipe status` shows the
+tokens used and the cost in GBP; `llm/ledger.json` holds the totals. `cellwarden status` shows the
 spend so far, and `report.html` has a per-gate, per-role cost table.
 
 ## 5. Execution modes and sites
 
-`scpipe` drives the stages itself. Where they run is a configuration switch, not a different
+`cellwarden` drives the stages itself. Where they run is a configuration switch, not a different
 pipeline:
 
 | `execution` | Where the stages run | Use when |
@@ -311,17 +311,17 @@ pipeline:
 | `slurm`, `pbs`, `lsf`, `sge` | one scheduler job on a compute node that has internet | a site's compute nodes have internet |
 | `split` | heavy stages (S0–S4) as an offline scheduler job; gates, Open Targets and the report on the node you submit from | a site does not allow compute on its internet node |
 
-`scpipe run --execution slurm` (or `execution: slurm` in the config or site file) prepares the
+`cellwarden run --execution slurm` (or `execution: slurm` in the config or site file) prepares the
 run directory, writes `<run-dir>/submit/slurm.sh` from `conf/templates/slurm.sh.j2` with the
 `scheduler` settings (partition, account, time, cpus, mem_gb, gpus, extra directives), and
-calls `sbatch`. The job runs `scpipe resume --run-dir D --execution direct`, so the job and your
-login shell share one `state.json`: `scpipe status` works from either, and `scpipe resume` after
+calls `sbatch`. The job runs `cellwarden resume --run-dir D --execution direct`, so the job and your
+login shell share one `state.json`: `cellwarden status` works from either, and `cellwarden resume` after
 the job (or after a gate) continues from wherever it stopped. The API key is never written into
 the script; the scheduler propagates your environment (`--export=ALL`, `-V`). Set
 `container.runtime` and `container.image` to run the job inside the Apptainer/Docker image.
 
 `split` submits the stages up to S4 with `--no-gates` (gate stages are recorded as skipped and
-S2 uses the rules' QC baseline), then prints the `scpipe resume` command to run on the
+S2 uses the rules' QC baseline), then prints the `cellwarden resume` command to run on the
 submitting node once the job has finished: it runs the skipped gates in place, Open Targets and
 S5. With `execution: split` and a gate mode of `review`, expect the run to stop at each gate
 for your approval as usual.
@@ -335,21 +335,21 @@ A site is one small YAML file, `conf/sites/<name>.yaml`, that supplies defaults 
 |---|---|
 | `iridisx` | the Iridis X L4 login node: `direct`, 8 threads, 64 GB, 20 GB GPU cap, `nice 10`, Apptainer with `--nv`; `scheduler.partition: gpu` for `slurm`/`split` |
 | `workstation` | your own machine or VM: no scheduler, no container, higher caps, `nice 0` |
-| `docker` | inside the scpipe Docker image with `--gpus all` |
+| `docker` | inside the CellWarden Docker image with `--gpus all` |
 
 Point `config.yaml` at one with `site: iridisx` (or a path). Anything set in `config.yaml`
 overrides the site file key by key. Moving to a new HPC means writing a new site file, not
 touching pipeline code.
 
-### `scpipe init-site`
+### `cellwarden init-site`
 
 On a new machine, let the pipeline draft the site file:
 
 ```bash
-scpipe init-site                                    # print the draft
-scpipe init-site --write conf/sites/mycluster.yaml --name mycluster
-scpipe init-site --json                             # the raw detection
-scpipe init-site --no-internet-check                # skip the HTTPS probes (offline node)
+cellwarden init-site                                    # print the draft
+cellwarden init-site --write conf/sites/mycluster.yaml --name mycluster
+cellwarden init-site --json                             # the raw detection
+cellwarden init-site --no-internet-check                # skip the HTTPS probes (offline node)
 ```
 
 It detects the scheduler (`sbatch` / `qsub` / `bsub`, telling PBS and SGE apart), the GPU and
@@ -360,10 +360,10 @@ It then drafts conservative values: half the node when a scheduler is present (a
 endpoint is not reachable from this node. Review the draft, fill in `scheduler.partition` and
 `account`, and point `config.yaml` at it.
 
-### `scpipe doctor`
+### `cellwarden doctor`
 
 ```bash
-scpipe doctor --config config.yaml
+cellwarden doctor --config config.yaml
 ```
 
 Preflight checks, grouped: R and Python packages (required and optional), GPU, write access to
@@ -372,21 +372,21 @@ command on PATH), the container runtime and image, the LLM API key (present or n
 never printed), the LLM endpoint, a 1-token tool-use test (skipped with a note when no key is
 set), the budget remaining across runs, and Open Targets (reachable, or `offline`). Required
 checks failing give exit code 1; the LLM and Open Targets checks are informational, since the
-pipeline degrades to rules-only gates and cached evidence without them. `SCPIPE_DOCTOR_OFFLINE=1`
+pipeline degrades to rules-only gates and cached evidence without them. `CELLWARDEN_DOCTOR_OFFLINE=1`
 skips the network probes (the tests set it).
 
 ### Containers
 
-`containers/scpipe.def` (Apptainer) and `containers/Dockerfile` build the same image (CUDA 12
+`containers/cellwarden.def` (Apptainer) and `containers/Dockerfile` build the same image (CUDA 12
 base, R 4.4 with Seurat 5, BPCells, presto, DESeq2, limma, harmony, leidenbase; Python 3.12 with
-scpipe, rapids-singlecell, CellTypist, jinja2, matplotlib):
+CellWarden, rapids-singlecell, CellTypist, jinja2, matplotlib):
 
 ```bash
-apptainer build scpipe.sif containers/scpipe.def
-docker build -t scpipe:latest -f containers/Dockerfile .
+apptainer build cellwarden.sif containers/cellwarden.def
+docker build -t cellwarden:latest -f containers/Dockerfile .
 ```
 
-Set `container.runtime: apptainer` and `container.image: /path/to/scpipe.sif` (with
+Set `container.runtime: apptainer` and `container.image: /path/to/cellwarden.sif` (with
 `options: ["--nv"]` for the GPU) in the site file; scheduler jobs then run inside it.
 
 ## 6. The report and the explorer
@@ -406,10 +406,10 @@ sections, in order:
 | Open Targets evidence | per contrast, group and direction: each DE gene with Ensembl id, known drugs (phase, disease), top associated diseases, tractability; offline badge when the cache alone was used |
 | Gate decisions | one card per gate: mode, who decided, reviewer verdict and findings, policy check, the agent's rationale (advisory), changes versus the proposal, the decision JSON, link to the gate's own report; "waiting for a human" when a decision is pending |
 | LLM cost | provider, number of calls (and replays), total GBP against the per-run and total limits, a per-gate / per-role token and cost table from `llm/ledger.json` |
-| Software | scpipe, Python and R package versions recorded by the stages |
+| Software | CellWarden, Python and R package versions recorded by the stages |
 
 A section whose inputs are missing (a stage that has not run, or was skipped) says so instead of
-failing, so the report can be built at any point: `python -m scpipe.stages.s5_report --run-dir D
+failing, so the report can be built at any point: `python -m cellwarden.stages.s5_report --run-dir D
 --skip-export` rebuilds it from what is there without rerunning the R export.
 
 `S5/explorer.html` draws the UMAP on a canvas from data embedded in the page: colour by cluster,
@@ -420,7 +420,7 @@ legend toggles groups, wheel zooms, drag pans, and a button saves the view as PN
 have expression values first.
 
 Each gate's `gates/<G>/report.html` is built from the same templates and ends with the
-`scpipe approve` command for that gate.
+`cellwarden approve` command for that gate.
 
 ## 7. Tests
 

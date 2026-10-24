@@ -17,8 +17,8 @@ import pandas as pd
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe.stages import read_tsv_str, s1b_doublets, s1c_qc
+from cellwarden import config as C
+from cellwarden.stages import read_tsv_str, s1b_doublets, s1c_qc
 
 from test_s1b_s1c import Result, inproc, make_run, write_gz  # noqa: F401  (inproc is a fixture)
 
@@ -51,13 +51,13 @@ def test_passthrough_leaves_table_untouched(tmp_path, inproc, engine):
     rd, a = make_run(tmp_path, extra={"engine": engine})
     _s1a_like(rd, a)
     before = (rd / "S1" / "qc_metrics.tsv.gz").read_bytes()
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (rd / "S1" / "qc_metrics.tsv.gz").read_bytes() == before
     assert not list(rd.rglob("*.h5ad"))
     assert "pass-through" in (r.stdout + r.stderr)
     # S1c is unchanged and reads the table as is
-    r = inproc("scpipe.stages.s1c_qc", rd)
+    r = inproc("cellwarden.stages.s1c_qc", rd)
     assert r.returncode == 0, r.stdout + r.stderr
     assert (rd / "S1" / "qc_decisions.tsv.gz").exists()
 
@@ -65,7 +65,7 @@ def test_passthrough_leaves_table_untouched(tmp_path, inproc, engine):
 def test_passthrough_records_method(tmp_path, inproc):
     rd, a = make_run(tmp_path, extra={"engine": "scfast", "doublets": {"method": "none"}})
     _s1a_like(rd, a)
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 0
     assert "doublets.method=none" in (r.stdout + r.stderr)
 
@@ -77,7 +77,7 @@ def test_engine_seurat_does_not_pass_through(tmp_path, inproc):
     t = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     t["doublet_score"], t["doublet_call"], t["pre_cluster"] = "0.5", "TRUE", "marker"
     write_gz(t, rd / "S1" / "qc_metrics.tsv.gz")
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 0, r.stdout + r.stderr
     out = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     assert (out["doublet_call"] == "FALSE").all() and (out["doublet_score"] == "NA").all()
@@ -88,7 +88,7 @@ def test_missing_columns_and_no_h5ad_is_an_error(tmp_path, inproc):
     """engine auto/scfast but S1a did not write the columns (it resolved to seurat): the normal path needs the h5ad."""
     rd, a = make_run(tmp_path, extra={"engine": "auto"})
     (rd / "S1" / "metrics_counts.h5ad").unlink()
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 1
     assert "metrics_counts.h5ad" in r.stderr and "not found" in r.stderr
 
@@ -98,7 +98,7 @@ def test_partial_columns_are_not_a_passthrough(tmp_path, inproc):
     t = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     t["pre_cluster"] = "x"
     write_gz(t, rd / "S1" / "qc_metrics.tsv.gz")
-    r = inproc("scpipe.stages.s1b_doublets", rd)
+    r = inproc("cellwarden.stages.s1b_doublets", rd)
     assert r.returncode == 0, r.stdout + r.stderr
     out = read_tsv_str(rd / "S1" / "qc_metrics.tsv.gz")
     assert set(S1B) <= set(out.columns) and "x" not in set(out["pre_cluster"])
@@ -135,7 +135,7 @@ def r_run(tmp_path_factory):
     sheet.to_csv(conf / "samples.csv", index=False)
     res = C.prepare_run_dir(C.load_config(conf / "config.yaml"))
     rd = Path(res["run_dir"])
-    env = dict(os.environ, PYTHONPATH=str(REPO / "python"), SCPIPE_THREADS="2")
+    env = dict(os.environ, PYTHONPATH=str(REPO / "python"), CELLWARDEN_THREADS="2")
     for st in ("S0", "S1a"):
         p = subprocess.run([rscript, str(REPO / "R" / "stages" / "run_stage.R"), "--stage", st, "--run-dir", str(rd)],
                            capture_output=True, text=True, env=env, timeout=900)
@@ -155,7 +155,7 @@ def test_e2e_s1a_writes_columns_and_no_h5ad(r_run):
 def test_e2e_s1b_passthrough_s1c_and_doublet_recall(r_run):
     rd, env = r_run
     before = (rd / "S1" / "qc_metrics.tsv.gz").read_bytes()
-    for mod in ("scpipe.stages.s1b_doublets", "scpipe.stages.s1c_qc"):
+    for mod in ("cellwarden.stages.s1b_doublets", "cellwarden.stages.s1c_qc"):
         p = subprocess.run([sys.executable, "-m", mod, "--run-dir", str(rd)], capture_output=True, text=True,
                            env=env, timeout=900)
         assert p.returncode == 0, p.stdout + p.stderr

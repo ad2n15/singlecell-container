@@ -1,4 +1,4 @@
-"""Tests for scpipe.annotation.consensus and markers_human.yaml (docs/agents-spec.md section 5).
+"""Tests for cellwarden.annotation.consensus and markers_human.yaml (docs/agents-spec.md section 5).
 
 Synthetic evidence only (no R, no pipeline run); the real fixture is covered by test_s3.py.
 Run from the repo root: PYTHONPATH=python python3 -m pytest -q tests/python/test_annotation.py
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe.annotation import consensus as cons
+from cellwarden.annotation import consensus as cons
 
 REPO = Path(__file__).resolve().parents[2]
 SIG_FILE = REPO / "R" / "stages" / "data" / "signatures.yaml"

@@ -1,4 +1,4 @@
-# Installing and running scpipe
+# Installing and running CellWarden
 
 Three targets: the **Iridis X L4 login node**, any **Linux** machine, and **Windows**.
 All use the same `config.yaml`; only the install and the `site` differ.
@@ -24,52 +24,52 @@ GPU yet, so `engine_gpu: auto` stays on rapids until `scfastR` reports a CUDA bu
 
 ## 0. Quick install (recommended)
 
-**Everything, in one image.** R with Seurat 5 and the Bioconductor packages, scpipe, the Rust
+**Everything, in one image.** R with Seurat 5 and the Bioconductor packages, CellWarden, the Rust
 engine built with CUDA and cuGraph (`scfast`, `scfastR`), RAPIDS (cuGraph, cuVS, CuPy,
 rapids-singlecell) and CellTypist's default model, on NVIDIA's RAPIDS base image. Nothing to
 compile; it runs on a GPU or, slower, without one.
 
 ```bash
 # HPC (Apptainer / Singularity): pull once, then point the site file at the .sif
-apptainer pull scpipe.sif docker://ad2n15/scpipe:latest      # mirror: docker://ghcr.io/ad2n15/scpipe:latest
-apptainer exec --nv scpipe.sif scpipe doctor
-apptainer exec --nv scpipe.sif scpipe run --config config.yaml --detach
+apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest      # mirror: docker://ghcr.io/cellwarden/cellwarden:latest
+apptainer exec --nv cellwarden.sif cellwarden doctor
+apptainer exec --nv cellwarden.sif cellwarden run --config config.yaml --detach
 
 # Workstation or cloud VM (Docker with the NVIDIA container toolkit)
-docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" ad2n15/scpipe:latest run --config config.yaml
+docker run --rm --gpus all -v "$PWD:$PWD" -w "$PWD" cellwarden/cellwarden:latest run --config config.yaml
 ```
 
-To keep `scpipe` on the host and run only the stages in the image, set in the site file
-(`scpipe init-site` prints these lines when it finds Apptainer or Docker):
+To keep `cellwarden` on the host and run only the stages in the image, set in the site file
+(`cellwarden init-site` prints these lines when it finds Apptainer or Docker):
 
 ```yaml
 container:
   runtime: apptainer
-  image: /path/to/scpipe.sif          # or docker://ad2n15/scpipe:<version>
+  image: /path/to/cellwarden.sif          # or docker://cellwarden/cellwarden:<version>
   options: ["--nv"]
 ```
 
 Each stage then runs in the image with the run directory, the config directory and the sample
-folders bound; `scpipe doctor` stops asking for R packages on the host and points at the image.
+folders bound; `cellwarden doctor` stops asking for R packages on the host and points at the image.
 Check an image after pulling it with
-`apptainer exec --nv scpipe.sif bash /opt/scpipe/containers/smoke_test.sh` (the whole pipeline on
+`apptainer exec --nv cellwarden.sif bash /opt/cellwarden/containers/smoke_test.sh` (the whole pipeline on
 the test fixture, about 10 minutes on a CPU).
 
 **Python side only (no R, no compiler).** Prebuilt `scfast` wheels (Linux x86_64 with CUDA and
-cuGraph loaded at run time; Linux and macOS ARM for the CPU) and `scpipe`:
+cuGraph loaded at run time; Linux and macOS ARM for the CPU) and `cellwarden`:
 
 ```bash
-# the wheels are attached to each release: https://github.com/ad2n15/singlecell-container/releases
-pip install scfast-*.whl "$(ls scpipe-*.whl)[all]" --extra-index-url https://pypi.nvidia.com
+# the wheels are attached to each release: https://github.com/cellwarden/cellwarden/releases
+pip install scfast-*.whl "$(ls cellwarden-*.whl)[all]" --extra-index-url https://pypi.nvidia.com
 ```
 
-`[all]` adds Harmony, the report, the LLM clients and the CUDA 12 GPU stack; use plain `scpipe` on
+`[all]` adds Harmony, the report, the LLM clients and the CUDA 12 GPU stack; use plain `cellwarden` on
 a machine without an NVIDIA GPU. The R stages (S0, S1a, S2, S4) still need R: use the image
 through `container:` as above, or install R by hand (sections 1 and 2;
 `Rscript containers/install_r_packages.R` installs every package the stages use).
 
 The wheels and the image are built and published by `.github/workflows/release.yml` on every
-`v*` tag (Docker Hub `ad2n15/scpipe`, GHCR `ghcr.io/ad2n15/scpipe`, wheels on the GitHub Release). The sections below build everything from source.
+`v*` tag (Docker Hub `cellwarden/cellwarden`, GHCR `ghcr.io/cellwarden/cellwarden`, wheels on the GitHub Release). The sections below build everything from source.
 
 ## 1. Iridis X, L4 login node
 
@@ -86,11 +86,11 @@ module avail 2>&1 | grep -i -E "^R/|python|apptainer|rust|cuda"   # confirm modu
 **One-time setup** (put everything on scratch, not home):
 
 ```bash
-cd /scratch/$USER && git clone https://github.com/ad2n15/singlecell-container.git singlecell && cd singlecell
+cd /scratch/$USER && git clone https://github.com/cellwarden/cellwarden.git singlecell && cd singlecell
 module load R python                      # confirm names/versions: R >= 4.3, Python >= 3.12
-python3 -m venv /scratch/$USER/venv-scpipe && source /scratch/$USER/venv-scpipe/bin/activate
+python3 -m venv /scratch/$USER/venv-cellwarden && source /scratch/$USER/venv-cellwarden/bin/activate
 
-# Rust engine first (scpipe depends on scfast): needs cargo >= 1.80. On Iridis keep the
+# Rust engine first (cellwarden depends on scfast): needs cargo >= 1.80. On Iridis keep the
 # toolchain on scratch (export RUSTUP_HOME=/scratch/$USER/rustup CARGO_HOME=/scratch/$USER/cargo).
 curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y && source "${CARGO_HOME:-$HOME/.cargo}/env"
 pip install "maturin>=1.9.4,<2"
@@ -108,21 +108,21 @@ On Iridis X, without a published image, build it on the login node (compute node
 internet), keeping Apptainer's temporary directory on the local disk (GPFS breaks fakeroot builds):
 
 ```bash
-APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif containers/scpipe-build.def
+APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot cellwarden.sif containers/cellwarden-build.def
 ```
 
 Iridis has no `fusermount`, so run the image with `--unsquash` (it unpacks to `APPTAINER_TMPDIR`
 first, ~30 s, in RAM on compute nodes, so jobs need ~96 GB): `apptainer exec --unsquash --nv
-scpipe.sif scpipe doctor`, and put `--unsquash` in `container.options` of the site file.
+cellwarden.sif CellWarden doctor`, and put `--unsquash` in `container.options` of the site file.
 
 Better on Iridis: unpack the image once into a sandbox directory (~130k files, 12 GB) and run that,
 with no `--unsquash` and no extra memory. Unpack on the local disk and copy with `rsync -a`
 (extracting straight onto GPFS drops the execute bits):
 
 ```bash
-apptainer build --sandbox /tmp/$USER-sbx scpipe.sif
-rsync -a /tmp/$USER-sbx/ /iridisfs/ddnb/images/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
-apptainer exec --nv /iridisfs/ddnb/images/scpipe_sandbox scpipe doctor
+apptainer build --sandbox /tmp/$USER-sbx cellwarden.sif
+rsync -a /tmp/$USER-sbx/ /iridisfs/ddnb/images/cellwarden_sandbox/ && rm -rf /tmp/$USER-sbx
+apptainer exec --nv /iridisfs/ddnb/images/cellwarden_sandbox cellwarden doctor
 ```
 
 After a code change, update the sandbox in place instead of rebuilding the image (login node,
@@ -130,7 +130,7 @@ After a code change, update the sandbox in place instead of rebuilding the image
 dependency lists change:
 
 ```bash
-containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox
+containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox
 ```
 
 On Iridis the image (section 0) replaces all of the above: `apptainer pull` it once into
@@ -141,10 +141,10 @@ already passes `--nv`).
 
 ```bash
 cp -r config/examples /scratch/$USER/my_study && cd /scratch/$USER/my_study
-# edit config.yaml: site: iridisx, run_dir: /scratch/$USER/scpipe/my_study, engine: auto,
+# edit config.yaml: site: iridisx, run_dir: /scratch/$USER/cellwarden/my_study, engine: auto,
 # device: auto, plus samples.csv and qc_policy.yaml
 export ANTHROPIC_API_KEY=...              # optional; without it the gates use rules only
-scpipe doctor --config config.yaml        # packages, scfastR/scfast, GPU, LLM key, budget, Open Targets
+cellwarden doctor --config config.yaml        # packages, scfastR/scfast, GPU, LLM key, budget, Open Targets
 ```
 
 `doctor` prints the engine `auto` would choose. For datasets under about 100k cells it will pick
@@ -154,10 +154,10 @@ the Rust CPU engine; above that, with the L4 free, S2 uses rapids-singlecell thr
 **Run, detached so a dropped SSH session does not kill it:**
 
 ```bash
-scpipe run --config config.yaml --detach
-scpipe status --run-dir /scratch/$USER/scpipe/my_study
-scpipe approve --run-dir /scratch/$USER/scpipe/my_study --stage G1 --by $USER   # when a gate waits (exit code 3)
-scpipe resume  --run-dir /scratch/$USER/scpipe/my_study
+cellwarden run --config config.yaml --detach
+cellwarden status --run-dir /scratch/$USER/cellwarden/my_study
+cellwarden approve --run-dir /scratch/$USER/cellwarden/my_study --stage G1 --by $USER   # when a gate waits (exit code 3)
+cellwarden resume  --run-dir /scratch/$USER/cellwarden/my_study
 ```
 
 Results: `S5/report.html` and `S5/explorer.html` in the run directory. Copy them to your laptop with
@@ -183,7 +183,7 @@ Rscript -e 'str(scfastR::scfast_info())'               # cuda_built TRUE, cuda_a
 cd rust/scfast-py && maturin build --release --features cuda,cugraph && pip install target/wheels/scfast-*.whl
 
 # 3. Pipeline-level check, then the scale runs (bench/hpc/README.md)
-scpipe doctor --config config.yaml                       # "scfastR cuda built: ok", "CUDA device visible: ok"
+cellwarden doctor --config config.yaml                       # "scfastR cuda built: ok", "CUDA device visible: ok"
 sbatch --export=ALL,SIZES=50000,ENGINES=seurat-cpu,scfast-cpu,scfast-cuda,rapids bench/hpc/slurm_scale.sh
 ```
 
@@ -199,16 +199,16 @@ Same as above without the `module` lines. On Ubuntu 22.04/24.04:
 sudo apt-get install -y build-essential gfortran git tmux cmake pkg-config \
   libhdf5-dev libcurl4-openssl-dev libssl-dev libxml2-dev libglpk-dev libgsl-dev \
   python3-venv python3-dev r-base r-base-dev
-git clone https://github.com/ad2n15/singlecell-container.git singlecell && cd singlecell
+git clone https://github.com/cellwarden/cellwarden.git singlecell && cd singlecell
 python3 -m venv .venv && source .venv/bin/activate
 # Rust, scfast, the Python package, R packages and scfastR: as in section 1
 # (or skip all of it and use the image, section 0)
-scpipe init-site --out conf/sites/mybox.yaml     # detects scheduler, GPU, container runtime
+cellwarden init-site --out conf/sites/mybox.yaml     # detects scheduler, GPU, container runtime
 ```
 
 Set `site: workstation` (or your generated file) and run exactly as in section 1.
-With Docker and an NVIDIA GPU: `docker build -t scpipe -f containers/Dockerfile .` then
-`docker run --rm --gpus all -v $PWD:/work scpipe scpipe doctor`. Without a GPU, drop `--gpus all`
+With Docker and an NVIDIA GPU: `docker build -t cellwarden -f containers/Dockerfile .` then
+`docker run --rm --gpus all -v $PWD:/work cellwarden cellwarden doctor`. Without a GPU, drop `--gpus all`
 and use `device: cpu`.
 
 ## 3. Windows

@@ -1,4 +1,4 @@
-"""Tests for scpipe.config (docs/stages-spec.md section 4)."""
+"""Tests for cellwarden.config (docs/stages-spec.md section 4)."""
 
 import json
 from pathlib import Path
@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import qc
+from cellwarden import config as C
+from cellwarden import qc
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "tests" / "fixtures" / "pbmc_like"
@@ -70,9 +70,9 @@ def test_sample_paths_relative_to_config_dir(tmp_path):
 def test_env_expansion_and_override(tmp_path, monkeypatch):
     monkeypatch.setenv("USER", "alice")
     monkeypatch.setenv("SCRATCH_X", str(tmp_path / "scratch"))
-    proj = make_project(tmp_path, {"run_dir": "${SCRATCH_X}/$USER/scpipe/demo"})
+    proj = make_project(tmp_path, {"run_dir": "${SCRATCH_X}/$USER/cellwarden/demo"})
     cfg = C.load_config(proj / "config.yaml")
-    assert cfg["run_dir"] == str(tmp_path / "scratch" / "alice" / "scpipe" / "demo")
+    assert cfg["run_dir"] == str(tmp_path / "scratch" / "alice" / "cellwarden" / "demo")
     monkeypatch.chdir(tmp_path)
     cfg = C.load_config(proj / "config.yaml", run_dir="elsewhere/r1")
     assert cfg["run_dir"] == str(tmp_path / "elsewhere" / "r1")
@@ -303,7 +303,7 @@ def test_engine_scfast_gpu_conflict(tmp_path):
 
 
 def test_engine_in_stage_fingerprints_and_example():
-    from scpipe import runner as R
+    from cellwarden import runner as R
 
     for st in ("S1a", "S1b", "S2"):
         assert "engine" in R.STAGE_CONFIG_KEYS[st]
@@ -314,7 +314,7 @@ def test_engine_in_stage_fingerprints_and_example():
 
 
 def test_engine_gpu_default_values_and_fingerprints(tmp_path):
-    from scpipe import runner as R
+    from cellwarden import runner as R
 
     proj = make_project(tmp_path)
     assert C.load_config(proj / "config.yaml")["engine_gpu"] == "auto"

@@ -14,7 +14,7 @@
 #                             subsample), so the explorer can colour by gene
 #          S5/export.json     what was exported and why
 #
-# The Python side (python/scpipe/stages/s5_report.py) runs this through
+# The Python side (python/cellwarden/stages/s5_report.py) runs this through
 # `Rscript R/stages/run_stage.R --stage S5 --run-dir DIR`, then builds the HTML.
 
 s5_find_object <- function(cfg) {

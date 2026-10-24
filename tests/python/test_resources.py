@@ -1,4 +1,4 @@
-"""Tests for scpipe.resources.choose_plan and its CLI (docs/stages-spec.md section 5)."""
+"""Tests for cellwarden.resources.choose_plan and its CLI (docs/stages-spec.md section 5)."""
 
 import json
 import os
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scpipe import gpu_core, resources as R
+from cellwarden import gpu_core, resources as R
 
 REPO = Path(__file__).resolve().parents[2]
 GPU = {"available": True, "kind": "cuda", "reason": "1 CUDA device(s)", "total_gb": 24.0, "free_gb": 23.0}
@@ -76,10 +76,10 @@ def test_free_memory_lowers_budget():
 
 
 def test_cap_defaults(monkeypatch):
-    monkeypatch.delenv("SCPIPE_GPU_MEM_CAP_GB", raising=False)
+    monkeypatch.delenv("CELLWARDEN_GPU_MEM_CAP_GB", raising=False)
     p = R.choose_plan(1000, 2000, "auto", GPU)  # no cap -> GPU total, lowered to free
     assert p["gpu_mem_cap_gb"] == 24.0 and p["gpu_budget_gb"] == 23.0
-    monkeypatch.setenv("SCPIPE_GPU_MEM_CAP_GB", "4")
+    monkeypatch.setenv("CELLWARDEN_GPU_MEM_CAP_GB", "4")
     assert R.choose_plan(1000, 2000, "auto", GPU)["gpu_mem_cap_gb"] == 4.0
 
 
@@ -89,7 +89,7 @@ def test_bad_device():
 
 
 def test_real_gpu_info_on_this_machine(monkeypatch):
-    monkeypatch.delenv("SCPIPE_ALLOW_CPU_AS_GPU", raising=False)
+    monkeypatch.delenv("CELLWARDEN_ALLOW_CPU_AS_GPU", raising=False)
     ok, _ = gpu_core.gpu_available()
     info = R.gpu_info(20)
     assert info["available"] == ok
@@ -100,7 +100,7 @@ def test_real_gpu_info_on_this_machine(monkeypatch):
 def test_cpu_as_gpu_override(monkeypatch):
     if gpu_core.gpu_available()[0]:
         pytest.skip("a real GPU is present")
-    monkeypatch.setenv("SCPIPE_ALLOW_CPU_AS_GPU", "1")
+    monkeypatch.setenv("CELLWARDEN_ALLOW_CPU_AS_GPU", "1")
     info = R.gpu_info(20)
     assert info["available"] and info["kind"] == "cpu-as-gpu" and info["total_gb"] == 20 and info["free_gb"] == 20
     p = R.choose_plan(1000, 2000, "gpu", gpu_mem_cap_gb=20)
@@ -110,7 +110,7 @@ def test_cpu_as_gpu_override(monkeypatch):
     p = R.choose_plan(cells_for(30), 2000, "auto", gpu_mem_cap_gb=20)
     assert p["plan"] == "cpu"
     assert gpu_core._resolve_device("gpu") == "cpu-as-gpu"
-    monkeypatch.setenv("SCPIPE_ALLOW_CPU_AS_GPU", "0")
+    monkeypatch.setenv("CELLWARDEN_ALLOW_CPU_AS_GPU", "0")
     assert R.gpu_info(20)["available"] is False
     with pytest.raises(gpu_core.DeviceError):
         gpu_core._resolve_device("gpu")
@@ -118,9 +118,9 @@ def test_cpu_as_gpu_override(monkeypatch):
 
 def _cli(*args, env_extra=None):
     env = dict(os.environ, PYTHONPATH=str(REPO / "python"))
-    env.pop("SCPIPE_ALLOW_CPU_AS_GPU", None)
+    env.pop("CELLWARDEN_ALLOW_CPU_AS_GPU", None)
     env.update(env_extra or {})
-    return subprocess.run([sys.executable, "-m", "scpipe.resources", *args], capture_output=True, text=True, env=env)
+    return subprocess.run([sys.executable, "-m", "cellwarden.resources", *args], capture_output=True, text=True, env=env)
 
 
 def test_cli_choose_plan():
@@ -132,7 +132,7 @@ def test_cli_choose_plan():
         r = _cli("choose-plan", "--n-cells", "5000", "--n-hvg", "2000", "--device", "gpu", "--gpu-mem-cap-gb", "20")
         assert r.returncode == 2 and json.loads(r.stderr)["error"] == "PlanError"
         r = _cli("choose-plan", "--n-cells", "5000", "--n-hvg", "2000", "--device", "gpu",
-                 env_extra={"SCPIPE_ALLOW_CPU_AS_GPU": "1", "SCPIPE_GPU_MEM_CAP_GB": "20"})
+                 env_extra={"CELLWARDEN_ALLOW_CPU_AS_GPU": "1", "CELLWARDEN_GPU_MEM_CAP_GB": "20"})
         assert r.returncode == 0, r.stderr
         out = json.loads(r.stdout)
         assert out["device"] == "gpu" and out["plan"] == "in_memory" and out["gpu_mem_cap_gb"] == 20

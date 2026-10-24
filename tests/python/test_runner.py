@@ -1,4 +1,4 @@
-"""Tests for the scpipe runner (docs/stages-spec.md section 1) with dummy stage commands."""
+"""Tests for the cellwarden runner (docs/stages-spec.md section 1) with dummy stage commands."""
 
 import io
 import json
@@ -12,8 +12,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import runner as R
+from cellwarden import config as C
+from cellwarden import runner as R
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -23,10 +23,10 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = r"""
 import json, os, sys, pathlib
 sid, outs, ins, dels = sys.argv[1], json.loads(sys.argv[2]), json.loads(sys.argv[3]), json.loads(sys.argv[4])
-rd = pathlib.Path(os.environ["SCPIPE_RUN_DIR"])
+rd = pathlib.Path(os.environ["CELLWARDEN_RUN_DIR"])
 with open(rd / "calls.log", "a") as f:
     f.write(sid + "\n")
-pref = ("SCPIPE_", "OMP_", "OPENBLAS_", "MKL_", "VECLIB_", "NUMBA_", "PYTHONPATH", "R_MAX_VSIZE")
+pref = ("CELLWARDEN_", "OMP_", "OPENBLAS_", "MKL_", "VECLIB_", "NUMBA_", "PYTHONPATH", "R_MAX_VSIZE")
 env = {k: v for k, v in os.environ.items() if k.startswith(pref)}
 env["__nice__"] = os.nice(0)
 env["__cwd__"] = os.getcwd()
@@ -140,7 +140,7 @@ def test_first_run_then_skip(project):
         assert r["started_utc"].endswith("Z") and r["ended_utc"].endswith("Z")
         assert len(r["fingerprint"]) == 64 and r["log"] == f"logs/{sid}.log"
         log = (rd / r["log"]).read_text()
-        assert f"{sid}: working" in log and log.startswith("# scpipe: started") and "exit code 0" in log
+        assert f"{sid}: working" in log and log.startswith("# cellwarden: started") and "exit code 0" in log
     assert set(st["stages"]["S2"]["fingerprint_parts"]["config"]) == set(R.STAGE_CONFIG_KEYS["S2"])
     assert not (rd / "S1" / "metrics_counts.h5ad").exists()  # deleted by "S1c"
 
@@ -221,7 +221,7 @@ def test_failure_then_resume(project):
     assert "FAILED (exit code 3)" in out
     # The last 20 log lines are shown (stdout and stderr both captured), not more.
     assert "S1b boom line 29" in out and "S1b boom line 12" in out and "S1b boom line 8" not in out
-    assert "scpipe resume --run-dir" in out
+    assert "cellwarden resume --run-dir" in out
     log = (rd / "logs" / "S1b.log").read_text()
     assert "boom line 1" in log and "boom line 2" in log
 
@@ -310,16 +310,16 @@ def test_env_caps_and_nice(project):
     run(project)
     env = json.loads((rd / "env_S1b.json").read_text())
     for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-              "NUMBA_NUM_THREADS", "SCPIPE_THREADS"):
+              "NUMBA_NUM_THREADS", "CELLWARDEN_THREADS"):
         assert env[k] == "3", k
-    assert env["SCPIPE_MAX_MEMORY_GB"] == "12" and env["R_MAX_VSIZE"] == "12Gb"
-    assert env["SCPIPE_GPU_MEM_CAP_GB"] == "7.5"
-    assert env["SCPIPE_PYTHON"] == sys.executable
-    assert env["SCPIPE_RUN_DIR"] == str(rd)
-    assert env["SCPIPE_REPO_ROOT"] == str(REPO)
-    assert env["SCPIPE_CONFIG"] == str(rd / "config" / "config.resolved.yaml")
-    assert env["SCPIPE_STAGE"] == "S1b"
-    assert env["SCPIPE_RUN_ID"] == C.load_resolved(rd)["run_id"]
+    assert env["CELLWARDEN_MAX_MEMORY_GB"] == "12" and env["R_MAX_VSIZE"] == "12Gb"
+    assert env["CELLWARDEN_GPU_MEM_CAP_GB"] == "7.5"
+    assert env["CELLWARDEN_PYTHON"] == sys.executable
+    assert env["CELLWARDEN_RUN_DIR"] == str(rd)
+    assert env["CELLWARDEN_REPO_ROOT"] == str(REPO)
+    assert env["CELLWARDEN_CONFIG"] == str(rd / "config" / "config.resolved.yaml")
+    assert env["CELLWARDEN_STAGE"] == "S1b"
+    assert env["CELLWARDEN_RUN_ID"] == C.load_resolved(rd)["run_id"]
     assert env["PYTHONPATH"].split(os.pathsep)[0] == str(REPO / "python")
     assert env["__cwd__"] == str(rd)
     assert env["__nice__"] == min(19, os.nice(0) + 5)
@@ -329,31 +329,31 @@ def test_env_caps_and_nice(project):
 def test_stage_env_unit(tmp_path):
     cfg = {"resources": {"threads": 2, "max_memory_gb": 64, "gpu_mem_cap_gb": 20, "nice": 10}, "run_id": "r",
            "repo_root": "/repo"}
-    env = R.stage_env(cfg, tmp_path, "S2", base={"PYTHONPATH": "/other:/repo/python", "SCPIPE_ALLOW_CPU_AS_GPU": "1",
+    env = R.stage_env(cfg, tmp_path, "S2", base={"PYTHONPATH": "/other:/repo/python", "CELLWARDEN_ALLOW_CPU_AS_GPU": "1",
                                                    "NUMBA_CACHE_DIR": "/keep"})
     assert env["PYTHONPATH"] == "/repo/python:/other"
-    assert env["SCPIPE_ALLOW_CPU_AS_GPU"] == "1"  # inherited
+    assert env["CELLWARDEN_ALLOW_CPU_AS_GPU"] == "1"  # inherited
     assert env["NUMBA_CACHE_DIR"] == "/keep"
-    assert env["SCPIPE_MAX_MEMORY_GB"] == "64" and env["OMP_NUM_THREADS"] == "2"
+    assert env["CELLWARDEN_MAX_MEMORY_GB"] == "64" and env["OMP_NUM_THREADS"] == "2"
 
 
 def test_r_stage_command_and_rscript_override(tmp_path, monkeypatch):
     ctx = R.RunContext(tmp_path, {}, REPO)
     st = {s.id: s for s in R.default_stages()}
-    monkeypatch.delenv("SCPIPE_RSCRIPT", raising=False)
+    monkeypatch.delenv("CELLWARDEN_RSCRIPT", raising=False)
     assert st["S0"].command(ctx) == ["Rscript", str(REPO / "R" / "stages" / "run_stage.R"), "--stage", "S0",
                                      "--run-dir", str(tmp_path)]
-    monkeypatch.setenv("SCPIPE_RSCRIPT", "/opt/R/bin/Rscript")
+    monkeypatch.setenv("CELLWARDEN_RSCRIPT", "/opt/R/bin/Rscript")
     assert st["S2"].command(ctx)[0] == "/opt/R/bin/Rscript" and st["S2"].command(ctx)[3] == "S2"
-    assert st["S1b"].command(ctx) == [sys.executable, "-m", "scpipe.stages.s1b_doublets", "--run-dir", str(tmp_path)]
-    assert st["S1c"].command(ctx)[2] == "scpipe.stages.s1c_qc"
+    assert st["S1b"].command(ctx) == [sys.executable, "-m", "cellwarden.stages.s1b_doublets", "--run-dir", str(tmp_path)]
+    assert st["S1c"].command(ctx)[2] == "cellwarden.stages.s1c_qc"
     # docs/agents-spec.md section 1: S0 S1a S1b S1c G1 S2 S3 G2 G3 S4 G4 S5
     real = [s.id for s in R.default_stages()]
     assert real[:6] == ["S0", "S1a", "S1b", "S1c", "G1", "S2"]
     assert [s.lang for s in R.default_stages()][:6] == ["R", "R", "python", "python", "python", "R"]
-    assert st["G1"].command(ctx)[2] == "scpipe.gates.g1_qc"
+    assert st["G1"].command(ctx)[2] == "cellwarden.gates.g1_qc"
     assert "S1/qc_decisions.tsv.gz" in st["G1"].inputs and "S1/qc_decisions.tsv.gz" in st["G1"].outputs
-    assert st["S4"].command(ctx)[2] == "scpipe.stages.s4" and st["S4"].optional_inputs
+    assert st["S4"].command(ctx)[2] == "cellwarden.stages.s4" and st["S4"].optional_inputs
 
 
 def test_status_output(project):
@@ -395,10 +395,10 @@ def test_concurrent_runner_refused(project):
     run(project, "--until", "S0")
     cfg = C.load_resolved(rd)
     with R._Lock(rd):
-        with pytest.raises(R.RunnerError, match="another scpipe runner"):
+        with pytest.raises(R.RunnerError, match="another cellwarden runner"):
             R.run_pipeline(rd, cfg, stages=dummy_stages(), out=io.StringIO())
         code, out = run(project)
-        assert code == 2 and "another scpipe runner" in out
+        assert code == 2 and "another cellwarden runner" in out
         assert "a runner is active" in R.status_text(rd, dummy_stages())
 
 
@@ -459,7 +459,7 @@ def test_doctor(project, tmp_path):
 
 def test_doctor_cli_json(tmp_path):
     env = dict(os.environ, PYTHONPATH=str(REPO / "python"))
-    r = subprocess.run([sys.executable, "-m", "scpipe", "doctor", "--json", "--run-dir", str(tmp_path / "x")],
+    r = subprocess.run([sys.executable, "-m", "cellwarden", "doctor", "--json", "--run-dir", str(tmp_path / "x")],
                        capture_output=True, text=True, env=env, timeout=300)
     rep = json.loads(r.stdout)
     assert r.returncode == (0 if rep["ok"] else 1)
@@ -468,14 +468,14 @@ def test_doctor_cli_json(tmp_path):
 
 def test_detach_commands(tmp_path):
     m, cmd, how = R.detach_command(["run", "--config", "c.yaml"], tmp_path, "my run/1", method="tmux")
-    assert cmd[:4] == ["tmux", "new-session", "-d", "-s"] and cmd[4] == "scpipe-my-run-1"
-    assert "tmux attach -t scpipe-my-run-1" in how and "logs/runner.log" in how
-    assert "-m scpipe run --config c.yaml" in cmd[5]
+    assert cmd[:4] == ["tmux", "new-session", "-d", "-s"] and cmd[4] == "cellwarden-my-run-1"
+    assert "tmux attach -t cellwarden-my-run-1" in how and "logs/runner.log" in how
+    assert "-m cellwarden run --config c.yaml" in cmd[5]
     m, cmd, how = R.detach_command(["run"], tmp_path, "r", method="tmux", env_file=tmp_path / "e.json")
-    assert "--env-file" in cmd[5] and "SCPIPE_" not in cmd[5].split("--env-file")[0]
+    assert "--env-file" in cmd[5] and "CELLWARDEN_" not in cmd[5].split("--env-file")[0]
     m, cmd, how = R.detach_command(["resume", "--run-dir", str(tmp_path)], tmp_path, "r", method="nohup")
-    assert cmd[0] == "nohup" and cmd[1:4] == [sys.executable, "-m", "scpipe"]
-    assert "tail -f" in how and "scpipe status" in how
+    assert cmd[0] == "nohup" and cmd[1:4] == [sys.executable, "-m", "cellwarden"]
+    assert "tail -f" in how and "cellwarden status" in how
 
 
 def _wait_done(rd, timeout=60):
@@ -497,8 +497,8 @@ def test_detach_end_to_end(project, method):
         pytest.skip(f"{method} not installed")
     rd = rd_of(project)
     env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(REPO / "python"), str(Path(__file__).parent)]),
-               SCPIPE_STAGES="test_runner:dummy_stages", SCPIPE_DETACH_WITH=method)
-    r = subprocess.run([sys.executable, "-m", "scpipe", "run", "--config", str(project / "config.yaml"), "--detach"],
+               CELLWARDEN_STAGES="test_runner:dummy_stages", CELLWARDEN_DETACH_WITH=method)
+    r = subprocess.run([sys.executable, "-m", "cellwarden", "run", "--config", str(project / "config.yaml"), "--detach"],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
     assert ("tmux attach -t" in r.stdout) if method == "tmux" else ("nohup" in r.stdout)
@@ -506,8 +506,8 @@ def test_detach_end_to_end(project, method):
         _wait_done(rd)
     finally:
         if method == "tmux":
-            subprocess.run(["tmux", "kill-session", "-t", "scpipe-" + C.load_resolved(rd)["run_id"][:60]],
+            subprocess.run(["tmux", "kill-session", "-t", "cellwarden-" + C.load_resolved(rd)["run_id"][:60]],
                            capture_output=True)
     assert calls(rd) == ALL
     assert "finished up to S2" in (rd / "logs" / "runner.log").read_text()
-    assert not list(rd.glob(".scpipe-env-*"))  # the env hand-over file is removed
+    assert not list(rd.glob(".cellwarden-env-*"))  # the env hand-over file is removed

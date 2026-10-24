@@ -1,4 +1,4 @@
-"""Command-line data inputs: scpipe run a.h5 b.rds c.h5ad (python/scpipe/inputs.py)."""
+"""Command-line data inputs: cellwarden run a.h5 b.rds c.h5ad (python/cellwarden/inputs.py)."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import inputs as I
-from scpipe import runner as R
+from cellwarden import config as C
+from cellwarden import inputs as I
+from cellwarden import runner as R
 
 REPO = Path(__file__).resolve().parents[2]
 STAGE_INPUTS = REPO / "tests" / "fixtures" / "stage_inputs"
@@ -115,8 +115,8 @@ def test_meta_parsing():
 
 def test_default_out_dir_and_overwrite_guard(tmp_path):
     rows = [{"sample_id": "donorA"}]
-    assert I.default_out_dir(rows, today=dt.date(2026, 10, 23), cwd=tmp_path) == tmp_path / "scpipe_donorA_20261023"
-    assert I.default_out_dir(rows, name="my study", today=dt.date(2026, 10, 23), cwd=tmp_path).name == "scpipe_my_study_20261023"
+    assert I.default_out_dir(rows, today=dt.date(2026, 10, 23), cwd=tmp_path) == tmp_path / "cellwarden_donorA_20261023"
+    assert I.default_out_dir(rows, name="my study", today=dt.date(2026, 10, 23), cwd=tmp_path).name == "cellwarden_my_study_20261023"
     busy = _touch(tmp_path / "busy" / "thesis.docx").parent
     with pytest.raises(C.ConfigError, match="not empty"):
         I.check_out_dir(busy)
@@ -171,4 +171,4 @@ def test_cli_parses_inputs_and_requires_something(tmp_path, monkeypatch):
         R._run_config_path(R._parser().parse_args(["run"]))
     a = R._parser().parse_args(["run", str(STAGE_INPUTS / "donor_B.h5ad")])
     path, _ = R._run_config_path(a)
-    assert Path(path).parents[1].name.startswith("scpipe_donor_B_")
+    assert Path(path).parents[1].name.startswith("cellwarden_donor_B_")

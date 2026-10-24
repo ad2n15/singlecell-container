@@ -1,4 +1,4 @@
-# scpipe R stages: shared helpers (config, logging, object I/O, threads, JSON,
+# cellwarden R stages: shared helpers (config, logging, object I/O, threads, JSON,
 # gene patterns). Sourced by R/stages/run_stage.R together with
 # R/exchange/exchange.R and the stage files. See docs/stages-spec.md.
 
@@ -133,7 +133,7 @@ scp_resolve_engine <- function(cfg, device = "cpu") {
 # --------------------------------------------------------------------------
 
 .SCP_DEFAULTS <- list(
-  project = "scpipe", seed = 42L, object_format = "rds",
+  project = "cellwarden", seed = 42L, object_format = "rds",
   resources = list(threads = 1L, max_memory_gb = 16, gpu_mem_cap_gb = 20, nice = 10L),
   doublets = list(method = "scrublet"),
   qc = list(review_action = "keep"),
@@ -210,11 +210,11 @@ scp_stage_dir <- function(cfg, stage) {
 # Threads
 # --------------------------------------------------------------------------
 
-#' Thread caps from SCPIPE_THREADS (falls back to resources.threads):
+#' Thread caps from CELLWARDEN_THREADS (falls back to resources.threads):
 #' Seurat::setThreads() when that Seurat version has it, data.table and BLAS
 #' (RhpcBLASctl) when installed; future plan sequential.
 scp_setup_threads <- function(cfg) {
-  n <- suppressWarnings(as.integer(Sys.getenv("SCPIPE_THREADS", "")))
+  n <- suppressWarnings(as.integer(Sys.getenv("CELLWARDEN_THREADS", "")))
   if (is.na(n) || n < 1) n <- as.integer(cfg$resources$threads %||% 1L)
   if (is.na(n) || n < 1) n <- 1L
   if (scp_has_pkg("Seurat") && exists("setThreads", envir = asNamespace("Seurat"), inherits = FALSE)) {
@@ -227,7 +227,7 @@ scp_setup_threads <- function(cfg) {
     try(RhpcBLASctl::omp_set_num_threads(n), silent = TRUE)
   }
   if (scp_has_pkg("future")) future::plan("sequential")
-  mem <- suppressWarnings(as.numeric(Sys.getenv("SCPIPE_MAX_MEMORY_GB", "")))
+  mem <- suppressWarnings(as.numeric(Sys.getenv("CELLWARDEN_MAX_MEMORY_GB", "")))
   if (is.na(mem)) mem <- as.numeric(cfg$resources$max_memory_gb %||% 16)
   options(future.globals.maxSize = mem * 1024^3)
   invisible(n)
@@ -263,7 +263,7 @@ scp_save_object <- function(obj, stage_dir, format = "rds") {
   path <- file.path(stage_dir, paste0("object.", format))
   other <- file.path(stage_dir, paste0("object.", if (format == "rds") "qs2" else "rds"))
   if (format == "qs2") {
-    nt <- suppressWarnings(as.integer(Sys.getenv("SCPIPE_THREADS", "1")))
+    nt <- suppressWarnings(as.integer(Sys.getenv("CELLWARDEN_THREADS", "1")))
     if (is.na(nt) || nt < 1) nt <- 1L
     .scp_atomic(path, function(p) qs2::qs_save(obj, p, nthreads = nt))
   } else {

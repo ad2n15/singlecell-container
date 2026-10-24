@@ -1,6 +1,6 @@
-# Getting started with scpipe
+# Getting started with CellWarden
 
-scpipe takes single-cell RNA-seq count files and runs the whole analysis:
+CellWarden takes single-cell RNA-seq count files and runs the whole analysis:
 
 - QC, doublet removal, normalisation, batch correction and clustering;
 - cell-type annotation;
@@ -35,7 +35,7 @@ This page covers the everyday path: install, check, run, find the results. The d
 | | Requirement |
 |---|---|
 | **Computer** | Linux x86_64: an HPC login or compute node, a workstation, or a cloud VM. macOS / Windows through Docker Desktop (section 2A) or WSL2 ([INSTALL.md](INSTALL.md)). |
-| **Container runtime** | Apptainer ≥ 1.3 (HPC) or Docker (workstation, cloud, macOS / Windows via Docker Desktop). Everything else (R 4.6, Seurat 5, Bioconductor, Python 3.12, the Rust engine, CellTypist, RAPIDS) is inside the scpipe image. |
+| **Container runtime** | Apptainer ≥ 1.3 (HPC) or Docker (workstation, cloud, macOS / Windows via Docker Desktop). Everything else (R 4.6, Seurat 5, Bioconductor, Python 3.12, the Rust engine, CellTypist, RAPIDS) is inside the CellWarden image. |
 | **Disk** | The image is 6.6 GB as a `.sif` file, or 12 GB / ~133k files unpacked as a sandbox. Each run needs a few hundred MB to a few GB, depending on the number of cells. |
 | **Memory** | PBMC 3k (2,700 cells) peaks at about 1.4 GB. Memory grows with the number of cells; for 100k+ cells start with 64 GB, and check the peak memory shown per stage. |
 | **CPU / GPU** | 8 cores is a good default. A GPU (e.g. NVIDIA L4) is optional; the CPU path is complete. |
@@ -47,39 +47,39 @@ This page covers the everyday path: install, check, run, find the results. The d
 
 ## 2. Install
 
-The image is published on Docker Hub as **`ad2n15/scpipe`**, with a mirror on GitHub as
-`ghcr.io/ad2n15/scpipe`. Use a version tag (`0.2.0`) for reproducible work, or `latest`.
-[Releases](https://github.com/ad2n15/singlecell-container/releases) lists the versions.
+The image is published on Docker Hub as **`cellwarden/cellwarden`**, with a mirror on GitHub as
+`ghcr.io/cellwarden/cellwarden`. Use a version tag (`0.2.0`) for reproducible work, or `latest`.
+[Releases](https://github.com/cellwarden/cellwarden/releases) lists the versions.
 
 ### Option A: Docker (workstation, cloud VM, macOS / Windows)
 
 You need Docker. For a GPU you also need the NVIDIA Container Toolkit (Linux).
 
 ```bash
-docker pull ad2n15/scpipe:0.2.0
+docker pull cellwarden/cellwarden:0.2.0
 ```
 
-**Make a short command.** The image starts `scpipe` in `/work`, so mount your project folder
+**Make a short command.** The image starts `cellwarden` in `/work`, so mount your project folder
 there:
 
 ```bash
-alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" ad2n15/scpipe:0.2.0'
-mkdir -p ~/.scpipe
-scpipe-docker doctor
+alias cellwarden-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/cellwarden -v "$HOME/.cellwarden:/home/cellwarden/.cellwarden" -v "$PWD:/work" cellwarden/cellwarden:0.2.0'
+mkdir -p ~/.cellwarden
+cellwarden-docker doctor
 ```
 
 | Part | Why |
 |---|---|
 | `-it` | Keeps the terminal, for the progress display, `-i` and the DE questions. |
 | `--user` | Results belong to you, not the image's user. |
-| `~/.scpipe` mount | The LLM budget ledger and the time-left history persist between runs. |
+| `~/.cellwarden` mount | The LLM budget ledger and the time-left history persist between runs. |
 | `-v "$PWD:/work"` | Data paths must be inside the current folder, given as relative paths. For data elsewhere, add `-v /data:/data:ro` and use `/data/...` paths. |
 
 **Run.** From the folder that holds the data:
 
 ```bash
-cd ~/scpipe-test
-scpipe-docker run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
+cd ~/cellwarden-test
+cellwarden-docker run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
 ```
 
 Add these options to the alias, before the image name:
@@ -98,8 +98,8 @@ WSL2 ([INSTALL.md](INSTALL.md)).
 ### Option B: Apptainer / Singularity (HPC)
 
 ```bash
-apptainer pull scpipe.sif docker://ad2n15/scpipe:0.2.0      # or docker://ghcr.io/ad2n15/scpipe:0.2.0
-apptainer exec --cleanenv scpipe.sif scpipe doctor
+apptainer pull cellwarden.sif docker://cellwarden/cellwarden:0.2.0      # or docker://ghcr.io/cellwarden/cellwarden:0.2.0
+apptainer exec --cleanenv cellwarden.sif cellwarden doctor
 ```
 
 - **Shared clusters:** Docker Hub limits anonymous pulls per IP address, and a cluster's users
@@ -108,10 +108,10 @@ apptainer exec --cleanenv scpipe.sif scpipe doctor
   `APPTAINER_TMPDIR` and `APPTAINER_CACHEDIR` to a disk with space, not home.
 - **Sites without `fusermount` (Iridis):** a `.sif` only runs with `--unsquash`, which unpacks it
   into RAM on every start. Unpack it once into a sandbox folder, then use that folder in place of
-  `scpipe.sif`:
+  `cellwarden.sif`:
   ```bash
-  apptainer build --sandbox /tmp/$USER-sbx docker://ad2n15/scpipe:0.2.0
-  rsync -a /tmp/$USER-sbx/ /path/to/shared/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
+  apptainer build --sandbox /tmp/$USER-sbx docker://cellwarden/cellwarden:0.2.0
+  rsync -a /tmp/$USER-sbx/ /path/to/shared/cellwarden_sandbox/ && rm -rf /tmp/$USER-sbx
   ```
   The `rsync -a` step matters on GPFS: unpacking straight onto it loses the execute permissions.
 
@@ -119,19 +119,19 @@ To save typing, define a shell function, for example in `~/.bashrc` (use your `.
 path):
 
 ```bash
-scpipe() { apptainer exec --cleanenv --env-file "${SCPIPE_ENV:-/dev/null}" -B /iridisfs,/scratch /path/to/scpipe.sif scpipe "$@"; }
+cellwarden() { apptainer exec --cleanenv --env-file "${CELLWARDEN_ENV:-/dev/null}" -B /iridisfs,/scratch /path/to/cellwarden.sif cellwarden "$@"; }
 ```
 
-`scpipe run ...` then works like a local command. `SCPIPE_ENV=.env` passes your API keys
+`cellwarden run ...` then works like a local command. `CELLWARDEN_ENV=.env` passes your API keys
 (section 3). `-B` binds the filesystems your data lives on.
 
 ### Option C: Iridis X, shared copy (nothing to install)
 
-For the DDnB group the image is already unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`:
+For the DDnB group the image is already unpacked at `/iridisfs/ddnb/images/cellwarden_sandbox`:
 
 ```bash
 module load apptainer/1.4.0
-apptainer exec --cleanenv /iridisfs/ddnb/images/scpipe_sandbox scpipe doctor
+apptainer exec --cleanenv /iridisfs/ddnb/images/cellwarden_sandbox cellwarden doctor
 ```
 
 The shell function above works with this path.
@@ -142,25 +142,25 @@ This is for development, or for sites that build every image themselves. It take
 minutes, needs internet, and about 15 GB of disk:
 
 ```bash
-git clone https://github.com/ad2n15/singlecell-container.git && cd singlecell-container
-docker build -t scpipe -f containers/Dockerfile .                                            # Docker
-APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot scpipe.sif containers/scpipe-build.def   # Apptainer
+git clone https://github.com/cellwarden/cellwarden.git && cd singlecell-container
+docker build -t cellwarden -f containers/Dockerfile .                                            # Docker
+APPTAINER_TMPDIR=/tmp/$USER-apptainer apptainer build --fakeroot cellwarden.sif containers/cellwarden-build.def   # Apptainer
 ```
 
 After a code change, update a sandbox in place in about 20 s, instead of rebuilding. Without
 `--code-only` it also rebuilds the Rust engine, in about 5 minutes:
 
 ```bash
-containers/update_sandbox.sh /path/to/scpipe_sandbox --code-only
+containers/update_sandbox.sh /path/to/cellwarden_sandbox --code-only
 ```
 
 ### Check the install
 
 ```bash
-scpipe doctor
+cellwarden doctor
 ```
 
-With Docker this is `scpipe-docker doctor`. It lists the Python and R packages, the GPU, the LLM
+With Docker this is `cellwarden-docker doctor`. It lists the Python and R packages, the GPU, the LLM
 provider (with a test call), the budget and Open Targets. Every **required** line must say `ok`.
 
 ---
@@ -168,7 +168,7 @@ provider (with a test call), the budget and Open Targets. Every **required** lin
 ## 3. Connect an AI backend (optional)
 
 The review agents at the four gates (section 7) call a large language model. Connect one by
-setting **one** API key, or by pointing scpipe at a model server you run yourself. Without a
+setting **one** API key, or by pointing CellWarden at a model server you run yourself. Without a
 backend everything still runs: the gates decide by rules and stop for your approval.
 
 | Provider | Key variable | Get a key | Default model |
@@ -190,19 +190,19 @@ chmod 600 .env
   Lines starting with `#` are comments.
 - **Keep it private:** `chmod 600` makes it readable only by you. Never commit it (add `.env` to
   `.gitignore`).
-- **Where the key goes:** scpipe never writes the key anywhere. The run records only which
+- **Where the key goes:** CellWarden never writes the key anywhere. The run records only which
   variable it used.
 
-**Step 2: pass the file to scpipe.** Containers don't see your shell's variables unless told:
+**Step 2: pass the file to cellwarden.** Containers don't see your shell's variables unless told:
 
-| How you run scpipe | Add |
+| How you run CellWarden | Add |
 |---|---|
-| Docker (section 2A) | `--env-file .env` in the `docker run` command or the `scpipe-docker` alias |
+| Docker (section 2A) | `--env-file .env` in the `docker run` command or the `cellwarden-docker` alias |
 | Apptainer `.sif` or sandbox (2B, 2C) | `--env-file .env` after `apptainer exec --cleanenv` |
-| The `scpipe` shell function (2B) | `SCPIPE_ENV=.env scpipe run ...` |
-| A native install (no container) | `set -a; source .env; set +a` before `scpipe run` |
+| The `cellwarden` shell function (2B) | `CELLWARDEN_ENV=.env cellwarden run ...` |
+| A native install (no container) | `set -a; source .env; set +a` before `cellwarden run` |
 
-**Step 3: check it.** `scpipe doctor`, run the same way, makes a small test call:
+**Step 3: check it.** `cellwarden doctor`, run the same way, makes a small test call:
 
 ```
 llm:
@@ -210,13 +210,13 @@ llm:
   [  ok] api key                $NVIDIA_API_KEY is set (provider nvidia)
   [  ok] endpoint               https://integrate.api.nvidia.com/v1: HTTP 404 (host reachable)
   [  ok] tool-use test          ok: stop_reason=tool_use, tool_calls=1
-  [  ok] budget                 GBP 3.57 of 30.00 spent across runs (/home/you/.scpipe/ledger.json)
+  [  ok] budget                 GBP 3.57 of 30.00 spent across runs (/home/you/.cellwarden/ledger.json)
 ```
 
-`provider ... none: no API key set` means the key didn't reach scpipe; see step 2.
+`provider ... none: no API key set` means the key didn't reach CellWarden; see step 2.
 
 **Choosing a provider and model:**
-- **Several keys:** scpipe uses Claude first, then OpenAI, then NVIDIA.
+- **Several keys:** CellWarden uses Claude first, then OpenAI, then NVIDIA.
 - **Pick one per run:** `--llm nvidia` (or `anthropic`, `openai`, `none`).
 - **Another model:** `--llm-model <name>`. It must support tool (function) calling.
 - **In a config file:** `llm: {default: {provider: nvidia, model: ...}}`.
@@ -247,21 +247,21 @@ llm:
 This runs the classic 10x PBMC 3k dataset. Use the copy in the repository, or download it:
 
 ```bash
-mkdir -p ~/scpipe-test && cd ~/scpipe-test
+mkdir -p ~/cellwarden-test && cd ~/cellwarden-test
 curl -sL https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz | tar -xz
 ```
 
 **Without an LLM.** This stops after clustering and markers, and needs no key or internet:
 
 ```bash
-scpipe run filtered_gene_bc_matrices/hg19 --name pbmc3k --llm none --no-gates --until evidence --out pbmc3k_test
+cellwarden run filtered_gene_bc_matrices/hg19 --name pbmc3k --llm none --no-gates --until evidence --out pbmc3k_test
 ```
 
 **Full pipeline with the agents.** Run this on a node with internet, after connecting an AI backend
 (section 3):
 
 ```bash
-scpipe run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
+cellwarden run filtered_gene_bc_matrices/hg19 --name pbmc3k --out pbmc3k_full
 ```
 
 In a terminal you see one line per finished stage. The current stage shows with its latest step,
@@ -283,7 +283,7 @@ To check the image itself, run the built-in smoke test. It takes about 10 minute
 LLM and offline:
 
 ```bash
-srun --partition=amd --cpus-per-task=8 --mem=16G --time=01:00:00 apptainer exec --cleanenv /iridisfs/ddnb/images/scpipe_sandbox bash /opt/scpipe/containers/smoke_test.sh
+srun --partition=amd --cpus-per-task=8 --mem=16G --time=01:00:00 apptainer exec --cleanenv /iridisfs/ddnb/images/cellwarden_sandbox bash /opt/cellwarden/containers/smoke_test.sh
 ```
 
 ---
@@ -294,7 +294,7 @@ srun --partition=amd --cpus-per-task=8 --mem=16G --time=01:00:00 apptainer exec 
 after it:
 
 ```bash
-scpipe run data/donorA.h5 data/donorB.h5 data/donorC.h5ad --meta condition=control --out results/my_study
+cellwarden run data/donorA.h5 data/donorB.h5 data/donorC.h5ad --meta condition=control --out results/my_study
 ```
 
 **With sample information, use a sample sheet.** Any extra column (donor, condition, sex, age,
@@ -309,15 +309,15 @@ stim2,data/stim2.h5,stimulated,D2,M
 ```
 
 ```bash
-scpipe run samples.csv --integrate donor --out results/my_study      # Harmony batch correction on donor
+cellwarden run samples.csv --integrate donor --out results/my_study      # Harmony batch correction on donor
 ```
 
 **Full control: a config file.** Copy [`config/examples/`](../config/examples) next to your data,
 edit `config.yaml` (stages, gates, DE), `samples.csv` and `qc_policy.yaml` (QC limits), then:
 
 ```bash
-scpipe doctor --config config.yaml
-scpipe run --config config.yaml
+cellwarden doctor --config config.yaml
+cellwarden run --config config.yaml
 ```
 
 Every stage is checkpointed. Running the same command again skips finished, unchanged stages.
@@ -327,10 +327,10 @@ Changing a setting reruns only the stages that use it, and the ones after them.
 
 ## 6. Guided setup (`-i`)
 
-Add `-i` and scpipe asks a few questions first. Enter keeps the suggested value:
+Add `-i` and CellWarden asks a few questions first. Enter keeps the suggested value:
 
 ```bash
-scpipe run data/*.h5 -i --out results/my_study
+cellwarden run data/*.h5 -i --out results/my_study
 ```
 
 1. **Mode:** *Automatic* uses the defaults, with adaptive QC and the agents deciding. *Guided*
@@ -375,8 +375,8 @@ Even in `auto`, a gate stops when the reviewer agent disagrees, or when the LLM 
 **When a gate stops.** Open its report, then approve and continue:
 
 ```bash
-scpipe approve --run-dir results/my_study --stage context-review --by "Your Name"
-scpipe resume  --run-dir results/my_study
+cellwarden approve --run-dir results/my_study --stage context-review --by "Your Name"
+cellwarden resume  --run-dir results/my_study
 ```
 
 The report is at `results/my_study/gates/G2/report.html`. To change the proposal, edit a copy of
@@ -445,23 +445,23 @@ run into three steps that share the run folder; each step continues where the la
 
 ```bash
 # 1. login node: setup questions, ingest, QC and the QC review (light; needs the terminal and internet)
-scpipe run data/*.h5 -i --until qc-review --out /scratch/$USER/my_study
+cellwarden run data/*.h5 -i --until qc-review --out /scratch/$USER/my_study
 
 # 2. compute node: normalisation, batch correction, clustering, UMAP, markers, CellTypist (heavy, offline)
 sbatch --export=ALL,RUN=/scratch/$USER/my_study conf/jobs/slurm_compute_offline.sbatch
 
 # 3. login node, after the job: context and annotation reviews, DE + Open Targets, interpretation, report
-scpipe resume --run-dir /scratch/$USER/my_study
+cellwarden resume --run-dir /scratch/$USER/my_study
 ```
 
 - **Resources:** edit the `#SBATCH` lines of
   [`conf/jobs/slurm_compute_offline.sbatch`](../conf/jobs/slurm_compute_offline.sbatch). The
   defaults are 8 cores, 64 GB and 4 hours on `amd`; the job's threads follow `--cpus-per-task`.
-- **Following the job:** `squeue -u $USER`, `scpipe status --run-dir ...`, or
+- **Following the job:** `squeue -u $USER`, `cellwarden status --run-dir ...`, or
   `<run>/dashboard.html`.
 - **GPU:** in the job script, use `--partition=l4 --gres=gpu:1` and add `--nv` after
   `apptainer exec`. In a direct run, add `--nv` too.
-- **Long runs on the login node:** `scpipe run ... --detach` runs inside tmux and survives a
+- **Long runs on the login node:** `cellwarden run ... --detach` runs inside tmux and survives a
   dropped SSH connection.
 
 ---
@@ -489,13 +489,13 @@ Everything is in the run folder (`--out`):
 
 | Task | Command |
 |---|---|
-| Check the install and keys | `scpipe doctor` |
-| Run | `scpipe run <files or samples.csv> --out DIR` |
-| Run with questions | `scpipe run <files> -i --out DIR` |
+| Check the install and keys | `cellwarden doctor` |
+| Run | `cellwarden run <files or samples.csv> --out DIR` |
+| Run with questions | `cellwarden run <files> -i --out DIR` |
 | Stop after a stage | `--until clustering` (stage names below, or IDs like `S2`) |
-| Continue / rerun after a change | `scpipe resume --run-dir DIR` |
-| Progress and timings | `scpipe status --run-dir DIR` |
-| Approve a gate | `scpipe approve --run-dir DIR --stage context-review --by NAME` |
+| Continue / rerun after a change | `cellwarden resume --run-dir DIR` |
+| Progress and timings | `cellwarden status --run-dir DIR` |
+| Approve a gate | `cellwarden approve --run-dir DIR --stage context-review --by NAME` |
 | Run in the background (tmux) | add `--detach` |
 | One line per stage (for logs) | add `--progress plain` |
 
@@ -515,8 +515,8 @@ Everything is in the run folder (`--out`):
 | A gate stops with `reviewer: escalate` | The reviewer agent disagreed, or found a problem. Read `gates/G<n>/report.html`, then approve or edit. |
 | `the worker made no valid proposal: ... must be null or match EFO_/MONDO_` | The agent gave an invalid ID; the policy check refused it. Approve the gate by hand, or rerun it. |
 | `-i needs a terminal` | `-i` was used in a batch job or a pipe. Run it on the login node, then submit the heavy part (section 9). |
-| The run waits before DE (`waits for the comparisons`) | You chose "after annotation" and the run has no terminal. `scpipe resume` in a terminal asks. |
-| A stage `FAILED` | The last 20 lines of the log are printed. The full log is `logs/<stage>.log`. Fix the cause, then `scpipe resume`. |
+| The run waits before DE (`waits for the comparisons`) | You chose "after annotation" and the run has no terminal. `cellwarden resume` in a terminal asks. |
+| A stage `FAILED` | The last 20 lines of the log are printed. The full log is `logs/<stage>.log`. Fix the cause, then `cellwarden resume`. |
 | `disk quota exceeded` (home or scratch) | On Iridis the limit is the **number of files**. Keep runs, images and caches on a project folder or `/iridisfs`, not in home. |
 | DE is slow | `dge.test: wilcox`, or `dge.max_cells_per_side: 2000` (section 8). |
 

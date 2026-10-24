@@ -1,12 +1,12 @@
 #!/bin/bash
-# Heavy, offline part of an scpipe run on a compute node: normalisation, PCA, batch correction,
+# Heavy, offline part of an cellwarden run on a compute node: normalisation, PCA, batch correction,
 # clustering, UMAP (S2) and markers / CellTypist evidence (S3). Compute nodes have no internet,
 # so the review gates (LLM) and Open Targets run on the login node before and after this job.
 #
 #   sbatch --export=ALL,RUN=/path/to/run_dir conf/jobs/slurm_compute_offline.sbatch
 # Edit the partition, cores, memory and time below for your data and site (docs/GETTING_STARTED.md, 8).
-# SCPIPE_IMAGE overrides the image or sandbox path.
-#SBATCH --job-name=scpipe_compute
+# CELLWARDEN_IMAGE overrides the image or sandbox path.
+#SBATCH --job-name=cellwarden_compute
 #SBATCH --partition=amd
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
@@ -17,5 +17,5 @@ set -euo pipefail
 : "${RUN:?set RUN to the run directory: sbatch --export=ALL,RUN=/path/to/run conf/jobs/slurm_compute_offline.sbatch}"
 module load apptainer/1.4.0
 apptainer exec --cleanenv --env RAYON_NUM_THREADS=$SLURM_CPUS_PER_TASK,OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK \
-  -B /iridisfs,/scratch "${SCPIPE_IMAGE:-/iridisfs/ddnb/images/scpipe_sandbox}" \
-  scpipe resume --run-dir "$RUN" --until evidence --progress plain
+  -B /iridisfs,/scratch "${CELLWARDEN_IMAGE:-/iridisfs/ddnb/images/cellwarden_sandbox}" \
+  cellwarden resume --run-dir "$RUN" --until evidence --progress plain

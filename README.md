@@ -1,4 +1,4 @@
-# singlecell — `scpipe`, an agentic Seurat pipeline
+# singlecell — `cellwarden`, an agentic Seurat pipeline
 
 A production single-cell RNA-seq pipeline with **Seurat (R)** as the backbone, **GPU steps
 through a validated Seurat ⇄ AnnData exchange format**, and **LLM agents that advise at four
@@ -30,9 +30,9 @@ S0 ingest → S1 QC metrics · doublets · rules → G1 QC gate → S2 core (CPU
 | **Tissue and disease context** | Inferred from the evidence by an agent (organism fixed to human), with UBERON/EFO IDs resolved through Open Targets; speculative, so a human reviews it by default |
 | **DE + Open Targets** | Seurat FindMarkers (MAST by default, any FindMarkers test) or pseudobulk DESeq2 / limma-voom; comparisons on any column (condition, donor, sex, cell type, cluster); markers of each cell type when none is set, or chosen after annotation; up/down genes annotated with Open Targets drugs, diseases and tractability; an interpretation agent writes labelled hypotheses citing evidence IDs |
 | **Run dashboard** | `<run_dir>/dashboard.html`, rewritten after every stage: pipeline strip, timeline with gate waits, per-stage and per-gate cards with timings, memory, cells, QC counts, engine, clusters, decisions and links to the gate reports |
-| **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `scpipe approve` for humans; full audit log and replay |
+| **Review gates** | Each gate writes `bundle / proposal / review / decision` JSON and a report; modes `auto`, `review`, `escalate`; `cellwarden approve` for humans; full audit log and replay |
 | **Any LLM, £30 cap** | Claude Haiku 4.5 by default; OpenAI-compatible servers (vLLM, Ollama) supported; a ledger refuses any call that would cross the per-run or total budget and falls back to rules |
-| **Any HPC** | `direct`, SLURM/PBS/LSF/SGE or `split` execution; `scpipe init-site` and `doctor`; Apptainer and Docker recipes; resource caps and `nice` for shared login nodes; checkpoints and `resume` |
+| **Any HPC** | `direct`, SLURM/PBS/LSF/SGE or `split` execution; `cellwarden init-site` and `doctor`; Apptainer and Docker recipes; resource caps and `nice` for shared login nodes; checkpoints and `resume` |
 
 ## Quick start
 
@@ -42,21 +42,21 @@ The step-by-step version is [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md).
 nothing to compile, GPU optional), on Docker Hub with a mirror on GitHub:
 
 ```bash
-docker pull ad2n15/scpipe:latest                                   # workstation / cloud
-apptainer pull scpipe.sif docker://ad2n15/scpipe:latest            # HPC (mirror: docker://ghcr.io/ad2n15/scpipe:latest)
+docker pull cellwarden/cellwarden:latest                                   # workstation / cloud
+apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest            # HPC (mirror: docker://ghcr.io/cellwarden/cellwarden:latest)
 ```
 
-On Iridis X the image is also unpacked at `/iridisfs/ddnb/images/scpipe_sandbox`. The
-[releases](https://github.com/ad2n15/singlecell-container/releases) carry the `scfast` and
-`scpipe` wheels for the Python side (`pip install scfast-*.whl scpipe-*.whl`, see INSTALL.md); the R stages
-then run in the image when the site file names it (`container.image`; `scpipe init-site` prints
+On Iridis X the image is also unpacked at `/iridisfs/ddnb/images/cellwarden_sandbox`. The
+[releases](https://github.com/cellwarden/cellwarden/releases) carry the `scfast` and
+`cellwarden` wheels for the Python side (`pip install scfast-*.whl cellwarden-*.whl`, see INSTALL.md); the R stages
+then run in the image when the site file names it (`container.image`; `cellwarden init-site` prints
 the line). Building from source, other platforms and Iridis X: [`docs/INSTALL.md`](docs/INSTALL.md).
 
 **Run it** on your data files directly (formats are detected; one sample per file or folder):
 
 ```bash
 export ANTHROPIC_API_KEY=...        # or OPENAI_API_KEY or NVIDIA_API_KEY; omit for rules-only gates
-scpipe run donorA.h5 donorB.rds donorC.h5ad --meta condition=control
+cellwarden run donorA.h5 donorB.rds donorC.h5ad --meta condition=control
 ```
 
 Or copy [`config/examples/`](config/examples) next to your data, edit `config.yaml`,
@@ -64,11 +64,11 @@ Or copy [`config/examples/`](config/examples) next to your data, edit `config.ya
 
 ```bash
 export ANTHROPIC_API_KEY=...                       # or any provider; omit for rules-only gates
-scpipe doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
-scpipe run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
-scpipe status --run-dir /scratch/$USER/scpipe/my_study     # or open <run_dir>/dashboard.html
-scpipe approve --run-dir ... --stage context-review --by me   # when a gate stops for you
-scpipe resume  --run-dir ...                      # continue after a gate, disconnect or kill
+cellwarden doctor --config config.yaml                # packages, GPU, LLM key + tool-use test, budget, Open Targets
+cellwarden run    --config config.yaml --detach       # runs inside tmux; survives a dropped SSH session
+cellwarden status --run-dir /scratch/$USER/cellwarden/my_study     # or open <run_dir>/dashboard.html
+cellwarden approve --run-dir ... --stage context-review --by me   # when a gate stops for you
+cellwarden resume  --run-dir ...                      # continue after a gate, disconnect or kill
 ```
 
 Open `S5/report.html` (one self-contained page) and `S5/explorer.html` (interactive UMAP) in the
@@ -98,7 +98,7 @@ protocol, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The documents be
 ## Repository layout
 
 ```
-R/exchange/       exchange format (R)          python/scpipe/   runner, config, qc, exchange, gpu_core,
+R/exchange/       exchange format (R)          python/cellwarden/   runner, config, qc, exchange, gpu_core,
 R/stages/         S0 S1a S2 S3 S4 S5-export                     stages/, llm/, agents/, gates/, annotation/,
 config/examples/  config, samples, qc_policy                    opentargets/, report/, site.py
 conf/sites/       iridisx, workstation, docker  tests/           R + Python unit tests, fixtures, integration, benchmark
@@ -118,7 +118,7 @@ for the L4 are in [`docs/INSTALL.md`](docs/INSTALL.md) §1b and [`bench/hpc/`](b
 Not yet exercised outside the HPC: a real GPU, the live Claude API and the live Open Targets API
 (unreachable from the development workspace). Before the first real run on Iridis: confirm with
 the HPC team that multi-hour GPU work on the L4 login node is allowed (otherwise use
-`execution: split`), put `run_dir` on scratch, and run `scpipe doctor`. Development benchmarks
+`execution: split`), put `run_dir` on scratch, and run `cellwarden doctor`. Development benchmarks
 are limited to 2k and 5k cells (`tests/benchmark/`).
 
 ## Tutorial scripts

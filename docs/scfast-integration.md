@@ -5,7 +5,7 @@ replaces Scanpy, so no Seurat ⇄ AnnData exchange is needed on that path.
 
 ## Config
 
-Top-level `engine: auto | scfast | seurat` (default `auto`), validated in `python/scpipe/config.py`.
+Top-level `engine: auto | scfast | seurat` (default `auto`), validated in `python/cellwarden/config.py`.
 
 | value | meaning |
 |---|---|
@@ -38,13 +38,13 @@ S1b becomes a pass-through (`method` recorded, nothing to do) and no `.h5ad` is 
 
 ## gpu_core
 
-`python -m scpipe.gpu_core --engine {rapids,scanpy,rust}` (default unchanged). `rust` uses `scfast`
+`python -m cellwarden.gpu_core --engine {rapids,scanpy,rust}` (default unchanged). `rust` uses `scfast`
 (Python) for PCA, kNN, SNN, Leiden; UMAP still uses `umap-learn` / rapids. For the Python/exchange route only.
 
 ## Install and checks
 
 - R: `R CMD INSTALL rust/scfast-r` (needs cargo >= 1.80). Python: `maturin develop --release -m rust/scfast-py/Cargo.toml`.
-- `scpipe doctor` reports scfastR / scfast presence and version, and the engine that `auto` would choose.
+- `cellwarden doctor` reports scfastR / scfast presence and version, and the engine that `auto` would choose.
 - `containers/` recipes install the Rust toolchain and both packages.
 
 ## Tests
@@ -92,13 +92,13 @@ Constraint: the development workspace has no GPU and no CUDA toolkit. Everything
   `path: gpu_scfast`, `device: gpu`, `gpu_core_device: cuda`, `scfast_device`.
 - S1a doublets: same device choice. UMAP runs on the CPU (`RunUMAPFast`) on the scfast GPU path.
 - `gpu_core --engine rust --device gpu` uses scfast CUDA when available.
-- `scpipe doctor`: `scfastR cuda built / device visible` lines.
+- `cellwarden doctor`: `scfastR cuda built / device visible` lines.
 
 ### Phase 8: scale runs on the L4
 
 `bench/hpc/`: `make_scale_inputs.py` (50k, 100k, 200k, 500k synthetic, refused outside HPC unless
-`SCPIPE_ALLOW_LARGE=1`), `run_scale.sh` (Seurat CPU, scfast CPU, scfast CUDA, rapids exchange; each
-S0–S2 with `scpipe run --until S2`), `slurm_scale.sh`, `summarise.py` → `bench/results/scale/`
+`CELLWARDEN_ALLOW_LARGE=1`), `run_scale.sh` (Seurat CPU, scfast CPU, scfast CUDA, rapids exchange; each
+S0–S2 with `cellwarden run --until S2`), `slurm_scale.sh`, `summarise.py` → `bench/results/scale/`
 table (time, peak RSS, peak GPU memory, ARI vs Seurat) and the adoption verdict per size against
 the rule in RUST_ENGINE.md §8.2. Not run here.
 

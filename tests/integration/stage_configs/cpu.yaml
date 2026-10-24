@@ -4,7 +4,7 @@
 # resolve against this directory. gpu.yaml must stay identical apart from
 # `device` and `project`, so the two runs can be compared.
 project: stage_test_cpu
-run_dir: /tmp/scpipe-stage-test/cpu      # always overridden with --run-dir by the harness
+run_dir: /tmp/cellwarden-stage-test/cpu      # always overridden with --run-dir by the harness
 seed: 42
 samples: samples.csv                     # sample paths in it are relative to this folder
 qc_policy: qc_policy.yaml

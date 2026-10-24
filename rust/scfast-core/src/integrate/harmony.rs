@@ -1,7 +1,7 @@
 //! Harmony (Korsunsky et al. 2019, Nature Methods 16:1289), replacing
 //! `harmony::RunHarmony()` (R) and `harmonypy.run_harmony()`.
 //!
-//! Follows the C++ core of the R package as installed in the scpipe image (harmony 2.0.5,
+//! Follows the C++ core of the R package as installed in the cellwarden image (harmony 2.0.5,
 //! src/harmony.cpp; the 1.2 line differs in the points listed under *Versions*), with the
 //! defaults of `RunHarmony.default` and `harmony_options()`.
 //!

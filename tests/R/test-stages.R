@@ -4,8 +4,8 @@
 #   Rscript -e 'testthat::test_file("tests/R/test-stages.R")'   # from repo root
 #
 # Inputs are built on the fly in temp dirs from tests/fixtures/pbmc_like. The
-# GPU-path tests run scpipe.gpu_core on the CPU (SCPIPE_ALLOW_CPU_AS_GPU=1)
-# and force the plan with SCPIPE_PLAN_JSON; they are skipped when python3 with
+# GPU-path tests run cellwarden.gpu_core on the CPU (CELLWARDEN_ALLOW_CPU_AS_GPU=1)
+# and force the plan with CELLWARDEN_PLAN_JSON; they are skipped when python3 with
 # anndata + scanpy is not available.
 
 suppressPackageStartupMessages({
@@ -29,7 +29,7 @@ scp_source_stages(REPO)
 options(Seurat.object.assay.version = "v5")
 FIX <- file.path(REPO, "tests", "fixtures", "pbmc_like")
 
-PY <- Sys.getenv("SCPIPE_PYTHON", "python3")
+PY <- Sys.getenv("CELLWARDEN_PYTHON", "python3")
 has_py_core <- local({
   ok <- tryCatch(system2(PY, c("-c", shQuote("import anndata, scanpy, igraph, leidenalg")),
                          stdout = FALSE, stderr = FALSE) == 0, error = function(e) FALSE)
@@ -197,7 +197,7 @@ POLICY <- list(
     list(name = "Erythrocyte", markers = list("HBB", "HBA1", "HBA2"), min_fraction = 0.05)))
 
 new_run <- function(samples, ..., tag = "run") {
-  rd <- file.path(tempdir(), sprintf("scpipe-%s-%s", tag, basename(tempfile(""))))
+  rd <- file.path(tempdir(), sprintf("cellwarden-%s-%s", tag, basename(tempfile(""))))
   dir.create(file.path(rd, "config"), recursive = TRUE)
   sf <- file.path(rd, "config", "samples.csv")
   write.csv(samples, sf, row.names = FALSE, quote = TRUE)
@@ -610,15 +610,15 @@ test_that("elbow rule picks PCs within 10..50", {
 
 test_that("plan hook is validated", {
   cfg <- list(device = "auto", normalization = "lognorm", resources = list(gpu_mem_cap_gb = 20))
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"gpu","plan":"managed_memory","reason":"r"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"gpu","plan":"managed_memory","reason":"r"}')
   p <- s2_choose_plan(cfg, REPO, 100, 50)
   expect_identical(p[c("device", "plan", "reason")], list(device = "gpu", plan = "managed_memory", reason = "r"))
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"gpu","plan":"cpu"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"gpu","plan":"cpu"}')
   expect_error(s2_choose_plan(cfg, REPO, 100, 50), "cannot have plan cpu")
-  withr::local_envvar(SCPIPE_PLAN_JSON = "not json")
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = "not json")
   expect_error(s2_choose_plan(cfg, REPO, 100, 50), "not valid JSON")
   f <- tempfile(fileext = ".json"); writeLines('{"device":"cpu","plan":"cpu","reason":"file"}', f)
-  withr::local_envvar(SCPIPE_PLAN_JSON = f)
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = f)
   expect_identical(s2_choose_plan(cfg, REPO, 100, 50)$reason, "file")
 })
 
@@ -658,7 +658,7 @@ test_that("S2 CPU path recovers the planted cell types (purity >= 0.9)", {
   set.seed(5)
   dec <- sample(c("keep", "review", "exclude"), 500, TRUE, prob = c(0.9, 0.05, 0.05))
   write_decisions(rd, dec)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"), simplifyVector = FALSE)
@@ -767,7 +767,7 @@ test_that("S2 scfast path recovers the planted cell types and writes no exchange
   set.seed(5)
   dec <- sample(c("keep", "review", "exclude"), 500, TRUE, prob = c(0.9, 0.05, 0.05))
   write_decisions(rd, dec)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"test: cpu"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"), simplifyVector = FALSE)
@@ -805,7 +805,7 @@ test_that("S2 scfast path honours a fixed pcs and review_action exclude", {
   stage(rd, run_s0)
   dec <- rep(c("keep", "review", "keep", "exclude"), length.out = 500)
   write_decisions(rd, dec)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
@@ -820,13 +820,13 @@ test_that("S2 engine auto uses scfast on a CPU plan and seurat on a GPU plan", {
   skip_if_not_installed("scfastR")
   rd <- new_run(TWO, tag = "s2fastauto", engine = "auto")
   stage(rd, run_s0); write_decisions(rd)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   stage(rd, run_s2)
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
   expect_identical(sm$path, "cpu_scfast"); expect_identical(sm$engine, "scfast")
   rd2 <- new_run(TWO, tag = "s2fastgpu", engine = "scfast", device = "gpu")
   stage(rd2, run_s0); write_decisions(rd2)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"gpu","plan":"in_memory","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"gpu","plan":"in_memory","reason":"t"}')
   expect_error(stage(rd2, run_s2), "no GPU backend")
 })
 
@@ -835,7 +835,7 @@ test_that("S2 scfast path with harmony: R harmony runs in process, else falls ba
   rd <- new_run(TWO, tag = "s2fastharm", engine = "scfast", device = "auto",
                 integration = list(method = "harmony", batch_key = "sample_id"))
   stage(rd, run_s0); write_decisions(rd)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   if (scp_has_pkg("harmony")) {
     stage(rd, run_s2)
     sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
@@ -855,7 +855,7 @@ test_that("S2 review_action exclude drops review cells; fixed pcs is honoured", 
   stage(rd, run_s0)
   dec <- rep(c("keep", "review", "keep", "exclude"), length.out = 500)
   write_decisions(rd, dec)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"))
@@ -870,7 +870,7 @@ test_that("S2 refuses mismatched QC decisions", {
   stage(rd, run_s0)
   d <- write_decisions(rd)
   scp_write_tsv_gz(d[-1, ], file.path(rd, "S1", "qc_decisions.tsv.gz"))
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   expect_error(stage(rd, run_s2), "have no QC decision")
   d$cell_id[1] <- "nope"
   scp_write_tsv_gz(d, file.path(rd, "S1", "qc_decisions.tsv.gz"))
@@ -881,7 +881,7 @@ test_that("harmony without the R package: clear error on device cpu", {
   skip_if(scp_has_pkg("harmony"), "R harmony is installed")
   rd <- new_run(TWO, tag = "s2harm", integration = list(method = "harmony", batch_key = "sample_id"))
   stage(rd, run_s0); write_decisions(rd)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"t"}')
   expect_error(stage(rd, run_s2), "R 'harmony' package is not installed")
 })
 
@@ -893,8 +893,8 @@ test_that("S2 GPU path (exchange, CPU fallback) gives reductions, graphs, cluste
   # identical decisions to the CPU run
   dir.create(file.path(rd, "S1"), showWarnings = FALSE)
   file.copy(file.path(CPU_RUN$rd, "S1", "qc_decisions.tsv.gz"), file.path(rd, "S1", "qc_decisions.tsv.gz"), overwrite = TRUE)
-  withr::local_envvar(SCPIPE_ALLOW_CPU_AS_GPU = "1",
-                      SCPIPE_PLAN_JSON = '{"device":"gpu","plan":"in_memory","reason":"test: forced gpu"}')
+  withr::local_envvar(CELLWARDEN_ALLOW_CPU_AS_GPU = "1",
+                      CELLWARDEN_PLAN_JSON = '{"device":"gpu","plan":"in_memory","reason":"test: forced gpu"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"), simplifyVector = FALSE)
@@ -908,7 +908,7 @@ test_that("S2 GPU path (exchange, CPU fallback) gives reductions, graphs, cluste
   expect_true(all(c("write_slim", "gpu_core", "merge") %in% names(sm$timings_s)))
   expect_true(file.exists(file.path(rd, "S2", "exchange", "slim.h5ad")))
   expect_length(validate_exchange(file.path(rd, "S2", "exchange", "results.h5ad")), 0)
-  expect_length(obj@misc$scpipe_exchange_merges, 1)
+  expect_length(obj@misc$cellwarden_exchange_merges, 1)
   expect_identical(colnames(obj), names(CPU_RUN$cl))
   a <- ari(CPU_RUN$cl, as.character(obj$seurat_clusters))
   expect_gte(a, 0.7)
@@ -920,13 +920,13 @@ test_that("harmony on device auto without R harmony runs through the exchange pa
   skip_if_not(has_harmonypy, "harmonypy not available")
   rd <- new_run(TWO, tag = "s2hpy", device = "auto", integration = list(method = "harmony", batch_key = "sample_id"))
   stage(rd, run_s0); write_decisions(rd)
-  withr::local_envvar(SCPIPE_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"no gpu"}')
+  withr::local_envvar(CELLWARDEN_PLAN_JSON = '{"device":"cpu","plan":"cpu","reason":"no gpu"}')
   stage(rd, run_s2)
   obj <- scp_load_object(file.path(rd, "S2"))
   sm <- jsonlite::fromJSON(file.path(rd, "S2", "summary.json"), simplifyVector = FALSE)
   expect_identical(sm$path, "exchange_cpu")
   expect_true("harmony" %in% Reductions(obj))
-  expect_match(sm$integration$implementation, "harmony via scpipe.gpu_core")
+  expect_match(sm$integration$implementation, "harmony via cellwarden.gpu_core")
   expect_gte(purity(obj$seurat_clusters, truth_for(obj)), 0.9)
 })
 
@@ -974,9 +974,9 @@ test_that("object save/load: rds always; qs2 when installed, else falls back to 
   expect_identical(colnames(scp_load_object(d)), colnames(o))
 })
 
-test_that("thread setup reads SCPIPE_THREADS", {
-  withr::local_envvar(SCPIPE_THREADS = "3")
+test_that("thread setup reads CELLWARDEN_THREADS", {
+  withr::local_envvar(CELLWARDEN_THREADS = "3")
   expect_identical(scp_setup_threads(list(resources = list(threads = 8))), 3L)
-  withr::local_envvar(SCPIPE_THREADS = "")
+  withr::local_envvar(CELLWARDEN_THREADS = "")
   expect_identical(scp_setup_threads(list(resources = list(threads = 2))), 2L)
 })

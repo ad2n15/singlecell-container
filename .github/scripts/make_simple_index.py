@@ -1,7 +1,7 @@
 """Write a PEP 503 simple index of every wheel attached to this repository's GitHub Releases.
 
 Published on GitHub Pages by .github/workflows/release.yml, so users install with
-    pip install scpipe --extra-index-url https://<owner>.github.io/<repo>/simple
+    pip install cellwarden --extra-index-url https://<owner>.github.io/<repo>/simple
 Reads the releases with the gh CLI (GH_TOKEN and GITHUB_REPOSITORY set by Actions).
 """
 

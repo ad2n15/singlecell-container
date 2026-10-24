@@ -1,9 +1,9 @@
 name: release
 
 # Prebuilt artifacts for the one-line installs (docs/GETTING_STARTED.md):
-#   docker pull ad2n15/scpipe:latest
-#   apptainer pull scpipe.sif docker://ad2n15/scpipe:latest       # or docker://ghcr.io/ad2n15/scpipe:latest
-# A tag v* builds the scfast wheels, the scpipe wheel and the container, smoke-tests them, pushes
+#   docker pull cellwarden/cellwarden:latest
+#   apptainer pull cellwarden.sif docker://cellwarden/cellwarden:latest       # or docker://ghcr.io/cellwarden/cellwarden:latest
+# A tag v* builds the scfast wheels, the cellwarden wheel and the container, smoke-tests them, pushes
 # the image to Docker Hub (secrets DOCKERHUB_USERNAME, DOCKERHUB_TOKEN) and GHCR, and creates the
 # GitHub Release with the wheels attached. workflow_dispatch builds and tests everything without
 # publishing.
@@ -52,7 +52,7 @@ jobs:
           name: wheel-scfast-${{ matrix.target }}
           path: rust/scfast-py/dist/*.whl
 
-  scpipe-wheel:
+  cellwarden-wheel:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -62,12 +62,12 @@ jobs:
       - run: python -m pip install build && python -m build --wheel --outdir dist python
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-scpipe
+          name: wheel-cellwarden
           path: dist/*.whl
 
   pip-smoke:
     # The pip one-liner against the freshly built wheels (no index needed yet).
-    needs: [scfast-wheels, scpipe-wheel]
+    needs: [scfast-wheels, cellwarden-wheel]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -76,9 +76,9 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: |
-          python -m pip install --find-links wheels "scpipe[harmony,report,llm]"
-          scpipe --help
-          python -c "import scfast, scpipe; print(scfast.device_info())"
+          python -m pip install --find-links wheels "cellwarden[harmony,report,llm]"
+          cellwarden --help
+          python -c "import scfast, cellwarden; print(scfast.device_info())"
 
   container:
     # Builds its own scfast (builder stage of containers/Dockerfile), so it runs alongside the wheels.
@@ -126,8 +126,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKERHUB_USERNAME && format('docker.io/{0}/scpipe', env.DOCKERHUB_USERNAME) || '' }}
-            ghcr.io/${{ github.repository_owner }}/scpipe
+            ${{ env.DOCKERHUB_USERNAME && format('docker.io/{0}/cellwarden', env.DOCKERHUB_USERNAME) || '' }}
+            ghcr.io/${{ github.repository_owner }}/cellwarden
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -140,15 +140,15 @@ jobs:
           context: .
           file: containers/Dockerfile
           load: true
-          tags: scpipe:test
+          tags: cellwarden:test
           cache-from: type=gha
           # mode=min: the layers of a ~10 GB image do not fit the 10 GB Actions cache
           cache-to: type=gha,mode=min
       - name: Smoke test (CPU runner)
         run: |
-          docker run --rm scpipe:test doctor
-          docker run --rm --entrypoint python scpipe:test -c "import scfast; i = scfast.device_info(); assert i['cuda_built'], i"
-          docker run --rm --entrypoint bash scpipe:test /opt/scpipe/containers/smoke_test.sh
+          docker run --rm cellwarden:test doctor
+          docker run --rm --entrypoint python cellwarden:test -c "import scfast; i = scfast.device_info(); assert i['cuda_built'], i"
+          docker run --rm --entrypoint bash cellwarden:test /opt/cellwarden/containers/smoke_test.sh
       - name: Log in to Docker Hub
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
@@ -166,7 +166,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           for t in $(echo "${{ steps.meta.outputs.tags }}"); do
-            docker tag scpipe:test "$t" && docker push "$t"
+            docker tag cellwarden:test "$t" && docker push "$t"
           done
 
   publish:
@@ -191,15 +191,15 @@ jobs:
           ## Install
 
           \`\`\`bash
-          docker pull ${hub}/scpipe:${v}
-          apptainer pull scpipe.sif docker://${hub}/scpipe:${v}
+          docker pull ${hub}/cellwarden:${v}
+          apptainer pull cellwarden.sif docker://${hub}/cellwarden:${v}
           \`\`\`
 
-          Mirror (for sites that hit Docker Hub's pull limit): \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/scpipe:${v}\`.
-          Then: \`docker run --rm ${hub}/scpipe:${v} doctor\` or \`apptainer exec scpipe.sif scpipe doctor\`.
+          Mirror (for sites that hit Docker Hub's pull limit): \`ghcr.io/${GITHUB_REPOSITORY_OWNER}/cellwarden:${v}\`.
+          Then: \`docker run --rm ${hub}/cellwarden:${v} doctor\` or \`apptainer exec cellwarden.sif cellwarden doctor\`.
           Getting started: docs/GETTING_STARTED.md. The wheels below are \`scfast\` (Linux x86_64 with
-          CUDA/cuGraph loaded at run time, Linux and macOS arm64) and \`scpipe\`; the R stages need the image.
+          CUDA/cuGraph loaded at run time, Linux and macOS arm64) and \`cellwarden\`; the R stages need the image.
           EOF
           gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 \
-            || gh release create "${GITHUB_REF_NAME}" --title "scpipe ${v}" --notes-file notes.md --generate-notes
+            || gh release create "${GITHUB_REF_NAME}" --title "cellwarden ${v}" --notes-file notes.md --generate-notes
           gh release upload "${GITHUB_REF_NAME}" wheels/*.whl --clobber

@@ -1,6 +1,6 @@
-"""Tests for portability (docs/agents-spec.md section 8, DESIGN 7): scpipe.site, the site files,
+"""Tests for portability (docs/agents-spec.md section 8, DESIGN 7): cellwarden.site, the site files,
 scheduler templates and submission with a fake sbatch/bsub on PATH, split mode, init-site and the
-doctor extras. All offline (SCPIPE_DOCTOR_OFFLINE=1)."""
+doctor extras. All offline (CELLWARDEN_DOCTOR_OFFLINE=1)."""
 
 import io
 import json
@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scpipe import config as C
-from scpipe import runner as R
-from scpipe import site as S
+from cellwarden import config as C
+from cellwarden import runner as R
+from cellwarden import site as S
 
 from test_runner import dummy_stages, project  # noqa: F401  (fixture)
 
@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    monkeypatch.setenv("SCPIPE_DOCTOR_OFFLINE", "1")
+    monkeypatch.setenv("CELLWARDEN_DOCTOR_OFFLINE", "1")
 
 
 def fake_scheduler(tmp_path, monkeypatch, name="sbatch", reply="Submitted batch job 4242", stdin=False):
@@ -60,7 +60,7 @@ def resolved(proj):
 def test_detect_scheduler(tmp_path, monkeypatch):
     no_scheduler(tmp_path, monkeypatch)
     monkeypatch.undo()
-    monkeypatch.setenv("SCPIPE_DOCTOR_OFFLINE", "1")
+    monkeypatch.setenv("CELLWARDEN_DOCTOR_OFFLINE", "1")
     bindir = tmp_path / "nobin"
     monkeypatch.setenv("PATH", str(bindir))
     assert S.detect_scheduler() is None
@@ -88,7 +88,7 @@ def test_draft_site_workstation_and_hpc():
     hpc = S.draft_site(det, "mycluster")
     assert hpc["site"] == "mycluster" and hpc["execution"] == "direct"
     assert hpc["resources"]["threads"] == 8 and hpc["resources"]["nice"] == 10 and hpc["resources"]["max_memory_gb"] == 64
-    assert hpc["scratch"] == "/scratch/$USER/scpipe" and hpc["container"] == {"runtime": "apptainer", "image": None, "options": ["--nv"]}
+    assert hpc["scratch"] == "/scratch/$USER/cellwarden" and hpc["container"] == {"runtime": "apptainer", "image": None, "options": ["--nv"]}
     # a scheduler but no route to the LLM endpoint from this node: suggest split
     det["internet"] = {"checked": True, "llm": {"ok": False}}
     assert S.draft_site(det)["execution"] == "split"
@@ -168,9 +168,9 @@ def test_render_batch_script(project, sched, marker):
     txt = S.render_batch_script(cfg, rd, sched, until="S2", no_gates=True)
     assert txt.startswith("#!/usr/bin/env bash") and marker in txt
     assert "gpu" in txt and "acc1" in txt and "--qos=low" in txt
-    assert f"-m scpipe resume --run-dir {rd} --execution direct --until S2 --no-gates" in txt
+    assert f"-m cellwarden resume --run-dir {rd} --execution direct --until S2 --no-gates" in txt
     assert "set -euo pipefail" in txt and f"export PYTHONPATH={REPO / 'python'}" in txt
-    assert "SCPIPE_REPO_ROOT=" in txt and "ANTHROPIC_API_KEY" not in txt
+    assert "CELLWARDEN_REPO_ROOT=" in txt and "ANTHROPIC_API_KEY" not in txt
     if sched == "lsf":
         assert "#BSUB -W 26:30" in txt
     elif sched == "slurm":
@@ -187,35 +187,35 @@ def test_container_prefix(project):
     cfg = resolved(project)
     rd = Path(cfg["run_dir"])
     assert S.container_prefix(cfg, rd) == ""
-    cfg["container"] = {"runtime": "apptainer", "image": "/img/scpipe.sif", "options": ["--nv"]}
+    cfg["container"] = {"runtime": "apptainer", "image": "/img/cellwarden.sif", "options": ["--nv"]}
     pre = S.container_prefix(cfg, rd)
-    assert pre.startswith("apptainer exec --nv --env SCPIPE_IN_CONTAINER=1 --bind") and pre.endswith("/img/scpipe.sif")
+    assert pre.startswith("apptainer exec --nv --env CELLWARDEN_IN_CONTAINER=1 --bind") and pre.endswith("/img/cellwarden.sif")
     assert str(rd) in pre
     assert "apptainer exec --nv" in S.render_batch_script(cfg, rd, "slurm")
-    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/scpipe:1", "options": ["--gpus", "all"]}
-    assert S.container_prefix(cfg, rd).startswith("docker run --rm --gpus all -e SCPIPE_IN_CONTAINER=1 -v")
+    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/cellwarden:1", "options": ["--gpus", "all"]}
+    assert S.container_prefix(cfg, rd).startswith("docker run --rm --gpus all -e CELLWARDEN_IN_CONTAINER=1 -v")
 
 
 def test_stage_container_argv(project, monkeypatch):
-    monkeypatch.delenv("SCPIPE_IN_CONTAINER", raising=False)
+    monkeypatch.delenv("CELLWARDEN_IN_CONTAINER", raising=False)
     cfg = resolved(project)
     rd = Path(cfg["run_dir"])
     assert S.stage_container_argv(cfg, rd) == []
-    cfg["container"] = {"runtime": "apptainer", "image": "/img/scpipe.sif", "options": ["--nv"]}
+    cfg["container"] = {"runtime": "apptainer", "image": "/img/cellwarden.sif", "options": ["--nv"]}
     argv = S.stage_container_argv(cfg, rd)
-    assert argv[:3] == ["apptainer", "exec", "--nv"] and argv[-1] == "/img/scpipe.sif"
+    assert argv[:3] == ["apptainer", "exec", "--nv"] and argv[-1] == "/img/cellwarden.sif"
     binds = [argv[i + 1] for i, a in enumerate(argv) if a == "--bind"]
     assert str(rd.resolve()) in binds and str(Path(cfg["config_dir"]).resolve()) in binds
-    assert "SCPIPE_REPO_ROOT=/opt/scpipe" in argv[argv.index("--env") + 1]
+    assert "CELLWARDEN_REPO_ROOT=/opt/cellwarden" in argv[argv.index("--env") + 1]
     # a stage command then uses the image's R scripts and python
     ctx = R.RunContext(run_dir=rd, cfg=cfg, repo_root=Path("/host/repo"))
     r_cmd = R._r_stage("S0")(ctx)
-    assert r_cmd[: len(argv)] == argv and r_cmd[len(argv):len(argv) + 2] == ["Rscript", "/opt/scpipe/R/stages/run_stage.R"]
-    assert R._py_stage("scpipe.stages.s3_celltypist")(ctx)[len(argv)] == "python"
-    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/scpipe:1", "options": ["--gpus", "all"]}
+    assert r_cmd[: len(argv)] == argv and r_cmd[len(argv):len(argv) + 2] == ["Rscript", "/opt/cellwarden/R/stages/run_stage.R"]
+    assert R._py_stage("cellwarden.stages.s3_celltypist")(ctx)[len(argv)] == "python"
+    cfg["container"] = {"runtime": "docker", "image": "ghcr.io/x/cellwarden:1", "options": ["--gpus", "all"]}
     d = S.stage_container_argv(cfg, rd)
-    assert d[:3] == ["docker", "run", "--rm"] and d[-3:] == ["--entrypoint", "", "ghcr.io/x/scpipe:1"]
-    monkeypatch.setenv("SCPIPE_IN_CONTAINER", "1")  # inside the image: no second wrap
+    assert d[:3] == ["docker", "run", "--rm"] and d[-3:] == ["--entrypoint", "", "ghcr.io/x/cellwarden:1"]
+    monkeypatch.setenv("CELLWARDEN_IN_CONTAINER", "1")  # inside the image: no second wrap
     assert S.stage_container_argv(cfg, rd) == []
 
 
@@ -231,7 +231,7 @@ def test_submit_slurm_with_fake_sbatch(project, tmp_path, monkeypatch):
     assert script.stat().st_mode & stat.S_IXUSR
     last = json.loads((rd / "submit" / "last_job.json").read_text())
     assert last["job_id"] == "4242" and last["scheduler"] == "slurm" and last["mode"] == "slurm"
-    assert "submitted slurm job 4242" in out.getvalue() and "scpipe status --run-dir" in out.getvalue()
+    assert "submitted slurm job 4242" in out.getvalue() and "cellwarden status --run-dir" in out.getvalue()
 
 
 def test_submit_lsf_reads_script_from_stdin(project, tmp_path, monkeypatch):
@@ -239,7 +239,7 @@ def test_submit_lsf_reads_script_from_stdin(project, tmp_path, monkeypatch):
     cfg = resolved(project)
     rec = S.submit(cfg, Path(cfg["run_dir"]), "lsf", out=io.StringIO())
     assert rec["job_id"] == "77"
-    assert "#BSUB -J scpipe-t" in log.read_text()                      # script content arrived on stdin
+    assert "#BSUB -J cellwarden-t" in log.read_text()                      # script content arrived on stdin
 
 
 def test_submit_without_command_or_with_failure(project, tmp_path, monkeypatch):
@@ -270,7 +270,7 @@ def test_run_with_execution_slurm_submits_instead_of_running(project, tmp_path, 
     assert not any(v.get("status") == "done" for v in st.get("stages", {}).values())
     # the job's command line resumes the same run directory in direct mode
     txt = (rd / "submit" / "slurm.sh").read_text()
-    assert f"scpipe resume --run-dir {rd} --execution direct" in txt
+    assert f"cellwarden resume --run-dir {rd} --execution direct" in txt
     # ... which is what the job would do: run it here as the job would
     out = io.StringIO()
     code = R.main(["resume", "--run-dir", str(rd), "--execution", "direct"], stages=dummy_stages(), out=out)
@@ -308,7 +308,7 @@ def test_split_mode_submits_heavy_stages_with_no_gates(project, tmp_path, monkey
     assert "--until S2 --no-gates" in txt                              # last heavy stage of the dummy registry
     last = json.loads((rd / "submit" / "last_job.json").read_text())
     assert last["mode"] == "split" and last["until"] == "S2" and last["no_gates"] is True
-    assert "then, on this node" in out.getvalue() and "scpipe resume --run-dir" in out.getvalue()
+    assert "then, on this node" in out.getvalue() and "cellwarden resume --run-dir" in out.getvalue()
     assert len(log.read_text().splitlines()) == 1
     # the heavy stages before S5, skipping gates
     assert S.heavy_until(["S0", "S1a", "S1b", "S1c", "G1", "S2", "S3", "G2", "G3", "S4", "G4", "S5"]) == "S4"
@@ -372,7 +372,7 @@ def test_doctor_checks_llm_mock_and_tool_use(tmp_path, monkeypatch):
     no_scheduler(tmp_path, monkeypatch)
     ch = by_name(S.doctor_checks({"llm": {"default": {"provider": "mock"}}}))
     assert ch[("llm", "provider")]["ok"] and "mock" in ch[("llm", "provider")]["detail"]
-    # with a key, the tool-use test runs through scpipe.llm.get_provider when it exists;
+    # with a key, the tool-use test runs through cellwarden.llm.get_provider when it exists;
     # a provider that fails must give a failed, non-required check rather than an exception
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     monkeypatch.setattr(S, "_llm_provider_module", lambda: None)
@@ -530,7 +530,7 @@ def test_scfastr_cuda_parses_scfast_info(tmp_path, monkeypatch):
         rs.write_text(f"#!/bin/sh\nprintf '%s' '{out}'\nexit {code}\n")
         rs.chmod(0o755)
 
-    monkeypatch.setenv("SCPIPE_RSCRIPT", str(rs))
+    monkeypatch.setenv("CELLWARDEN_RSCRIPT", str(rs))
     fake("TRUE TRUE")
     assert S.scfastr_cuda() == {"built": True, "available": True}
     fake("TRUE FALSE")
@@ -543,7 +543,7 @@ def test_scfastr_cuda_parses_scfast_info(tmp_path, monkeypatch):
     assert S.scfastr_cuda() == {"built": False, "available": False}
     fake("TRUE TRUE", code=1)
     assert S.scfastr_cuda() == {"built": False, "available": False}
-    monkeypatch.setenv("SCPIPE_RSCRIPT", str(bindir / "missing"))
+    monkeypatch.setenv("CELLWARDEN_RSCRIPT", str(bindir / "missing"))
     assert S.scfastr_cuda() == {"built": False, "available": False}
 
 

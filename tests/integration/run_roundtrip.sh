@@ -21,7 +21,7 @@ SEED=0
 if [[ $# -ge 1 ]]; then
   WORK="$1"; mkdir -p "$WORK"; WORK="$(cd "$WORK" && pwd)"
 else
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/scpipe-roundtrip.XXXXXX")"
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/cellwarden-roundtrip.XXXXXX")"
   CLEANUP_ON_PASS=1
 fi
 export PYTHONPATH="$REPO/python${PYTHONPATH:+:$PYTHONPATH}"
@@ -30,7 +30,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-$WORK/.numba}"
 LOG="$WORK/logs"; mkdir -p "$LOG"
 
-echo "scpipe exchange round-trip"
+echo "cellwarden exchange round-trip"
 echo "  repo:    $REPO"
 echo "  workdir: $WORK"
 echo
@@ -59,7 +59,7 @@ run_step() {   # run_step ID "description" DEPENDS_ON(space-separated or "") -- 
 }
 
 gpu_core() {
-  "$PYTHON" -m scpipe.gpu_core --in "$WORK/r_slim.h5ad" --out "$WORK/results.h5ad" \
+  "$PYTHON" -m cellwarden.gpu_core --in "$WORK/r_slim.h5ad" --out "$WORK/results.h5ad" \
     --n-pcs "$N_PCS" --n-neighbors "$N_NEIGHBORS" --resolution "$RESOLUTION" \
     --batch-key sample --seed "$SEED" --device cpu > "$WORK/gpu_core.stdout"
   local rc=$?

@@ -1,16 +1,16 @@
 #!/bin/bash
-# Update an unpacked scpipe image (Apptainer sandbox) in place from this checkout: scpipe's code
-# under /opt/scpipe, the scpipe Python package, and scfast + scfastR rebuilt from rust/.
+# Update an unpacked cellwarden image (Apptainer sandbox) in place from this checkout: cellwarden's code
+# under /opt/cellwarden, the cellwarden Python package, and scfast + scfastR rebuilt from rust/.
 # R packages listed in containers/install_r_packages.R that the sandbox lacks are installed too.
-# Minutes instead of the ~1 h full build; rebuild the image (scpipe-build.def) instead when the
+# Minutes instead of the ~1 h full build; rebuild the image (cellwarden-build.def) instead when the
 # base image, the Python dependency list or system libraries change.
 #
-#   containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox             # code + Rust
-#   containers/update_sandbox.sh /iridisfs/ddnb/images/scpipe_sandbox --code-only # no Rust rebuild
+#   containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox             # code + Rust
+#   containers/update_sandbox.sh /iridisfs/ddnb/images/cellwarden_sandbox --code-only # no Rust rebuild
 #
 # Make the sandbox from a built image on a local disk, then copy it with rsync -a: on GPFS
 # (Iridis /iridisfs) files created by extraction inherit an ACL without execute permission.
-#   apptainer build --sandbox /tmp/$USER-sbx scpipe.sif && rsync -a /tmp/$USER-sbx/ <sandbox>/
+#   apptainer build --sandbox /tmp/$USER-sbx cellwarden.sif && rsync -a /tmp/$USER-sbx/ <sandbox>/
 #
 # Needs internet (Rust toolchain and crates), so run it on a login node. Build work happens in
 # /tmp inside the read-only sandbox; results are copied in from outside with rsync -a, which
@@ -21,13 +21,13 @@ usage() { echo "usage: $0 <sandbox dir> [--code-only]" >&2; exit 2; }
 [ $# -ge 1 ] || usage
 SBX=$(realpath "$1"); CODE_ONLY=0
 [ "${2:-}" = "--code-only" ] && CODE_ONLY=1
-[ -d "$SBX/opt/scpipe" ] || { echo "$SBX is not an scpipe sandbox (no /opt/scpipe)" >&2; exit 1; }
+[ -d "$SBX/opt/cellwarden" ] || { echo "$SBX is not an cellwarden sandbox (no /opt/cellwarden)" >&2; exit 1; }
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 command -v apptainer >/dev/null || module load apptainer 2>/dev/null || true
 
 SP=$(ls -d "$SBX"/opt/conda/lib/python3.*/site-packages | head -1)
 RLIB=$SBX/usr/local/lib/R/site-library
-W=$(mktemp -d "/tmp/$USER-scpipe-update.XXXXXX")
+W=$(mktemp -d "/tmp/$USER-cellwarden-update.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 
 echo "== source $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')$(git -C "$REPO" diff --quiet 2>/dev/null || echo ' (with uncommitted changes)')"
@@ -53,14 +53,14 @@ if [ "$CODE_ONLY" = 0 ]; then
 fi
 /opt/conda/bin/pip install --quiet --no-cache-dir --no-deps --target /work/py /work/python $(ls /work/wheels/scfast-*.whl 2>/dev/null)
 # R packages the sandbox lacks (e.g. one newly added to install_r_packages.R), into /work/rlib-extra
-PATH=$SYS_PATH SCPIPE_R_LIB=/work/rlib-extra Rscript /work/install_r_packages.R
+PATH=$SYS_PATH CELLWARDEN_R_LIB=/work/rlib-extra Rscript /work/install_r_packages.R
 '
 
 echo "== install into $SBX"
 for d in python R conf config docs tests containers; do
-  rsync -a --delete --exclude __pycache__ "$REPO/$d/" "$SBX/opt/scpipe/$d/"
+  rsync -a --delete --exclude __pycache__ "$REPO/$d/" "$SBX/opt/cellwarden/$d/"
 done
-pkgs=(scpipe); [ $CODE_ONLY = 0 ] && pkgs+=(scfast)
+pkgs=(cellwarden); [ $CODE_ONLY = 0 ] && pkgs+=(scfast)
 for p in "${pkgs[@]}"; do
   rm -rf "$SP/$p" "$SP"/"$p"-*.dist-info
   rsync -a "$W/py/$p" "$W"/py/"$p"-*.dist-info "$SP/"
@@ -71,13 +71,13 @@ for d in "$W"/rlib-extra/*/; do
   echo "   R package $(basename "$d")"
   rsync -a --delete "$d" "$RLIB/$(basename "$d")/"
 done
-chmod -R a+rX "$SBX/opt/scpipe"
+chmod -R a+rX "$SBX/opt/cellwarden"
 { echo "updated $(date -u +%FT%TZ) from $(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)"
-  git -C "$REPO" diff --quiet 2>/dev/null || echo "with uncommitted changes"; } > "$SBX/opt/scpipe/UPDATED"
+  git -C "$REPO" diff --quiet 2>/dev/null || echo "with uncommitted changes"; } > "$SBX/opt/cellwarden/UPDATED"
 
 echo "== check"
 apptainer exec --cleanenv "$SBX" bash -c '
-scpipe --help >/dev/null
-python -c "import scpipe, scfast; print(\"scfast\", scfast.__file__)"
+cellwarden --help >/dev/null
+python -c "import cellwarden, scfast; print(\"scfast\", scfast.__file__)"
 Rscript -e "stopifnot(requireNamespace(\"scfastR\", quietly = TRUE)); cat(\"scfastR\", format(packageVersion(\"scfastR\")), \"\n\")"'
-cat "$SBX/opt/scpipe/UPDATED"
+cat "$SBX/opt/cellwarden/UPDATED"

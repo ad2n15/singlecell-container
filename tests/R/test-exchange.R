@@ -35,7 +35,7 @@ skip_if_no_python <- function() skip_if_not(has_python, "python3 with anndata no
 # fails the test on a non-zero exit (stderr is shown).
 run_py <- function(code, args = character()) {
   f <- tempfile(fileext = ".py")
-  # -I (isolated) ignores PYTHONPATH, so put python/ (for scpipe) on sys.path here.
+  # -I (isolated) ignores PYTHONPATH, so put python/ (for cellwarden) on sys.path here.
   writeLines(c(sprintf("import sys; sys.path.insert(0, %s)", deparse(file.path(REPO, "python"))), code), f)
   out <- tempfile(); err <- tempfile()
   st <- system2(PY, c("-I", "-W", "error::UserWarning", shQuote(f), shQuote(args)),
@@ -140,14 +140,14 @@ test_that("checksum of a tiny matrix agrees with an independent numpy+hashlib co
   expect_identical(sc_counts_checksum(m), digest::digest(raw_ref, algo = "sha256", serialize = FALSE))
 })
 
-test_that("checksum matches scpipe (Python) on the synthetic counts and the shared fixture", {
+test_that("checksum matches cellwarden (Python) on the synthetic counts and the shared fixture", {
   skip_if_no_python()
-  skip_if_not(file.exists(file.path(REPO, "python", "scpipe", "exchange.py")), "python/scpipe not present")
+  skip_if_not(file.exists(file.path(REPO, "python", "cellwarden", "exchange.py")), "python/cellwarden not present")
   f <- tempfile(fileext = ".mtx")
   Matrix::writeMM(COUNTS, f)
   py <- run_py(c(
     "import sys, scipy.io, scipy.sparse as sp",
-    "from scpipe.exchange import counts_checksum",
+    "from cellwarden.exchange import counts_checksum",
     "m = sp.csr_matrix(scipy.io.mmread(sys.argv[1]).T)",
     "print(counts_checksum(m))"), f)
   expect_identical(sc_counts_checksum(COUNTS), py[[length(py)]])
@@ -193,7 +193,7 @@ test_that("full write -> anndata reads with no warnings -> R round trip", {
     "  obsp=sorted(a.obsp.keys()), counts_dtype=str(a.layers['counts'].dtype),",
     "  ex={k: (v if isinstance(v, (str, dict)) else int(v)) for k, v in ex.items()})",
     "try:",
-    "    from scpipe.exchange import validate_exchange, counts_checksum",
+    "    from cellwarden.exchange import validate_exchange, counts_checksum",
     "    out['py_problems'] = validate_exchange(sys.argv[1])",
     "    out['py_checksum'] = counts_checksum(a.layers['counts'])",
     "except ImportError:",
@@ -351,7 +351,7 @@ test_that("validate_exchange catches tampered files", {
 })
 
 # ================================================================ merge
-# Results file built in Python with plain anndata (not via scpipe), per spec.
+# Results file built in Python with plain anndata (not via cellwarden), per spec.
 make_results <- function(obj, path, source_checksum, drop = integer(), extra = character()) {
   bc <- tempfile(); writeLines(c(colnames(obj)[setdiff(seq_len(ncol(obj)), drop)], extra), bc)
   run_py(c(

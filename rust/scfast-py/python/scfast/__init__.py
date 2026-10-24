@@ -878,7 +878,7 @@ def harmony(
     """Harmony batch integration of an embedding, replacing ``harmony::RunHarmony`` /
     ``harmonypy.run_harmony``.
 
-    The algorithm of the harmony R package 2.x (as in the scpipe image, 2.0.5): soft k-means
+    The algorithm of the harmony R package 2.x (as in the cellwarden image, 2.0.5): soft k-means
     with a batch-diversity penalty on the cosine-normalised cells, then a per-cluster ridge
     regression of the batch effect (the intercept is not penalised), repeated until the
     objective settles. Defaults are those of ``RunHarmony()`` and ``harmony_options()``.

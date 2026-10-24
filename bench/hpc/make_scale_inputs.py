@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic pipeline inputs for the scale runs on the HPC (docs/scfast-integration.md, Phase 8).
 
-One dataset per size, each a complete `scpipe` input: a 10x ``.h5`` with the counts, a
+One dataset per size, each a complete `cellwarden` input: a 10x ``.h5`` with the counts, a
 ``samples.csv`` sheet for it and the planted cell type of every cell (for ARI in
 ``summarise.py``). The counts come from ``bench/synth.py`` (negative binomial around per-type
 profiles with marker genes, ``MT-`` genes for QC realism), so QC keeps nearly every cell and
@@ -17,7 +17,7 @@ writes, per size N::
     <out>/manifest.json      sizes, parameters, non-zeros and SHA-256 of every file
 
 These are HPC-sized. Outside the HPC a size above ``MAX_LOCAL_CELLS`` (5,000) is refused
-unless ``SCPIPE_ALLOW_LARGE=1`` is set, so a stray run on a laptop or in CI cannot fill the
+unless ``CELLWARDEN_ALLOW_LARGE=1`` is set, so a stray run on a laptop or in CI cannot fill the
 disk; ``--sizes 2000`` and the like always work (that is what the unit test uses).
 """
 
@@ -40,7 +40,7 @@ SAMPLE_ID = "syn"
 
 
 class RefusedError(RuntimeError):
-    """A size above MAX_LOCAL_CELLS without SCPIPE_ALLOW_LARGE=1."""
+    """A size above MAX_LOCAL_CELLS without CELLWARDEN_ALLOW_LARGE=1."""
 
 
 def parse_sizes(text: str) -> list[int]:
@@ -59,13 +59,13 @@ def parse_sizes(text: str) -> list[int]:
 
 
 def check_allowed(sizes: list[int], env: dict | None = None) -> None:
-    """Refuse HPC-sized inputs unless SCPIPE_ALLOW_LARGE=1 (RefusedError)."""
+    """Refuse HPC-sized inputs unless CELLWARDEN_ALLOW_LARGE=1 (RefusedError)."""
     env = os.environ if env is None else env
     big = [n for n in sizes if n > MAX_LOCAL_CELLS]
-    if big and env.get("SCPIPE_ALLOW_LARGE") != "1":
+    if big and env.get("CELLWARDEN_ALLOW_LARGE") != "1":
         raise RefusedError(
             f"sizes {big} exceed {MAX_LOCAL_CELLS:,} cells; these inputs are meant for the HPC "
-            "(docs/scfast-integration.md Phase 8). Set SCPIPE_ALLOW_LARGE=1 to generate them here."
+            "(docs/scfast-integration.md Phase 8). Set CELLWARDEN_ALLOW_LARGE=1 to generate them here."
         )
 
 

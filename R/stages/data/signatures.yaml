@@ -5,7 +5,7 @@
 #   category:  state   (programme / activity: interferon, proliferation, ...)
 #              lineage (cell-type set; used as a consensus vote)
 #   cell_type: for lineage sets, the label_fine in
-#              python/scpipe/annotation/markers_human.yaml it votes for
+#              python/cellwarden/annotation/markers_human.yaml it votes for
 # Override the file with `signatures: path/to/file.yaml` in config.yaml.
 sets:
   # ---- states -------------------------------------------------------------

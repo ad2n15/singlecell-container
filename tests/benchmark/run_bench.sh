@@ -7,7 +7,7 @@
 #   SIZES="2000" tests/benchmark/run_bench.sh
 #
 # On a machine without a GPU the "gpu" row uses gpu_core's CPU fallback
-# (SCPIPE_ALLOW_CPU_AS_GPU=1), so it measures the exchange-format overhead,
+# (CELLWARDEN_ALLOW_CPU_AS_GPU=1), so it measures the exchange-format overhead,
 # not GPU speed. Results go to tests/benchmark/results/bench_<date>.tsv.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -23,8 +23,8 @@ for n in $SIZES; do
   k=$((n / 1000)); d=tests/benchmark/inputs/bench_${k}k
   for dev in cpu gpu; do
     rm -rf "$d/run_$dev"
-    if [[ $dev == gpu ]] && ! command -v nvidia-smi >/dev/null 2>&1; then export SCPIPE_ALLOW_CPU_AS_GPU=1; fi
-    nice -n 10 $PY -m scpipe run --config "$d/config_$dev.yaml" --until S2 > "$d/run_$dev.log" 2>&1 \
+    if [[ $dev == gpu ]] && ! command -v nvidia-smi >/dev/null 2>&1; then export CELLWARDEN_ALLOW_CPU_AS_GPU=1; fi
+    nice -n 10 $PY -m cellwarden run --config "$d/config_$dev.yaml" --until S2 > "$d/run_$dev.log" 2>&1 \
       || { echo "run failed: $d/run_$dev.log"; tail -20 "$d/run_$dev.log"; exit 1; }
     $PY - "$d/run_$dev" "$n" "$dev" "$TSV" <<'EOF'
 import json, sys

@@ -174,9 +174,9 @@ apptainer_bench_resolve_gpu_sif() {
     "/scratch/${USER}/rsc_cu12.sif" \
     "/scratch/${USER}/rapids-singlecell-cu12.sif" \
     "/iridisfs/ddnb/images/rsc_cu12.sif" \
-    "/scratch/${USER}/scpipe/scpipe.sif" \
-    "/scratch/${USER}/scpipe.sif" \
-    "/iridisfs/ddnb/images/scpipe.sif"; do
+    "/scratch/${USER}/cellwarden/cellwarden.sif" \
+    "/scratch/${USER}/cellwarden.sif" \
+    "/iridisfs/ddnb/images/cellwarden.sif"; do
     [[ -n "${cand}" && ( -f "${cand}" || -d "${cand}" ) ]] && { printf '%s\n' "${cand}"; return 0; }
   done
   return 1

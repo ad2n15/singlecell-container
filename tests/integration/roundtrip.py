@@ -8,7 +8,7 @@ failed assertion and prints what went wrong.
     roundtrip.py check-results  WORKDIR   # step 3: check gpu_core output, make refuse cases
     roundtrip.py write-python   WORKDIR   # step 5: Python writes a full file from the fixture
 
-Needs PYTHONPATH to include <repo>/python (for scpipe).
+Needs PYTHONPATH to include <repo>/python (for cellwarden).
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def sha_names(names) -> str:
 
 
 def indep_checksum(m) -> str:
-    """Spec section 6, independent of scpipe (cells x genes)."""
+    """Spec section 6, independent of cellwarden (cells x genes)."""
     m = sp.csr_matrix(m, copy=True)
     m.sort_indices()
     h = hashlib.sha256()
@@ -165,7 +165,7 @@ def check_obs(adata, bcs, cells, path: Path) -> None:
 
 # --------------------------------------------------------------------- subcommands
 def check_r_files(work: Path) -> None:
-    from scpipe import exchange as ex
+    from cellwarden import exchange as ex
     feats, bcs, cells = fixture_tables()
     hvgs = [ln.rstrip("\n") for ln in open(work / "hvgs.txt")]
     seurat_names = [s.replace("_", "-") for s in feats["symbol"]]
@@ -177,9 +177,9 @@ def check_r_files(work: Path) -> None:
         adata = read_h5ad_strict(path)
         try:
             ad2 = ex.read_exchange(path)
-            check(ad2.shape == adata.shape, f"{path.name}: scpipe.read_exchange (validate=True) ok, same shape")
+            check(ad2.shape == adata.shape, f"{path.name}: cellwarden.read_exchange (validate=True) ok, same shape")
         except Exception as e:  # noqa: BLE001
-            check(False, f"{path.name}: scpipe.read_exchange raised {type(e).__name__}: {e}")
+            check(False, f"{path.name}: cellwarden.read_exchange raised {type(e).__name__}: {e}")
         probs = ex.validate_exchange(path)
         check(not probs, f"{path.name}: python validate_exchange is empty {probs or ''}")
 
@@ -211,7 +211,7 @@ def check_r_files(work: Path) -> None:
             if "counts" in adata.layers:
                 c = adata.layers["counts"]
                 check(ex.counts_checksum(c) == EXPECTED["counts_checksum"],
-                      f"{path.name}: scpipe counts_checksum(layers['counts']) == expected")
+                      f"{path.name}: cellwarden counts_checksum(layers['counts']) == expected")
                 check(indep_checksum(c) == EXPECTED["counts_checksum"],
                       f"{path.name}: independent checksum of layers['counts'] == expected")
                 # X is LogNormalize(scale 1e4) of counts
@@ -238,11 +238,11 @@ def check_r_files(work: Path) -> None:
 
 def _rewrite_results(src: Path, dst: Path, *, drop: int | None = None,
                      shuffle_seed: int | None = None, extra_barcode: str | None = None) -> None:
-    """Rewrite a results file via scpipe.write_exchange, dropping cell `drop`
+    """Rewrite a results file via cellwarden.write_exchange, dropping cell `drop`
     and/or permuting the cell order and/or adding a cell the object does not
     have (always keeping the original source_counts_checksum)."""
     import anndata as ad
-    from scpipe import exchange as ex
+    from cellwarden import exchange as ex
     a = ad.read_h5ad(src)
     meta = dict(a.uns["exchange"])
     idx = np.arange(a.n_obs)
@@ -265,7 +265,7 @@ def _rewrite_results(src: Path, dst: Path, *, drop: int | None = None,
 
 
 def check_results(work: Path) -> None:
-    from scpipe import exchange as ex
+    from cellwarden import exchange as ex
     feats, bcs, cells = fixture_tables()
     path = work / "results.h5ad"
     print(f"[{path.name}]")
@@ -281,9 +281,9 @@ def check_results(work: Path) -> None:
     check(not probs, f"{path.name}: python validate_exchange is empty {probs or ''}")
     try:
         ex.read_exchange(path)
-        check(True, f"{path.name}: scpipe.read_exchange ok")
+        check(True, f"{path.name}: cellwarden.read_exchange ok")
     except Exception as e:  # noqa: BLE001
-        check(False, f"{path.name}: scpipe.read_exchange raised {type(e).__name__}: {e}")
+        check(False, f"{path.name}: cellwarden.read_exchange raised {type(e).__name__}: {e}")
     n = EXPECTED["n_cells"]
     check(a.shape == (n, 0), f"{path.name}: X shape is cells x 0 (got {a.shape})")
     check(list(a.obs_names) == bcs, f"{path.name}: obs_names == fixture barcodes")
@@ -374,14 +374,14 @@ def check_results(work: Path) -> None:
 def write_python(work: Path) -> None:
     import anndata as ad
     import scanpy as sc
-    from scpipe import exchange as ex
+    from cellwarden import exchange as ex
     feats, bcs, cells = fixture_tables()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)   # scipy spmatrix default change
         mm = scipy.io.mmread(FIXTURE / "matrix.mtx")
     counts = sp.csr_matrix(mm.T, dtype=np.int32)
     check(indep_checksum(counts) == EXPECTED["counts_checksum"], "fixture counts checksum (independent) == expected")
-    check(ex.counts_checksum(counts) == EXPECTED["counts_checksum"], "scpipe counts_checksum(fixture) == expected")
+    check(ex.counts_checksum(counts) == EXPECTED["counts_checksum"], "cellwarden counts_checksum(fixture) == expected")
 
     obs = pd.DataFrame(index=pd.Index(bcs))
     for col in ("sample", "cell_type"):

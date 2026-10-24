@@ -1,4 +1,4 @@
-# scpipe exchange format — specification v1.0
+# CellWarden exchange format — specification v1.0
 
 _Revision 1.0.3: validators also check the `created_utc` format and reject non-integer `n_cells`/`n_genes`; readers reject out-of-range categorical codes; R declares UTF-8 strings instead of re-encoding them (safe under a C locale). Revision 1.0.2: settles explicit zeros, encodings of scalars and missing values, results-mode `var`, timestamp format, merge into reordered objects, and `|` in gene names. No breaking changes._
 
@@ -103,7 +103,7 @@ The shape is written as `(n_cells, n_genes)`. Name hashes (`cells_sha256`, `gene
 3. The results' cells must be a subset of, or equal to, the Seurat object's cells, matched **by barcode, never by position**. Barcodes in the results that aren't in the object are always an error.
    - Missing cells are an error unless the caller passes `allow_subset = TRUE`. Those cells then get a missing cluster label and are left out of the new reductions and graphs, with a warning.
    - The checksum depends on cell order. If the object holds the same cells in a different order, the checksum is compared after reordering the object to the results' order. A true mismatch is always refused, whatever flags are passed.
-4. Embeddings are added as Seurat `DimReduc` objects (keys `PC_`, `harmony_`, `UMAP_`; any other `X_<name>` gets `<NAME>_`), graphs as `Graph` objects, and the cluster column as a factor in `meta.data` under its own name and as `seurat_clusters`, and as `Idents()`. Each merge is recorded in `obj@misc$scpipe_exchange_merges`.
+4. Embeddings are added as Seurat `DimReduc` objects (keys `PC_`, `harmony_`, `UMAP_`; any other `X_<name>` gets `<NAME>_`), graphs as `Graph` objects, and the cluster column as a factor in `meta.data` under its own name and as `seurat_clusters`, and as `Idents()`. Each merge is recorded in `obj@misc$cellwarden_exchange_merges`.
 5. Existing slots with the same names are replaced only when the caller passes `overwrite = TRUE`.
 
 ## 8. Validation

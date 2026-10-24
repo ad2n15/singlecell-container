@@ -1,4 +1,4 @@
-# scpipe architecture (as built)
+# CellWarden architecture (as built)
 
 How the pipeline is put together, as implemented on `main`. [`DESIGN.md`](DESIGN.md) is the
 design that preceded it and keeps the reasoning and open questions; this page describes what
@@ -60,14 +60,14 @@ flowchart LR
 
 ### The runner
 
-`scpipe` (Python, `python/scpipe/runner.py`) runs the stages in order, each as a separate
+`cellwarden` (Python, `python/cellwarden/runner.py`) runs the stages in order, each as a separate
 process under `nice` with thread, memory and GPU-memory caps passed as environment variables.
 `state.json` records, per stage, status, timings, peak RSS and a **fingerprint** of the config
-keys and input files that stage uses, so `scpipe run` again skips finished stages and a config
+keys and input files that stage uses, so `cellwarden run` again skips finished stages and a config
 change reruns only the stages that depend on it. A gate that needs a human exits with code 3;
-`scpipe approve` records the decision and `scpipe resume` carries on. `--detach` runs inside
+`cellwarden approve` records the decision and `cellwarden resume` carries on. `--detach` runs inside
 tmux (or nohup) so a dropped SSH session doesn't kill the run. After every state change the runner
-rewrites `dashboard.html` (`python/scpipe/dashboard.py`): a self-contained page with the pipeline
+rewrites `dashboard.html` (`python/cellwarden/dashboard.py`): a self-contained page with the pipeline
 strip, a timeline and a card per stage and gate, built only from `state.json`, the stage summaries
 and the gate files.
 
@@ -108,7 +108,7 @@ sequenceDiagram
   X->>R: merge_exchange_results: match by barcode, refuse on checksum mismatch
 ```
 
-The exchange format (`R/exchange/exchange.R`, `python/scpipe/exchange.py`) is a plain AnnData
+The exchange format (`R/exchange/exchange.R`, `python/cellwarden/exchange.py`) is a plain AnnData
 file with a provenance block. Its **counts checksum** (SHA-256 over the canonical CSR arrays)
 is computed identically in both languages, so results can never be merged into the wrong
 object; cells are matched by barcode, never by position. Three modes: `full` (whole object),
@@ -126,7 +126,7 @@ flowchart TD
   PC -- ok --> RV[reviewer agent<br/>never sees worker rationale]
   RV -- request_changes --> W
   RV -- approve & mode auto --> D[decision.json → run continues]
-  RV -- escalate, or mode review --> H[pending.json + report.html<br/>exit 3: scpipe approve]
+  RV -- escalate, or mode review --> H[pending.json + report.html<br/>exit 3: cellwarden approve]
   H --> D
   PC -- no LLM / budget exhausted --> F[baseline, fallback=true] --> H
 ```
@@ -144,7 +144,7 @@ Each gate directory holds `bundle.json`, `proposal.json`, `review.json`, `decisi
 - Sample metadata reaches a prompt only inside `<data>` tags that the system prompt declares
   are never instructions.
 
-**LLM adapter** (`python/scpipe/llm/`): one `Provider` interface with `anthropic`,
+**LLM adapter** (`python/cellwarden/llm/`): one `Provider` interface with `anthropic`,
 `openai_compatible` (vLLM, Ollama, …), `mock` (tests) and stubs for `bedrock`/`vertex`. The
 default model is Claude Haiku 4.5, overridable per role. The **budget ledger** prices every call
 and refuses any call that would cross the per-run (£5) or total (£30) limit; the gate then falls
@@ -157,13 +157,13 @@ from an environment variable named in the config and never written anywhere.
 - **One config file** (`config.yaml`) plus `samples.csv` and `qc_policy.yaml`; every setting
   validated up front, all problems reported at once.
 - **Site file** (`conf/sites/<site>.yaml`) supplies `execution`, `resources`, `container` and
-  scratch defaults; `scpipe init-site` drafts one by detecting the scheduler, GPU, container
-  runtime and internet access. `scpipe doctor` checks packages, GPU, write access, the LLM key
+  scratch defaults; `cellwarden init-site` drafts one by detecting the scheduler, GPU, container
+  runtime and internet access. `cellwarden doctor` checks packages, GPU, write access, the LLM key
   and a one-token tool-use call, the budget left, and Open Targets.
 - **Execution modes:** `direct` (the node you are on, the Iridis X login-node case),
   `slurm`/`pbs`/`lsf`/`sge` (one job from `conf/templates/`), `split` (heavy stages as an
   offline job, gates and Open Targets on the internet node).
-- **Containers:** `containers/scpipe.def` (Apptainer) and `Dockerfile`, same software list.
+- **Containers:** `containers/cellwarden.def` (Apptainer) and `Dockerfile`, same software list.
 - **Shared-node etiquette:** thread/RAM/GPU caps, `nice`, checkpoints, `--detach`.
 
 ## 6. Data leaving the cluster
@@ -171,7 +171,7 @@ from an environment variable named in the config and never written anywhere.
 Agents receive only aggregated tables: per-cluster marker lists, signature scores, composition,
 DGE summaries and the values of sample-sheet metadata columns. No counts, no per-cell rows, no
 barcodes. Open Targets receives gene symbols. The budget ledger and agent log stay in the run
-directory and `~/.scpipe/`.
+directory and `~/.cellwarden/`.
 
 ## 7. Repository layout
 
@@ -180,7 +180,7 @@ directory and `~/.scpipe/`.
 ```
 R/exchange/         exchange format (R side)
 R/stages/           S0, S1a, S2, S3, S4, S5 export; gene lists and signature sets
-python/scpipe/      runner, config, resources, qc rules engine, exchange + gpu_core,
+python/cellwarden/      runner, config, resources, qc rules engine, exchange + gpu_core,
                     stages/ (S1b, S1c, S3, S4, S5), llm/, agents/, gates/, annotation/,
                     opentargets/, report/, site.py
 config/examples/    config.yaml, samples.csv, qc_policy.yaml
@@ -205,5 +205,5 @@ doublets and platelets (`tests/README.md`):
 
 Not yet exercised anywhere but the HPC: a real GPU (including the scfast CUDA/cuGraph backend,
 whose parity tests wait for the L4: `bench/hpc/`), the live Claude API, the live Open Targets
-API (both were unreachable from the development workspace). `scpipe doctor` on the login node
+API (both were unreachable from the development workspace). `cellwarden doctor` on the login node
 checks all three before a run.

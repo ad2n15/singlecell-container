@@ -8,12 +8,12 @@
 # ENGINES, THREADS (default: the job's CPUs), OUT (default bench/results/scale), TIMEOUT
 # (seconds per run), MODULES (space-separated `module load` names), CONDA_ENV / VENV (one
 # of them, activated before the runs). The inputs must already exist (make_scale_inputs.py,
-# run with SCPIPE_ALLOW_LARGE=1 on the HPC); generating 500k cells takes a few minutes and
+# run with CELLWARDEN_ALLOW_LARGE=1 on the HPC); generating 500k cells takes a few minutes and
 # is better done once on a login node or in its own job.
 #
 # Resource lines are for one L4 (24 GB) with 8 cores and 64 GB host memory; adjust the
 # partition/account to the site. Everything runs from the repository root.
-#SBATCH --job-name=scpipe-scale
+#SBATCH --job-name=cellwarden-scale
 #SBATCH --partition=l4
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8

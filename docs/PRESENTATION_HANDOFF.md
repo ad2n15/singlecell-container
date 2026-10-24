@@ -116,8 +116,8 @@ has one number. Spend the most time on slides 4 and 5.
 
 ### Slide 7. Where it already fits (2:20–2:35)
 
-- On screen: the run dashboard of the full pipeline, `~/scpipe/hash60k/run/dashboard.html`
-  (screenshot it), and the cell-type report `~/scpipe/hash60k/run/S5/report.html`.
+- On screen: the run dashboard of the full pipeline, `~/cellwarden/hash60k/run/dashboard.html`
+  (screenshot it), and the cell-type report `~/cellwarden/hash60k/run/S5/report.html`.
 - Speaker: "scfast sits inside our Seurat pipeline. The pipeline also does QC, cell-type
   annotation, Open Targets lookups, and review gates with an AI agent."
 - Facts from that run (60k PBMC cells, Seurat engine): 12 stages done; the QC gate kept 42,344
@@ -164,8 +164,8 @@ and scfast about 2 s. Speed the Seurat half up in the edit and show a running cl
 | UMAP, 500k brain cells | `bench/results/demo_data/brain500k/umap.png` | Slide 5 backup, slide 9 |
 | UMAP, 100k brain cells | `bench/results/demo_data/brain100k/umap.png` | Slide 5 |
 | UMAP, PBMC 68k | `bench/results/demo_data/pbmc68k/umap.png` | Any slide that needs a familiar immune map |
-| Pipeline dashboard | `~/scpipe/hash60k/run/dashboard.html` | Slide 7 |
-| Pipeline report and explorer | `~/scpipe/hash60k/run/S5/report.html`, `S5/explorer.html` | Slide 7 |
+| Pipeline dashboard | `~/cellwarden/hash60k/run/dashboard.html` | Slide 7 |
+| Pipeline report and explorer | `~/cellwarden/hash60k/run/S5/report.html`, `S5/explorer.html` | Slide 7 |
 | Full results and caveats | `bench/results/FINAL.md` | Q&A |
 | Published reference timings | `bench/results/REFERENCES.md` | Q&A |
 
