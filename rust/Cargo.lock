@@ -1625,7 +1625,7 @@ dependencies = [
 
 [[package]]
 name = "scfast-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "faer",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "scfast-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libdeflater",
  "numpy",

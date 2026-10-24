@@ -1,7 +1,7 @@
 Package: scfastR
 Type: Package
 Title: Fast PCA, Neighbours and Leiden Clustering for Seurat via the 'scfast' Rust Engine
-Version: 0.1.0
+Version: 0.2.0
 Authors@R: person("Mukesh", role = c("aut", "cre"), email = "mukeshkbj@gmail.com")
 Description: Drop-in replacements for the numerical core of the 'Seurat' workflow,
     backed by the 'scfast' Rust library (docs/RUST_ENGINE.md in the singlecell

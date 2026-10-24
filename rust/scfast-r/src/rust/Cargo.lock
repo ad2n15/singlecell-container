@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "scfast-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cudarc",
  "faer",
@@ -1570,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "scfastr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "extendr-api",
  "rayon",

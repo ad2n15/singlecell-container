@@ -47,7 +47,7 @@ This page covers the everyday path: install, check, run, find the results. The d
 ## 2. Install
 
 The image is published on Docker Hub as **`ad2n15/scpipe`**, with a mirror on GitHub as
-`ghcr.io/ad2n15/scpipe`. Use a version tag (`0.1.0`) for reproducible work, or `latest`.
+`ghcr.io/ad2n15/scpipe`. Use a version tag (`0.2.0`) for reproducible work, or `latest`.
 [Releases](https://github.com/ad2n15/singlecell-container/releases) lists the versions.
 
 ### Option A: Docker (workstation, cloud VM, macOS / Windows)
@@ -55,14 +55,14 @@ The image is published on Docker Hub as **`ad2n15/scpipe`**, with a mirror on Gi
 You need Docker. For a GPU you also need the NVIDIA Container Toolkit (Linux).
 
 ```bash
-docker pull ad2n15/scpipe:0.1.0
+docker pull ad2n15/scpipe:0.2.0
 ```
 
 **Make a short command.** The image starts `scpipe` in `/work`, so mount your project folder
 there:
 
 ```bash
-alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" ad2n15/scpipe:0.1.0'
+alias scpipe-docker='docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/home/scpipe -v "$HOME/.scpipe:/home/scpipe/.scpipe" -v "$PWD:/work" ad2n15/scpipe:0.2.0'
 mkdir -p ~/.scpipe
 scpipe-docker doctor
 ```
@@ -97,7 +97,7 @@ WSL2 ([INSTALL.md](INSTALL.md)).
 ### Option B: Apptainer / Singularity (HPC)
 
 ```bash
-apptainer pull scpipe.sif docker://ad2n15/scpipe:0.1.0      # or docker://ghcr.io/ad2n15/scpipe:0.1.0
+apptainer pull scpipe.sif docker://ad2n15/scpipe:0.2.0      # or docker://ghcr.io/ad2n15/scpipe:0.2.0
 apptainer exec --cleanenv scpipe.sif scpipe doctor
 ```
 
@@ -109,7 +109,7 @@ apptainer exec --cleanenv scpipe.sif scpipe doctor
   into RAM on every start. Unpack it once into a sandbox folder, then use that folder in place of
   `scpipe.sif`:
   ```bash
-  apptainer build --sandbox /tmp/$USER-sbx docker://ad2n15/scpipe:0.1.0
+  apptainer build --sandbox /tmp/$USER-sbx docker://ad2n15/scpipe:0.2.0
   rsync -a /tmp/$USER-sbx/ /path/to/shared/scpipe_sandbox/ && rm -rf /tmp/$USER-sbx
   ```
   The `rsync -a` step matters on GPFS: unpacking straight onto it loses the execute permissions.

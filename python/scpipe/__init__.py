@@ -17,4 +17,4 @@ __all__ = [
     "validate_exchange",
     "write_exchange",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

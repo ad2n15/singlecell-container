@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scpipe"
-version = "0.1.0"
+version = "0.2.0"
 description = "scpipe: runner, QC engine, exchange format and GPU core step for the singlecell pipeline"
 requires-python = ">=3.10"
 dependencies = [
